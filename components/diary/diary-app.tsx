@@ -13,7 +13,7 @@ type DiaryAppProps = {
 
 type DiaryView = "home" | "entries" | "notewall";
 
-const NOTE_WALL_UI_ENABLED = false;
+const NOTE_WALL_UI_ENABLED = true;
 
 export function DiaryApp({ onClose, onNotice }: DiaryAppProps) {
   const [view, setView] = useState<DiaryView>("home");
