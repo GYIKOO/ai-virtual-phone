@@ -1,0 +1,36 @@
+# 本地私有改动清单（LOCAL_CHANGES）
+
+> 这个仓库是 `xiaolongbao0709/ai-virtual-phone` 的下游 fork，**单向同步上游、不回流贡献**。
+> 本文件记录我们对「原作者已有文件」的所有改动，方便日后 `git merge upstream/main` 时快速分辨
+> 「哪些是我们的私货 / 哪些是上游的新逻辑」，减少解冲突时的心智负担。
+>
+> 规则：
+> - **新功能优先写成全新文件 / 新目录**（新 App 走 `lib/custom-app-*` SDK；新玩法复制
+>   `lib/xxx-engine.ts + xxx-storage.ts + components/xxx/` 一套）。全新文件不会和上游冲突，**不必记在这里**。
+> - **只有当你不得不改原作者的现有文件时**，才在下面登记一条。改动越小越集中越好。
+
+## 同步上游的操作
+
+```bash
+git fetch upstream
+git checkout main
+git merge upstream/main      # 冲突时对照本文件判断
+npm install && npm run build # 验证能构建
+git push origin main         # 推到我们自己的仓库（触发部署重建）
+```
+
+- `git push upstream` 已被禁用（push 地址设为无效值），不会误把私货推回原作者。
+- 上游有 `main`（正常设备版）和 `test`（兼容设备版）两个分支，我们跟 `upstream/main`。
+
+---
+
+## 改动登记
+
+### 1. 打开便签墙入口
+- **文件**：`components/diary/diary-app.tsx`
+- **改动**：`const NOTE_WALL_UI_ENABLED = false;` → `true`
+- **原因**：原作者在公开版里默认关掉了便签墙 UI 入口。我们自建了 Supabase 便签墙表
+  （`docs/notewall-supabase.sql`）并配好了 `NEXT_PUBLIC_SUPABASE_URL/ANON`，需要把入口露出来。
+- **提交**：`a98fe2d feat: enable note wall entry in diary app`
+- **合并提示**：若上游改动了这一行（例如自己也把它设为 `true`，或重构了这段开关逻辑），
+  以「便签墙入口保持开启」为准即可。
