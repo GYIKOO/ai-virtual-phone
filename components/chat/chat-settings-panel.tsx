@@ -7,6 +7,7 @@ import {
     ChatSession,
     clearChatSessionMessages,
     clearChatSessionToolHistory,
+    deleteChatSession,
     saveChatSessions,
     loadChatSessions,
     loadChatMessages,
@@ -187,6 +188,7 @@ export function ChatSettingsPanel({
     const [showConfirmClearOffline, setShowConfirmClearOffline] = useState(false);
     const [showConfirmClearTools, setShowConfirmClearTools] = useState(false);
     const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+    const [showConfirmDeleteGroup, setShowConfirmDeleteGroup] = useState(false);
     const [editingAlias, setEditingAlias] = useState(false);
     const [editingBilingualPrompt, setEditingBilingualPrompt] = useState(false);
     const [editingCSS, setEditingCSS] = useState(false);
@@ -412,6 +414,15 @@ export function ChatSettingsPanel({
         clearChatOfflineTurns(session.id);
         onOfflineHistoryCleared?.();
         setShowConfirmClearOffline(false);
+    };
+
+    const handleDeleteGroup = () => {
+        // deleteChatSession 只清主消息表；线下轮次存在独立 KV 里，不一并清会留下孤儿数据
+        clearChatOfflineTurns(session.id);
+        deleteChatSession(session.id);
+        setShowConfirmDeleteGroup(false);
+        // 父组件把它接到 onBack()：删除后本会话已不存在，必须离开聊天页
+        onDeleteFriend?.();
     };
 
     const handleClearToolHistory = () => {
@@ -893,6 +904,15 @@ export function ChatSettingsPanel({
                         <div className="menu-label-group"><span className="menu-label menu-label-danger">删除好友</span></div>
                     </button>
                     )}
+                    {session.isGroup && (
+                    <button className="menu-item" onClick={() => setShowConfirmDeleteGroup(true)}>
+                        <ChatInfoIcon icon={Users} color="var(--c-danger)" />
+                        <div className="menu-label-group">
+                            <span className="menu-label menu-label-danger">删除群聊</span>
+                            <span className="menu-desc">连同线上/线下聊天记录一并删除</span>
+                        </div>
+                    </button>
+                    )}
                     <button className="menu-item" onClick={() => setShowConfirmClearTools(true)}>
                         <ChatInfoIcon icon={Code} color="var(--c-danger)" />
                         <div className="menu-label-group">
@@ -1163,6 +1183,20 @@ export function ChatSettingsPanel({
                         onDeleteFriend?.();
                     }}
                     onCancel={() => setShowConfirmDelete(false)}
+                />
+            )}
+
+            {/* Modal: Confirm Delete Group */}
+            {showConfirmDeleteGroup && (
+                <ConfirmDialog
+                    title="确定要删除该群聊吗？"
+                    message="群聊会从列表中移除，线上与线下聊天记录一并删除。删除后无法恢复。是否继续？"
+                    icon={AlertCircle}
+                    variant="danger"
+                    confirmLabel="删除"
+                    cancelLabel="取消"
+                    onConfirm={handleDeleteGroup}
+                    onCancel={() => setShowConfirmDeleteGroup(false)}
                 />
             )}
 

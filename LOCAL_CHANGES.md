@@ -74,6 +74,23 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
   升级后线上保持开启、线下变为关闭——正是本次想要的手感。
 - **合并提示**：若上游自己也做了同样拆分，优先采用上游字段名并删掉本条。
 
+### 4. 群聊增加「删除群聊」入口
+- **文件**：`components/chat/chat-settings-panel.tsx`
+- **改动**：在「危险操作」分组内为群聊新增「删除群聊」按钮 + 二次确认弹窗，
+  调用 `deleteChatSession(session.id)`，并先调 `clearChatOfflineTurns(session.id)`。
+- **原因**：私聊有「删除好友」，群聊却**没有任何删除入口**——`deleteChatSession` 在
+  `lib/chat-storage.ts:871` 早已实现且逻辑完整，但全项目**没有一处调用**（孤儿函数）。
+  配合原本的「无可见消息即隐藏」判定（见第 2 条），重复建出来的群既看不见也删不掉。
+- **实现要点**：
+  - `deleteChatSession` 只清主消息表，**不清线下轮次**（独立 KV `ai_phone_chat_offline_turns:`），
+    因此本地额外调 `clearChatOfflineTurns` 避免留下孤儿数据。
+  - 删除后复用 `onDeleteFriend` 回调返回列表——父组件（`chat-room.tsx:5734`）把它接的就是
+    `() => onBack()`。这样**不必改动 `chat-room.tsx`**（那个文件有换行符陷阱，见下）。
+  - 列表会自动刷新：`onBack()` 让 `activeSession` 变 null，
+    `chat-message-list.tsx` 的 effect 随即重新 `loadChatSessions()`。
+- **合并提示**：若上游自己补了群聊删除，优先采用上游实现并删掉本条；
+  但请确认上游是否也清理了线下 KV，没清的话保留我们这半句。
+
 ---
 
 ## ⚠️ 编辑 `components/chat/chat-room.tsx` 的注意事项（换行符陷阱）
