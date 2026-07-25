@@ -82,8 +82,16 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
   `lib/chat-storage.ts:871` 早已实现且逻辑完整，但全项目**没有一处调用**（孤儿函数）。
   配合原本的「无可见消息即隐藏」判定（见第 2 条），重复建出来的群既看不见也删不掉。
 - **实现要点**：
-  - `deleteChatSession` 只清主消息表，**不清线下轮次**（独立 KV `ai_phone_chat_offline_turns:`），
-    因此本地额外调 `clearChatOfflineTurns` 避免留下孤儿数据。
+  - `deleteChatSession` 只清主消息表，会话级的其余数据需自己补，否则留下孤儿：
+    `clearChatOfflineTurns`（线下轮次，独立 KV）、`clearFollowUpSchedule`（后续跟进）、
+    `clearTimedWakeSchedule`（定时唤醒）。
+  - **删除范围经过核对**：这三个清理函数都按 `sessionId` **字段精确相等**过滤
+    （非 ID 前缀匹配），只影响本会话；长期记忆按 `characterId` 索引、不挂 sessionId，
+    因此删群**不会**牵连角色记忆。
+  - **不触发角色感知**：`triggerDeleteFriendReaction` 只在「删除好友」处调用，删群不调。
+    删除路径唯一派发的 `CHAT_MESSAGES_DELETED_EVENT` 全项目仅 `weixin-cloud-sync.ts` 监听
+    （同步删除到微信助手上传队列），不产生消息、不喂给模型——纯数据清理，
+    没有「解散群聊、成员收到通知」的剧情语义。
   - 删除后复用 `onDeleteFriend` 回调返回列表——父组件（`chat-room.tsx:5734`）把它接的就是
     `() => onBack()`。这样**不必改动 `chat-room.tsx`**（那个文件有换行符陷阱，见下）。
   - 列表会自动刷新：`onBack()` 让 `activeSession` 变 null，

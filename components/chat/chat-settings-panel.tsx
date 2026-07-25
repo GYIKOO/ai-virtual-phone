@@ -7,6 +7,7 @@ import {
     ChatSession,
     clearChatSessionMessages,
     clearChatSessionToolHistory,
+    clearFollowUpSchedule,
     deleteChatSession,
     saveChatSessions,
     loadChatSessions,
@@ -34,6 +35,7 @@ import {
     type GroupAdminAction,
 } from "@/lib/group-admin";
 import { clearChatOfflineTurns } from "@/lib/chat-offline-storage";
+import { clearTimedWakeSchedule } from "@/lib/timed-wake-storage";
 import { triggerDeleteFriendReaction } from "@/lib/friend-request-engine";
 import { loadCharacters } from "@/lib/character-storage";
 import { resolveUserIdentity } from "@/lib/settings-storage";
@@ -417,8 +419,11 @@ export function ChatSettingsPanel({
     };
 
     const handleDeleteGroup = () => {
-        // deleteChatSession 只清主消息表；线下轮次存在独立 KV 里，不一并清会留下孤儿数据
-        clearChatOfflineTurns(session.id);
+        // 以下三处都按 sessionId 精确匹配清理，只影响本会话：
+        // 长期记忆按 characterId 索引、不挂 sessionId，因此角色记忆不会被牵连删除。
+        clearChatOfflineTurns(session.id); // 线下轮次在独立 KV 里，deleteChatSession 不管
+        clearFollowUpSchedule(session.id); // 后续跟进计划
+        clearTimedWakeSchedule(session.id); // 定时唤醒
         deleteChatSession(session.id);
         setShowConfirmDeleteGroup(false);
         // 父组件把它接到 onBack()：删除后本会话已不存在，必须离开聊天页
