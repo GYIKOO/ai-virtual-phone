@@ -278,6 +278,13 @@
   user-select: none;
   -webkit-touch-callout: none;
 }
+/* 仅桌面态外扩吃掉壳的 12px 内边距：图标/组件的投影原本渗入内边距区、
+   在工作区 overflow 裁剪边上被生硬截断，形成一条纵向"背景接缝"。外扩后
+   裁剪边与屏幕边重合，阴影自然淡出；网格列仍按屏幕居中，位置不变。
+   App 打开时（.app-open）必须保持原始宽度，否则所有 App 页面会被拓宽。 */
+.phone-workspace:not(.app-open) {
+  margin-inline: -12px;
+}
 .phone-workspace img {
   -webkit-user-drag: none;
   user-drag: none;
@@ -309,11 +316,13 @@
   flex: 0 0 100%;
   width: 100%;
   -webkit-touch-callout: none;
-  --slot-size: 66px;
+  /* 窄视口（系统显示大小调大，CSS 视口 330~370px）下格子收缩；
+     视口 ≥374px 算出值 ≥66 被钳回 66px——正常手机零变化。dock 用同一公式保持上下对齐。 */
+  --slot-size: clamp(56px, calc((100vw - 108px) / 4), 66px);
   --slot-gap-x: 20px;
   --slot-gap-y: var(--home-row-gap-y);
-  --slot-icon-width: 62px;
-  --slot-icon-height: 62px;
+  --slot-icon-width: min(62px, var(--slot-size));
+  --slot-icon-height: min(62px, var(--slot-size));
   --slot-row-step: calc(var(--slot-icon-height) + var(--slot-gap-y));
   --slot-icon-offset-x: calc((var(--slot-size) - var(--slot-icon-width)) / 2);
   margin-top: 2px;
@@ -440,8 +449,9 @@
 }
 
 .icon-glyph-box {
-  width: 58px;
-  height: 58px;
+  /* 跟随格子收缩（无 --slot-size 上下文时回退 58px 原值） */
+  width: min(58px, var(--slot-size, 58px));
+  height: min(58px, var(--slot-size, 58px));
   border-radius: 16px;
   border: none;
   display: grid;
@@ -599,6 +609,21 @@
 }
 .edit-mode .icon-item.dragging,
 .edit-mode .widget-drag-wrap.dragging .widget-glass {
+  opacity: 0.25;
+  animation: none;
+}
+/* Dock icons jiggle & drag just like grid icons in edit mode. */
+.dock.edit-mode .dock-item {
+  animation: jiggle 0.22s ease-in-out infinite;
+}
+.dock.edit-mode .dock-item[data-flip-active] {
+  animation: none;
+}
+.dock.edit-mode .dock-item:nth-child(even) {
+  animation-delay: -0.11s;
+  animation-duration: 0.26s;
+}
+.dock.edit-mode .dock-item.dragging {
   opacity: 0.25;
   animation: none;
 }
@@ -761,19 +786,26 @@
 /* ── Dock ── */
 
 .dock {
-  --slot-size: 66px;
+  /* 宽度随图标数量自适应：只有 3 个时 dock 就窄一格，不再留空位。
+     --dock-count 由 JS 按当前 dock 图标数注入（缺省 4，保证首帧/SSR 观感不变）。 */
+  --dock-count: 4;
+  --slot-size: clamp(56px, calc((100vw - 108px) / 4), 66px);
   --slot-gap-x: 20px;
   margin-top: 8px;
   margin-bottom: var(--home-dock-lift);
   margin-inline: auto;
-  width: calc((4 * var(--slot-size)) + (3 * var(--slot-gap-x)) + 30px);
-  border-radius: var(--dock-radius, 9999px);
+  width: min(calc((var(--dock-count) * var(--slot-size)) + ((var(--dock-count) - 1) * var(--slot-gap-x)) + 30px), calc(100% - 8px));
+  /* 默认圆角：9999px(全胶囊)显得太圆，收到 32px 圆角矩形；主题仍可用 --dock-radius 覆盖 */
+  border-radius: var(--dock-radius, 32px);
   border: var(--dock-border, none);
   background: var(--c-home-glass);
-  min-height: 78px;
-  padding: 10px 0 5px;
+  /* 底板高度：图标(58px)在此高度内垂直居中，上下留白 = (高度-58)/2。
+     78→92 让上下各约 10px 增至约 17px，不再挤。可由主题 --dock-height 覆盖。 */
+  min-height: var(--dock-height, 92px);
+  /* 上下 0 内边距 + 网格居中：图标在胶囊内几何对称（旧值 10px/5px 造成图标偏下） */
+  padding: 0;
   display: grid;
-  grid-template-columns: repeat(4, var(--slot-size));
+  grid-template-columns: repeat(var(--dock-count), var(--slot-size));
   column-gap: var(--slot-gap-x);
   row-gap: 0;
   justify-content: center;
@@ -888,7 +920,6 @@
   align-items: center;
   justify-content: center;
   padding: 0;
-  transform: translateY(-2px);
   position: relative;
   z-index: 2;
 }
@@ -980,6 +1011,32 @@
   width: min(980px, 94vw);
   margin: 0 auto;
   padding: 20px 0 36px;
+}
+
+/* 更窄视口（≤373px）：按 390px 设计稿整体等比缩放（格 66→16.92vw、
+   距 20→5.13vw、图标 58→14.87vw、dock 354→90.77vw），窄屏呈现与正常
+   手机完全相同的比例观感，无多余留白；网格/dock 同源，天然对齐。
+   ≥374px 不受影响。 */
+@media (max-width: 373px) and (hover: none) and (pointer: coarse) {
+  .icon-grid,
+  .dock {
+    --slot-size: 16.92vw;
+    --slot-gap-x: 5.13vw;
+    --slot-icon-width: 15.9vw;
+    --slot-icon-height: 15.9vw;
+  }
+  .icon-glyph-box {
+    width: 14.87vw;
+    height: 14.87vw;
+  }
+  .dock {
+    /* 同样按数量自适应；count=4 时等于原 90.77vw。 */
+    width: min(calc((var(--dock-count) * var(--slot-size)) + ((var(--dock-count) - 1) * var(--slot-gap-x)) + 30px), calc(100% - 8px));
+  }
+  .dock .dock-glyph-box {
+    width: 14.87vw;
+    height: 14.87vw;
+  }
 }
 
 /* ── Mobile responsive ── */

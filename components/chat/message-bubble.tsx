@@ -64,6 +64,8 @@ export const MessageBubble = memo(function MessageBubble({ msg, onUpdate, charNa
             return <PokeBubble msg={msg} charName={charName} userName={userName} />;
         case "sticker":
             return <StickerBubble msg={msg} characterId={characterId} />;
+        case "dice":
+            return <DiceBubble msg={msg} />;
         case "quote":
             return <QuoteBubble msg={msg} displayContent={displayContent} defaultTranslationExpanded={defaultTranslationExpanded} />;
         case "music_share":
@@ -1310,6 +1312,58 @@ function LocationBubble({ msg }: { msg: ChatMessage }) {
 }
 
 // ── Poke ─────────────────────────────
+
+// 骰子点位：3x3 宫格（0-8）中每个点数要点亮的格子
+const DICE_BUBBLE_PIPS: Record<number, number[]> = {
+    1: [4],
+    2: [0, 8],
+    3: [0, 4, 8],
+    4: [0, 2, 6, 8],
+    5: [0, 2, 4, 6, 8],
+    6: [0, 2, 3, 5, 6, 8],
+};
+
+// 让指定点数朝向屏幕所需的立方体末态旋转（配合各面的摆放变换）
+const DICE_BUBBLE_ORIENTATIONS: Record<number, [number, number]> = {
+    1: [0, 0],
+    2: [-90, 0],
+    3: [0, -90],
+    4: [0, 90],
+    5: [90, 0],
+    6: [0, 180],
+};
+
+/** 骰子消息：3D 实骰。新消息立方体翻滚约 1.4 秒后定格在掷出的点数；历史消息直接定格 */
+function DiceBubble({ msg }: { msg: ChatMessage }) {
+    const face = Math.min(6, Math.max(1, Number(msg.mediaData?.diceFace) || 1));
+    // 挂载瞬间判定一次：只有刚发出的消息播翻滚动画
+    const rollingRef = useRef(Date.now() - new Date(msg.createdAt).getTime() < 6000);
+    const [rx, ry] = DICE_BUBBLE_ORIENTATIONS[face];
+
+    return (
+        <div className="dice-bubble3d" aria-label={`骰子 ${face} 点`}>
+            <div className="dice-bubble3d-tilt">
+                <div
+                    className="dice-bubble3d-cube"
+                    {...(rollingRef.current ? { "data-rolling": "" } : {})}
+                    style={{ "--dice-rx": `${rx}deg`, "--dice-ry": `${ry}deg` } as React.CSSProperties}
+                >
+                    {[1, 2, 3, 4, 5, 6].map(f => (
+                        <span key={f} className="dice-bubble3d-face" data-face={f}>
+                            {Array.from({ length: 9 }, (_, cell) => (
+                                <span
+                                    key={cell}
+                                    className="dice-bubble3d-pip"
+                                    {...(DICE_BUBBLE_PIPS[f].includes(cell) ? { "data-on": "" } : {})}
+                                />
+                            ))}
+                        </span>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
 
 function PokeBubble({ msg, charName, userName }: { msg: ChatMessage; charName?: string; userName?: string }) {
     // Prefer mediaData fields (group chat aware), fallback to old role-based logic

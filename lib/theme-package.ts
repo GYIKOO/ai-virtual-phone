@@ -1,9 +1,10 @@
-import type { IconPosition } from "@/lib/desktop-config";
+import { DOCK_DEFAULT, type DesktopIconId, type IconPosition } from "@/lib/desktop-config";
 import {
   createDefaultDesktopIconLayout,
   getDesktopIconLayoutItems,
   normalizeDesktopIconLayout,
   writeDesktopIconLayout,
+  writeDockLayout,
   type DesktopIconLayout
 } from "@/lib/desktop-layout-storage";
 import { DEFAULT_THEME_PROFILE, normalizeThemeProfile, type ThemeAssetType, type ThemeProfile } from "@/lib/theme-types";
@@ -70,6 +71,8 @@ export type InstalledThemePackage = {
   widgets: WidgetInstance[];
   diyTemplates: DIYWidgetTemplate[];
   summary: ThemePackageSummary;
+  /** 恢复默认时重置后的 dock；主题包导入不含 dock（保留用户当前 dock）时为 undefined */
+  dock?: DesktopIconId[];
 };
 
 export type CreateThemePackageInput = {
@@ -355,7 +358,9 @@ function makeSummary(manifest: ThemePackageManifest): ThemePackageSummary {
 function packageFileName(themeProfile: ThemeProfile): string {
   const name = (themeProfile.name || "theme").replace(/[\\/:*?"<>|]+/g, "-").trim() || "theme";
   const stamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
-  return `${name}-${stamp}.ai-theme`;
+  // 用标准 .zip 后缀：iOS/桌面都原生识别，选择器不置灰。导入端按包内
+  // manifest.json 校验内容，旧的 .ai-theme 文件仍可正常导入。
+  return `${name}-${stamp}.zip`;
 }
 
 async function loadZip(file: File) {
@@ -467,6 +472,8 @@ export async function resetThemePackageState(): Promise<InstalledThemePackage> {
   });
   const widgets = createDefaultWidgets();
   const iconLayout = writeDesktopIconLayout(createDefaultDesktopIconLayout(widgets));
+  // dock 一并恢复出厂，否则被拖出 dock 的默认图标（如设置）会在重置后彻底丢失
+  const dock = writeDockLayout([...DOCK_DEFAULT]);
   saveDIYTemplates(previousTemplates);
   saveWidgets(widgets);
 
@@ -474,6 +481,7 @@ export async function resetThemePackageState(): Promise<InstalledThemePackage> {
     themeProfile,
     iconLayout,
     widgets,
+    dock,
     diyTemplates: previousTemplates,
     summary: {
       assetCount: previousProfile.wallpaperLibrary.length + collectDIYTemplateAssetIds(previousTemplates).length,

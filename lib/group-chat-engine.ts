@@ -4,6 +4,7 @@
 import { ChatSession, ChatMessage, loadChatAppSettings, createResponseRoundId, loadChatSessions, getLatestCharacterStateValues } from "./chat-storage";
 import type { ApiConfig, PresetConfig, RegexConfig } from "./settings-types";
 import { loadCharacters } from "./character-storage";
+import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import {
     sendLLMRequest,
     sendLLMToolRequest,
@@ -410,7 +411,7 @@ async function buildGroupChatPromptMessages(
         ? activeMemberSchedules.map(item => `${item.name}：${item.schedule}`).join("；")
         : "无";
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
-    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt({ group: true });
+    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt({ group: true }) + buildScreenEffectPromptHint();
     const toolsPrompt = usesNativeActions
         ? "需要动作时使用可用动作接口。"
         : formatToolsForPrompt(enabledTools);
@@ -579,6 +580,8 @@ async function runNativeGroupToolLoop(params: {
         const assistantForToolContext = stripStateAndInnerForPrompt(result.content);
         if (result.toolCalls.length === 0) {
             throwIfAborted(signal);
+            // 无工具调用的最终轮：把解析到的思维链交给回调（随后由 processGroupParts 挂到本轮首条气泡）
+            if (result.reasoning) callbacks?.onReasoning?.(result.reasoning);
             finalRawOutput = result.content;
             break;
         }
@@ -783,6 +786,7 @@ export async function generateGroupChatCompletion(
                 appTags,
                 debugSessionId: session.id,
                 signal: options?.signal,
+                onReasoning: callbacks?.onReasoning,
             });
         } catch (err) {
             if (finalRawOutput) {
@@ -917,6 +921,7 @@ export async function generateGroupChatCompletion(
                         appTags,
                         debugSessionId: session.id,
                         signal: options?.signal,
+                        onReasoning: callbacks?.onReasoning,
                     });
                     throwIfAborted(options?.signal);
                 } catch {
@@ -994,6 +999,8 @@ export async function generateGroupRawCompletion(
 }
 
 export type GroupOfflineChatCompletionResult = ParsedOfflineResponse & {
+    /** 模型思维链（reasoning）内容，供线下记录展示 */
+    reasoning?: string;
     model: string;
     presetName: string;
 };
@@ -1013,6 +1020,7 @@ export async function generateGroupOfflineChatCompletion(
         },
     );
     const summaryTag = preset?.story_summary_tag?.trim() || "summary";
+    let reasoning = "";
     const rawOutput = await sendLLMRequest(config, preset, llmMessages, regexes, {
         characterName: `群聊:${session.groupName || "群聊"}`,
     }, {
@@ -1020,11 +1028,13 @@ export async function generateGroupOfflineChatCompletion(
         appTags: ["group_chat", "offline"],
         debugSessionId: session.id,
         signal: options?.signal,
+        onReasoning: (t) => { reasoning = t; },
     });
     return {
         ...parseOfflineResponse(rawOutput, summaryTag),
         model: config.defaultModel,
         presetName: preset?.name || "默认预设",
+        reasoning: reasoning || undefined,
     };
 }
 

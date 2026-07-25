@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, createContext, type CSSProperties, type ReactNode } from "react";
-import { Clock, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, Layers, Link2, MessageSquare, Mic, SlidersHorizontal, UserCircle, Wrench } from "lucide-react";
+import { ChevronRight, Clock, Database, FileText, Fingerprint, Globe, HardDrive, Image, Info, Layers, Link2, MessageSquare, Mic, ShieldCheck, SlidersHorizontal, UserCircle, Wrench } from "lucide-react";
 import { ApiSettings } from "./settings/api-settings";
 import { VoiceSettings } from "./settings/voice-settings";
 import { ImageGenerationSettings } from "./settings/image-generation-settings";
@@ -14,6 +14,9 @@ import { AboutDeclaration } from "./settings/about-declaration";
 import { BindingManager } from "./settings/binding-manager";
 import { WeixinSettings } from "./settings/weixin-settings";
 import { ToolboxSettings } from "./settings/toolbox-settings";
+import { ModerationCenter } from "./settings/moderation-center";
+import { fetchIsAdmin } from "@/lib/moderation-client";
+import { isSelfHostedModeEnabled } from "@/lib/self-hosting";
 import { PageShell } from "./ui/page-shell";
 import { CardGrid, FeaturedCard, type CardItem, type FeaturedCardItem } from "./ui/card-grid";
 import { Toggle } from "./ui/form";
@@ -44,6 +47,7 @@ type SubPage =
     | "identity"
     | "weixin"
     | "toolbox"
+    | "moderation"
     | "about";
 
 const SETTINGS_MENU = [
@@ -83,11 +87,22 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
     const [quickActionEnabled, setQuickActionEnabled] = useState(false);
     const pageBodyRef = useRef<HTMLDivElement | null>(null);
 
+    // ── 管理中心入口：仅联机模式下 role=admin 的账号可见 ──
+    const [isAdmin, setIsAdmin] = useState(false);
+    useEffect(() => {
+        if (isSelfHostedModeEnabled()) return;
+        let cancelled = false;
+        void fetchIsAdmin().then(result => { if (!cancelled) setIsAdmin(result); });
+        return () => { cancelled = true; };
+    }, []);
+
     const defaultTitle = currentPage === "main"
         ? "设置"
         : currentPage === "api" || currentPage === "voice" || currentPage === "imageGeneration" || currentPage === "presets" || currentPage === "worldbook" || currentPage === "regex" || currentPage === "identity"
             ? ""
-            : SETTINGS_MENU.find(m => m.id === currentPage)?.label || "设置";
+            : currentPage === "moderation"
+                ? "管理中心"
+                : SETTINGS_MENU.find(m => m.id === currentPage)?.label || "设置";
     const title = subpageTitle || defaultTitle;
 
     const setSubpageRightAction = useCallback((page: string, action: ReactNode | null) => {
@@ -182,6 +197,8 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                 return <WeixinSettings />;
             case "toolbox":
                 return <ToolboxSettings />;
+            case "moderation":
+                return <ModerationCenter onNotice={onNotice} />;
             case "identity":
                 return <UserIdentitySettings />;
             case "about":
@@ -278,6 +295,21 @@ export function PhoneSettingsApp({ onClose, onNotice }: SettingsPageProps) {
                                 <Toggle checked={timeAware} onChange={handleTimeAwareChange} className="settings-toggle-control" />
                             </div>
                         </div>
+                        {isAdmin ? (
+                            <div className="settings-moderation-section">
+                                <h3 className="settings-menu-section-title">Moderation</h3>
+                                <div className="app-card card-featured settings-toggle-card" role="button" tabIndex={0} style={{ cursor: "pointer" }} onClick={() => setCurrentPage("moderation")}>
+                                    <span className="card-icon" style={promptViewerIconStyle}>
+                                        <ShieldCheck size={22} strokeWidth={1.75} />
+                                    </span>
+                                    <div className="card-featured-body">
+                                        <div className="card-featured-label">管理中心</div>
+                                        <div className="card-featured-desc">举报队列、应用审核与用户封禁</div>
+                                    </div>
+                                    <ChevronRight size={18} />
+                                </div>
+                            </div>
+                        ) : null}
                         <div className="settings-tools-section">
                             <h3 className="settings-menu-section-title">Tools</h3>
                             <div className="menu-group settings-tools-menu">

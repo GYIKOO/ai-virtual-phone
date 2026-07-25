@@ -1,6 +1,7 @@
 // lib/chat-engine.ts
 
 import { loadCharacters } from "./character-storage";
+import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import type { Character } from "./character-types";
 import {
     ChatSession,
@@ -801,6 +802,8 @@ export async function sendLLMRequest(
     options?: {
         skipOutputRegex?: boolean;
         includeReasoning?: boolean;
+        /** 供调用方捕获模型思维链（reasoning）内容，不影响返回文本 */
+        onReasoning?: (text: string) => void;
         appId?: string;
         appTags?: string[];
         followUpCount?: number;
@@ -856,6 +859,10 @@ export async function sendLLMRequest(
         const data = await response.json();
         const parsed = parseProviderResponse(request.providerKind, data);
         let rawOutput = parsed.content || "";
+
+        if (parsed.reasoning) {
+            try { options?.onReasoning?.(parsed.reasoning); } catch { /* 捕获回调异常，不影响主流程 */ }
+        }
 
         // Prepend reasoning content as <think> block (only when caller requests it, e.g. story mode)
         if (options?.includeReasoning) {
@@ -1769,7 +1776,7 @@ export async function buildChatPromptMessages(
     const scheduleSummary = buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now));
     const currentSchedule = getCurrentCalendarScheduleForPrompt("character", character.id, now);
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
-    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt();
+    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt() + buildScreenEffectPromptHint();
     const toolsPrompt = toolsEnabled && !usesNativeActions ? formatToolsForPrompt(enabledTools) : "";
     const chatBilingualInstruction = !session.isGroup
         ? buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
@@ -1849,6 +1856,8 @@ export type ChatCompletionCallbacks = {
     onToolNotice?: (notice: string) => void;
     onToolResult?: (content: string) => void;
     onToolAssistantTurn?: (content: string) => void;
+    /** 每轮 LLM 调用解析出思维链（reasoning）时触发，先于该轮 onTextPart */
+    onReasoning?: (text: string) => void;
     onToolExecution?: (results: ToolResult[], historyContent?: string) => void;
     onNativeToolAssistantTurn?: (turn: {
         content: string;
@@ -1867,6 +1876,8 @@ export type ChatCompletionCallbacks = {
 export type OfflineChatCompletionResult = ParsedOfflineResponse & {
     model: string;
     presetName: string;
+    /** 模型思维链（reasoning）内容，供线下记录展示 */
+    reasoning?: string;
 };
 
 export async function generateOfflineChatCompletion(
@@ -1883,6 +1894,7 @@ export async function generateOfflineChatCompletion(
         },
     );
     const summaryTag = preset?.story_summary_tag?.trim() || "summary";
+    let reasoning = "";
     const rawOutput = await sendLLMRequest(config, preset, llmMessages, regexes, {
         characterName: character.name,
         userName: userIdentity?.name,
@@ -1890,11 +1902,13 @@ export async function generateOfflineChatCompletion(
         appTags: ["chat", "offline"],
         debugSessionId: session.id,
         signal: options?.signal,
+        onReasoning: (t) => { reasoning = t; },
     });
     return {
         ...parseOfflineResponse(rawOutput, summaryTag),
         model: config.defaultModel,
         presetName: preset?.name || "默认预设",
+        reasoning: reasoning || undefined,
     };
 }
 
@@ -1969,6 +1983,8 @@ async function generateNativeChatCompletion(
 
         if (result.toolCalls.length === 0) {
             throwIfAborted(options?.signal);
+            // 无工具调用的最终轮：把解析到的思维链先交给回调（先于 onTextPart，与非原生路径一致）
+            if (result.reasoning) callbacks?.onReasoning?.(result.reasoning);
             await callbacks?.onTextPart?.(afterActionStrip);
             parts.push({ text: afterActionStrip });
             break;
@@ -2176,6 +2192,7 @@ export async function generateChatCompletion(
                 followUpCount: options?.followUpCount,
                 debugSessionId: session.id,
                 signal: options?.signal,
+                onReasoning: callbacks?.onReasoning,
             });
         } catch (err) {
             const errMsg = `⚠️ 回复生成失败: ${err instanceof Error ? err.message : String(err)}`;
@@ -2331,6 +2348,7 @@ export async function generateChatCompletion(
                         followUpCount: options?.followUpCount,
                         debugSessionId: session.id,
                         signal: options?.signal,
+                        onReasoning: callbacks?.onReasoning,
                     });
                     throwIfAborted(options?.signal);
                     await callbacks?.onTextPart?.(finalOutput);

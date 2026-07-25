@@ -3,6 +3,7 @@ import nodeCrypto from "crypto";
 import { NextResponse } from "next/server";
 
 import { getCurrentAccount } from "@/lib/server/account-auth";
+import { getModeratorContext } from "@/lib/server/admin-auth";
 import { encodeSupabaseFilter, formatSupabaseRestError, getSupabaseServerConfig, supabaseRestFetch } from "@/lib/server/supabase-rest";
 import type { CustomAppManifest, CustomAppPermission } from "@/lib/custom-app-types";
 import type { CustomAppMarketItem, CustomAppPackageKind, CustomAppReviewStatus } from "@/lib/custom-app-market-types";
@@ -329,7 +330,7 @@ export async function GET(request: Request) {
     const admin = url.searchParams.get("admin") === "1";
     if (admin) {
       if (!isAppMarketReviewEnabled()) return reviewDisabled();
-      if (!requireAppMarketAdminKey(request)) return unauthorizedAdmin();
+      if (!requireAppMarketAdminKey(request) && !(await getModeratorContext(request))) return unauthorizedAdmin();
       const view = url.searchParams.get("view");
       const status = view === "approved" || view === "rejected" || view === "pending" ? view : "";
       const statusFilter = status ? `&review_status=eq.${status}` : "";
@@ -472,7 +473,7 @@ export async function PATCH(request: Request) {
     if (!id) return NextResponse.json({ ok: false, error: "missing_app_id" }, { status: 400 });
     if (record.action === "approve" || record.action === "reject") {
       if (!isAppMarketReviewEnabled()) return reviewDisabled();
-      if (!requireAppMarketAdminKey(request)) return unauthorizedAdmin();
+      if (!requireAppMarketAdminKey(request) && !(await getModeratorContext(request))) return unauthorizedAdmin();
       const reviewStatus = record.action === "approve" ? "approved" : "rejected";
       const result = await supabaseRestFetch<unknown[]>(
         `custom_app_market_apps?id=eq.${encodeSupabaseFilter(id)}&deleted_at=is.null&select=${REST_APP_COLUMNS}`,

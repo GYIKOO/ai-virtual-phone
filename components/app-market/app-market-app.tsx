@@ -31,6 +31,7 @@ import { customAppGlyphPath } from "@/components/icon-glyph";
 
 import { CUSTOM_APP_CREATOR_GUIDE_MD } from "@/lib/custom-app-creator-guide";
 import { permissionLabelWithContext } from "@/lib/custom-app-permission-labels";
+import { submitContentReport } from "@/lib/moderation-client";
 import {
   fetchCustomAppMarketItems,
   fetchMyCustomAppMarketItems,
@@ -1324,6 +1325,23 @@ export function AppMarketApp({ onClose, onOpenCustomApp, onInstallToDesktop, onN
                   </ul>
                 )}
               </div>
+              <button
+                type="button"
+                style={{ border: "none", background: "none", color: "var(--text-tertiary, #999)", fontSize: 11, alignSelf: "flex-end", padding: "0 2px", cursor: "pointer" }}
+                onClick={() => {
+                  void submitContentReport({
+                    contentType: "market_app",
+                    contentId: selectedMarketApp.id,
+                    preview: `${selectedMarketApp.name} — ${selectedMarketApp.description || ""}`.slice(0, 200),
+                    ownerId: selectedMarketApp.authorId || "",
+                    ownerName: selectedMarketApp.authorName || "",
+                  })
+                    .then(() => onNotice?.("已举报，管理员会尽快处理"))
+                    .catch(err => onNotice?.(err instanceof Error ? err.message : "举报失败"));
+                }}
+              >
+                举报该 APP
+              </button>
               <div className="app-market-sheet-actions">
                 <button type="button" className="app-market-secondary" onClick={() => setSelectedMarketApp(null)}>关闭</button>
                 {installedForMarketItem(selectedMarketApp) ? (

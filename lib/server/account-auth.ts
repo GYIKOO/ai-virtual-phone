@@ -1,6 +1,7 @@
 import crypto from "crypto";
 
 import { ACCOUNT_SESSION_COOKIE as SHARED_ACCOUNT_SESSION_COOKIE } from "../account-cookie-constants";
+import { isSelfHostedModeEnabled } from "../self-hosting";
 import { encodeSupabaseFilter, supabaseRestFetch } from "./supabase-rest";
 
 export const ACCOUNT_SESSION_COOKIE = SHARED_ACCOUNT_SESSION_COOKIE;
@@ -280,7 +281,17 @@ export async function deleteSessionToken(token: string): Promise<void> {
   );
 }
 
+// 自建模式（跳过登录）的固定本地账号：与客户端 AccountGate 使用的 local_user 保持一致。
+// 没有这个短路，游戏大厅/应用市场/黑市等需要账号身份的接口在单机模式下会一律返回 401。
+const SELF_HOSTED_ACCOUNT: AppAccount = {
+  id: "local_user",
+  username: "local_user",
+  displayName: "本地用户",
+  status: "active",
+};
+
 export async function getCurrentAccount(request: Request): Promise<AppAccount | null> {
+  if (isSelfHostedModeEnabled()) return SELF_HOSTED_ACCOUNT;
   const token = readCookie(request, ACCOUNT_SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = hashSessionToken(token);
