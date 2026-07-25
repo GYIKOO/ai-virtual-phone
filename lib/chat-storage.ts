@@ -244,7 +244,8 @@ export type ChatAppSettings = {
     promptViewerEnabled?: boolean; // When true, show the floating prompt viewer entry
     quickActionEnabled?: boolean; // When true, show the floating quick action entry
     browserNotificationsEnabled?: boolean; // When true, send browser Notification API alerts when page is hidden
-    enterToSendEnabled?: boolean; // When true, Enter sends chat input and Shift+Enter inserts a newline
+    enterToSendEnabled?: boolean; // When true, Enter sends chat input and Shift+Enter inserts a newline (线上模式)
+    offlineEnterToSendEnabled?: boolean; // Same but for 线下模式 — kept separate because offline writing is long-form
 };
 
 export const CHAT_APP_SETTINGS_UPDATED_EVENT = "chat-app-settings-updated";
@@ -511,6 +512,7 @@ const DEFAULT_CHAT_APP_SETTINGS: ChatAppSettings = {
     promptViewerEnabled: false,
     quickActionEnabled: false,
     enterToSendEnabled: false,
+    offlineEnterToSendEnabled: false,
 };
 
 // ── In-Memory Caches (hydrated from IndexedDB on startup) ──────────

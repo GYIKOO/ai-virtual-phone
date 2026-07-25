@@ -58,3 +58,34 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
   所以删掉过滤不会产生崩溃或错位，只是空会话预览行留白。
 - **合并提示**：若上游重构了这段 `.filter()`，保留「不按有无可见消息过滤」这一诉求即可；
   若上游自己也修了同一问题（例如改成只对私聊生效），优先采用上游实现并删掉本条。
+
+### 3. 回车发送拆分为线上 / 线下两个开关
+- **文件**：
+  - `lib/chat-storage.ts`：`ChatAppSettings` 新增 `offlineEnterToSendEnabled`（默认 `false`）
+  - `components/chat/chat-room.tsx`：新增 `offlineEnterToSendEnabled` 状态并同步，
+    `OfflineTextInputBar` 改用它（`ChatTextInputBar` 仍用原来的 `enterToSendEnabled`）
+  - `components/chat/user-profile-panel.tsx`：设置项拆成「回车发送 · 线上」「回车发送 · 线下」两行
+- **原因**：原本一个开关同时管线上线下。线上是短消息、习惯回车即发；线下是小说体、
+  常需多段换行。绑在一起必然有一边别扭。
+- **实现要点**：`chat-room.tsx` 里本来就有 `ChatTextInputBar`（线上）和 `OfflineTextInputBar`
+  （线下）两个独立输入组件，此前被喂了同一个值，因此拆分只需分别传值。
+  小卷助手（`mascot-chat-room.tsx`）属线上形态，仍沿用 `enterToSendEnabled`，未改。
+- **默认值**：线下独立默认 `false`（不回车发送）。老用户若原先开了回车发送，
+  升级后线上保持开启、线下变为关闭——正是本次想要的手感。
+- **合并提示**：若上游自己也做了同样拆分，优先采用上游字段名并删掉本条。
+
+---
+
+## ⚠️ 编辑 `components/chat/chat-room.tsx` 的注意事项（换行符陷阱）
+
+本仓库 `core.autocrlf=true` 且没有 `.gitattributes`，而 **`chat-room.tsx` 的 blob 里存的是
+混合换行符**（6136 行中约 4829 行 CRLF、其余 LF）。`autocrlf` 无法对这种文件无损往返，
+因此任何「整体重写该文件」的编辑方式都会把它归一化成全 CRLF，**凭空产生约 1311 行假改动**
+（实测：8 行真改动被放大成 2622 行 diff）。
+
+- 编辑该文件后**务必检查** `git diff --stat`；若行数远超预期，就是踩了这个坑。
+- 对照命令：`git --no-pager diff --stat --ignore-all-space` 能显示真实改动量。
+- 修复办法：`git checkout -- components/chat/chat-room.tsx` 还原，改用**按字节做定点替换**
+  的脚本重新应用（读写用 latin1，插入的中文先转 UTF-8 字节；替换时沿用锚点行自身的换行符）。
+- 别顺手给该文件加 `.gitattributes` 强制统一换行符——那会一次性改写整个文件，
+  和上游产生永久冲突面。
