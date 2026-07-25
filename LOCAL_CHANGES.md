@@ -24,6 +24,16 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 
 ---
 
+## 上游同步记录
+
+| 日期 | 同步到上游提交 | 上游提交数 | 冲突 | 备注 |
+|---|---|---|---|---|
+| 2026-07-12 | `e136608` | 121 | 无 | 首次同步。新增联机玩法、全屏特效、思维链展示/翻译、栖所 2.0、dock 拖拽等。新依赖 `@supabase/realtime-js`；新增 `docs/online-play-supabase.sql`、`docs/moderation-supabase.sql` 需按需执行。 |
+
+> 回滚点：同步前会打 tag（如 `pre-upstream-sync-2026-07`），出问题可 `git reset --hard <tag>`。
+
+---
+
 ## 改动登记
 
 ### 1. 打开便签墙入口
