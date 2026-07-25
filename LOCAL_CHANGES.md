@@ -44,3 +44,17 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 - **提交**：`a98fe2d feat: enable note wall entry in diary app`
 - **合并提示**：若上游改动了这一行（例如自己也把它设为 `true`，或重构了这段开关逻辑），
   以「便签墙入口保持开启」为准即可。
+
+### 2. 聊天列表不再隐藏「无可见消息」的会话
+- **文件**：`components/chat/chat-message-list.tsx`（会话列表的 `.filter()` 内）
+- **改动**：删掉 `if (!getLastVisibleSessionMessage(s.id)) return false;`，改为注释说明。
+- **原因**：原逻辑会把「没有可见消息」的会话整条从列表里剔除，导致两个实际问题：
+  1. 新建群后还没发言（或习惯性删掉「邀请角色加入群聊」的系统消息）就返回列表，群直接消失；
+  2. 只走过**线下**剧情的群同样不算数（线下轮次存在 `chat-offline-storage` 的独立 KV 里，
+     不进主消息表，因此永远不构成「可见消息」）。
+  而角色侧该群依然存活、还会主动发消息进来，用户却找不到入口，只能重复建同名群。
+- **安全性**：空会话的渲染与排序原本就有兜底——`SessionItem` 的 `displayTime` 用
+  `session.updatedAt`、`preview` 有 `getLastNonEmptyPreview` 兜底，排序同样 `|| a.updatedAt`。
+  所以删掉过滤不会产生崩溃或错位，只是空会话预览行留白。
+- **合并提示**：若上游重构了这段 `.filter()`，保留「不按有无可见消息过滤」这一诉求即可；
+  若上游自己也修了同一问题（例如改成只对私聊生效），优先采用上游实现并删掉本条。

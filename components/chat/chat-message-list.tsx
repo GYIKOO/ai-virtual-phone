@@ -222,7 +222,9 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             const regularItems = [...sessions]
                             .filter(s => {
                                 if (!(s.isGroup || contactIds.has(s.contactId))) return false;
-                                if (!getLastVisibleSessionMessage(s.id)) return false;
+                                // 不按「有无可见消息」过滤：新建还没发言的群、只走过线下剧情的群
+                                // 都必须留在列表里，否则角色侧群仍存活（还会主动发消息进来）而用户侧
+                                // 找不到入口，只能重复建群。空会话的预览与排序均已有 updatedAt 兜底。
                                 if (listTab === "private" && s.isGroup) return false;
                                 if (listTab === "group" && !s.isGroup) return false;
                                 if (!keyword) return true;
