@@ -29,6 +29,7 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 | 日期 | 同步到上游提交 | 上游提交数 | 冲突 | 备注 |
 |---|---|---|---|---|
 | 2026-07-12 | `e136608` | 121 | 无 | 首次同步。新增联机玩法、全屏特效、思维链展示/翻译、栖所 2.0、dock 拖拽等。新依赖 `@supabase/realtime-js`；新增 `docs/online-play-supabase.sql`、`docs/moderation-supabase.sql` 需按需执行。 |
+| 2026-07-27 | `f86efc4` | 24 | 1 处（`chat-room.tsx`） | 聊天扩展插件系统（可执行 JS 沙箱）、Minimax 语音 language_boost、设置页账号管理、记忆库 iOS 内存防护等。无新依赖、无新 SQL、无新环境变量。冲突源于上游把 `chat-room.tsx` 从混合换行符统一为纯 LF，与我们插入的 2 行重叠；取我方内容并跟随上游归一化即可。 |
 
 > 回滚点：同步前会打 tag（如 `pre-upstream-sync-2026-07`），出问题可 `git reset --hard <tag>`。
 
@@ -101,16 +102,20 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 
 ---
 
-## ⚠️ 编辑 `components/chat/chat-room.tsx` 的注意事项（换行符陷阱）
+## 换行符陷阱（已于 2026-07-27 同步后解除，保留备查）
 
-本仓库 `core.autocrlf=true` 且没有 `.gitattributes`，而 **`chat-room.tsx` 的 blob 里存的是
-混合换行符**（6136 行中约 4829 行 CRLF、其余 LF）。`autocrlf` 无法对这种文件无损往返，
-因此任何「整体重写该文件」的编辑方式都会把它归一化成全 CRLF，**凭空产生约 1311 行假改动**
-（实测：8 行真改动被放大成 2622 行 diff）。
+本仓库 `core.autocrlf=true` 且没有 `.gitattributes`。**`chat-room.tsx` 曾经**在 blob 里存着
+混合换行符（约 4829 行 CRLF、其余 LF），`autocrlf` 无法对这种文件无损往返，任何「整体重写」
+的编辑都会把它归一化，**凭空产生约 1311 行假改动**（实测 8 行真改动被放大成 2622 行 diff）。
 
-- 编辑该文件后**务必检查** `git diff --stat`；若行数远超预期，就是踩了这个坑。
-- 对照命令：`git --no-pager diff --stat --ignore-all-space` 能显示真实改动量。
-- 修复办法：`git checkout -- components/chat/chat-room.tsx` 还原，改用**按字节做定点替换**
-  的脚本重新应用（读写用 latin1，插入的中文先转 UTF-8 字节；替换时沿用锚点行自身的换行符）。
-- 别顺手给该文件加 `.gitattributes` 强制统一换行符——那会一次性改写整个文件，
+**上游已在 2026-07-27 那批提交里把该文件统一成纯 LF，陷阱就此解除**，现在可正常编辑。
+（也正因两边换行符形态不同，那次同步在本文件产生了唯一一处冲突——内容其实无实质分歧。）
+
+仍值得保留的通用习惯：
+
+- 改完大文件后扫一眼 `git diff --stat`；行数远超预期就是踩了换行符坑。
+- 对照命令：`git --no-pager diff --stat --ignore-all-space` 显示真实改动量。
+- 真踩到了：`git checkout -- <file>` 还原，改用**按字节定点替换**的脚本重新应用
+  （读写用 latin1，插入的中文先转 UTF-8 字节；替换时沿用锚点行自身的换行符）。
+- 别为了「根治」而加 `.gitattributes` 强制统一换行符——那会一次性改写整个文件，
   和上游产生永久冲突面。

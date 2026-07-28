@@ -2,6 +2,9 @@
 
 import { loadCharacters } from "./character-storage";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
+import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
+import { buildChatPluginPromptFragments } from "./chat-plugin-storage";
+import type { LlmRequestPayload } from "./chat-plugin-types";
 import type { Character } from "./character-types";
 import {
     ChatSession,
@@ -12,7 +15,10 @@ import {
     saveChatSessions,
     getLatestCharacterStateValues,
     normalizeVisionImagePromptLimit,
+    createResponseBatchId,
+    createToolExecutionId,
 } from "./chat-storage";
+import { extractTextToolDirectiveText, stripTextToolDirectives } from "./text-tool-protocol";
 import type { ApiConfig, PresetConfig, Prompt, PromptOrderEntry, RegexConfig } from "./settings-types";
 import type { CustomAppPromptProfile } from "./custom-app-types";
 import {
@@ -520,6 +526,41 @@ type PreparedApiMessage = {
     marker?: string;
 };
 
+/**
+ * 聊天插件 llm.request 织入：让插件在请求发出前改写 messages / 采样参数。
+ * 四个 sendLLM*Request 入口统一走这里；无插件时零开销直通。
+ */
+async function applyChatPluginLlmRequest<T extends { role: string }>(
+    preset: PresetConfig | null,
+    messages: T[],
+    purpose: string,
+    sessionId?: string,
+): Promise<{ messages: T[]; preset: PresetConfig | null }> {
+    if (typeof window === "undefined") return { messages, preset };
+    const payload = await runChatPluginTransform("llm.request", {
+        messages: messages as unknown as LlmRequestPayload["messages"],
+        purpose,
+        sessionId,
+    });
+    let nextPreset = preset;
+    if (preset && (payload.temperature !== undefined || payload.maxTokens !== undefined)) {
+        nextPreset = { ...preset };
+        if (payload.temperature !== undefined) nextPreset.temperature = payload.temperature;
+        if (payload.maxTokens !== undefined) nextPreset.openai_max_tokens = payload.maxTokens;
+    }
+    const nextMessages = Array.isArray(payload.messages)
+        ? payload.messages as unknown as T[]
+        : messages;
+    return { messages: nextMessages, preset: nextPreset };
+}
+
+/** 聊天插件 llm.response 织入：模型原始回复在内置正则处理前交给插件改写 */
+async function applyChatPluginLlmResponse(text: string, purpose: string, sessionId?: string): Promise<string> {
+    if (typeof window === "undefined") return text;
+    const payload = await runChatPluginTransform("llm.response", { text, sessionId, purpose });
+    return typeof payload.text === "string" ? payload.text : text;
+}
+
 export function prepareMessagesForApi(
     provider: string,
     messages: LLMMessage[],
@@ -723,8 +764,19 @@ export async function sendLLMStreamRequest(
     },
     callbacks?: ChatCompletionStreamCallbacks,
 ): Promise<ChatCompletionStreamResult> {
-    const requestMessages = toLlmRequestMessages(messages);
-    const request = buildProviderRequest(config, preset, requestMessages, { stream: true });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose);
+    const effectivePreset = afterPlugins.preset;
+    const originalOnDelta = callbacks?.onDelta;
+    const pluginCallbacks: ChatCompletionStreamCallbacks | undefined = callbacks ? {
+        ...callbacks,
+        onDelta: (text: string) => {
+            emitChatPluginEvent("llm.streamChunk", { chunk: text, purpose: pluginPurpose });
+            return originalOnDelta?.(text);
+        },
+    } : undefined;
+    const requestMessages = toLlmRequestMessages(afterPlugins.messages);
+    const request = buildProviderRequest(config, effectivePreset, requestMessages, { stream: true });
     const requestBodyJson = JSON.stringify(request.body);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -741,11 +793,12 @@ export async function sendLLMStreamRequest(
             const errorText = await response.text();
             throw new ChatEngineError(`API Stream Error ${response.status}: ${errorText}`);
         }
-        const { content: streamedContent, rawResponse } = await readSseStream(response, request.providerKind, callbacks);
+        const { content: streamedContent, rawResponse } = await readSseStream(response, request.providerKind, pluginCallbacks ?? callbacks);
         if (!streamedContent.trim()) {
             throw new ChatEngineError("流式响应没有解析到文本增量。");
         }
         let rawOutput = stripHallucinatedTimestamps(streamedContent.trim());
+        rawOutput = await applyChatPluginLlmResponse(rawOutput, pluginPurpose);
 
         // Store API log entry — mirror sendLLMRequest so streaming calls also show up
         // in the "底层调用大模型日志" panel.
@@ -811,9 +864,12 @@ export async function sendLLMRequest(
         signal?: AbortSignal;
     },
 ): Promise<string> {
-    const requestMessages = toLlmRequestMessages(messages);
-    const request = buildProviderRequest(config, preset, requestMessages);
-    publishDebugPromptSnapshot({ request, config, preset, meta, options, requestKind: "completion" });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
+    const effectivePreset = afterPlugins.preset;
+    const requestMessages = toLlmRequestMessages(afterPlugins.messages);
+    const request = buildProviderRequest(config, effectivePreset, requestMessages);
+    publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "completion" });
     const requestBodyJson = JSON.stringify(request.body);
     const requestBodySize = requestBodyJson.length;
     const requestTokenEstimate = Math.ceil(requestBodySize / 3);
@@ -871,6 +927,8 @@ export async function sendLLMRequest(
                 rawOutput = `<think>\n${reasoning}\n</think>\n\n${rawOutput}`;
             }
         }
+
+        rawOutput = await applyChatPluginLlmResponse(rawOutput, pluginPurpose, options?.debugSessionId);
 
         if (!rawOutput && parsed.toolCalls.length === 0) {
             const emptyDetails = emptyResponseDetails(parsed.raw);
@@ -994,8 +1052,11 @@ export async function sendLLMToolStreamRequest(
     callbacks?: ChatCompletionStreamCallbacks,
 ): Promise<LLMToolRequestResult> {
     void regexes;
-    const request = buildProviderRequest(config, preset, messages, { tools, stream: true });
-    publishDebugPromptSnapshot({ request, config, preset, meta, options, requestKind: "native-tools-stream", tools });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
+    const effectivePreset = afterPlugins.preset;
+    const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools, stream: true });
+    publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "native-tools-stream", tools });
     const requestBodyJson = JSON.stringify(request.body);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -1047,6 +1108,7 @@ export async function sendLLMToolStreamRequest(
                         const cleanDelta = contentStripper.push(delta.content);
                         if (cleanDelta) {
                             content += cleanDelta;
+                            emitChatPluginEvent("llm.streamChunk", { chunk: cleanDelta, sessionId: options?.debugSessionId, purpose: pluginPurpose });
                             await callbacks?.onDelta?.(cleanDelta);
                         }
                     }
@@ -1078,6 +1140,7 @@ export async function sendLLMToolStreamRequest(
             content += finalContent;
             await callbacks?.onDelta?.(finalContent);
         }
+        content = await applyChatPluginLlmResponse(content, pluginPurpose, options?.debugSessionId);
 
         const sanitizedMessages = request.messagesForLog.map(m => ({
             ...m,
@@ -1140,8 +1203,11 @@ export async function sendLLMToolRequest(
         signal?: AbortSignal;
     },
 ): Promise<LLMToolRequestResult> {
-    const request = buildProviderRequest(config, preset, messages, { tools });
-    publishDebugPromptSnapshot({ request, config, preset, meta, options, requestKind: "native-tools", tools });
+    const pluginPurpose = options?.appId ?? "chat";
+    const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
+    const effectivePreset = afterPlugins.preset;
+    const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools });
+    publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "native-tools", tools });
     const requestBodyJson = JSON.stringify(request.body);
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -1166,6 +1232,7 @@ export async function sendLLMToolRequest(
         if (options?.includeReasoning && parsed.reasoning) {
             rawOutput = `<think>\n${parsed.reasoning}\n</think>\n\n${rawOutput}`;
         }
+        rawOutput = await applyChatPluginLlmResponse(rawOutput, pluginPurpose, options?.debugSessionId);
 
         if (!rawOutput && parsed.toolCalls.length === 0) {
             const emptyDetails = emptyResponseDetails(parsed.raw);
@@ -1347,17 +1414,8 @@ export type ChatCompletionResult = {
 };
 
 /** Extract combined clean text from a ChatCompletionResult (for callers that need a plain string) */
-/** Strip tool tags from text for display/processing */
-function stripToolTags(text: string): string {
-    return text
-        .replace(/\[[^\]]*?(?:获取指令|获取工具)[:：][^\]]*\]/g, "")
-        .replace(/\[[^\]]*?(?:执行动作|工具调用)[:：][^\]]*?[（(][\s\S]*?[)）]\]/g, "")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim();
-}
-
 export function flattenCompletionResult(result: ChatCompletionResult): string {
-    return result.parts.map(p => stripToolTags(p.text)).filter(Boolean).join("\n\n");
+    return result.parts.map(p => stripTextToolDirectives(p.text)).filter(Boolean).join("\n\n");
 }
 
 const MAX_TOOL_ROUNDS = 5;
@@ -1776,7 +1834,14 @@ export async function buildChatPromptMessages(
     const scheduleSummary = buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now));
     const currentSchedule = getCurrentCalendarScheduleForPrompt("character", character.id, now);
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
-    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt() + buildScreenEffectPromptHint();
+    const pluginPrompt = await runChatPluginTransform("prompt.system", {
+        sessionId: session.id,
+        isGroup: !!session.isGroup,
+        characterId: character.id,
+        hint: buildChatPluginPromptFragments(session.id),
+    });
+    const pluginPromptHint = pluginPrompt.hint?.trim() ? `\n\n### 扩展插件\n${pluginPrompt.hint.trim()}\n` : "";
+    const customAppRichMediaDirectives = formatCustomAppChatDirectivesForPrompt() + buildScreenEffectPromptHint() + pluginPromptHint;
     const toolsPrompt = toolsEnabled && !usesNativeActions ? formatToolsForPrompt(enabledTools) : "";
     const chatBilingualInstruction = !session.isGroup
         ? buildChatBilingualInstruction(session.bilingualTranslationEnabled !== false, "single", session.bilingualTranslationPrompt)
@@ -1851,14 +1916,20 @@ export type ChatCompletionCallbacks = {
         responseRoundId?: string;
         editableResponseText?: string;
     }, options?: {
-        promptHidden?: boolean;
+        responseBatchId?: string;
+        rawResponseText?: string;
     }) => void | Promise<void>;
     onToolNotice?: (notice: string) => void;
-    onToolResult?: (content: string) => void;
-    onToolAssistantTurn?: (content: string) => void;
+    onToolResult?: (content: string, options?: { toolExecutionId?: string }) => void;
+    onToolAssistantTurn?: (content: string, options?: {
+        responseBatchId?: string;
+        responseRoundId?: string;
+        senderCharacterId?: string;
+        senderName?: string;
+    }) => void;
     /** 每轮 LLM 调用解析出思维链（reasoning）时触发，先于该轮 onTextPart */
     onReasoning?: (text: string) => void;
-    onToolExecution?: (results: ToolResult[], historyContent?: string) => void;
+    onToolExecution?: (results: ToolResult[], historyContent?: string, options?: { toolExecutionId?: string }) => void;
     onNativeToolAssistantTurn?: (turn: {
         content: string;
         rawContent: string;
@@ -1870,6 +1941,7 @@ export type ChatCompletionCallbacks = {
         toolCallId: string;
         name: string;
         content: string;
+        toolExecutionId?: string;
     }) => void;
 };
 
@@ -2103,6 +2175,7 @@ async function generateNativeChatCompletion(
             openRouterReasoningDetails: result.openRouterReasoningDetails,
             toolCalls: result.toolCalls,
         });
+        const toolExecutionId = createToolExecutionId();
         for (const outcome of outcomes) {
             throwIfAborted(options?.signal);
             const nativeCall = outcome.nativeCall;
@@ -2110,6 +2183,7 @@ async function generateNativeChatCompletion(
                 toolCallId: nativeCall.id,
                 name: nativeCall.name,
                 content: outcome.formattedContent,
+                toolExecutionId,
             });
             requestMessages.push({
                 role: "tool",
@@ -2122,7 +2196,9 @@ async function generateNativeChatCompletion(
         const resultsForHistory = realResults.filter(r => r.persistToHistory !== false);
         const toolResultContent = resultsForHistory.length > 0 ? formatToolResults(resultsForHistory) : "";
         throwIfAborted(options?.signal);
-        if (realResults.length > 0) callbacks?.onToolExecution?.(realResults, toolResultContent || undefined);
+        if (realResults.length > 0) {
+            callbacks?.onToolExecution?.(realResults, toolResultContent || undefined, { toolExecutionId });
+        }
 
         for (const r of realResults) {
             for (const att of r.mediaAttachments || []) {
@@ -2226,10 +2302,18 @@ export async function generateChatCompletion(
             break;
         }
 
-        // Save raw text as assistant message (with tool tags preserved)
+        // Store ordinary prose as normal assistant messages. The directive itself is a
+        // separate hidden tool_call record in the same response batch.
         throwIfAborted(options?.signal);
-        callbacks?.onToolAssistantTurn?.(filteredOutput);
-        await callbacks?.onTextPart?.(afterActionStrip, undefined, { promptHidden: true });
+        const responseBatchId = createResponseBatchId();
+        const toolDirectiveText = extractTextToolDirectiveText(afterActionStrip);
+        await callbacks?.onTextPart?.(afterActionStrip, undefined, {
+            responseBatchId,
+            rawResponseText: afterActionStrip,
+        });
+        if (toolDirectiveText) {
+            callbacks?.onToolAssistantTurn?.(toolDirectiveText, { responseBatchId });
+        }
         parts.push({ text: filteredOutput });
 
         // Helper: find insert index for injecting after history
@@ -2301,11 +2385,12 @@ export async function generateChatCompletion(
             const resultsForContinuation = results.filter(r => r.continueConversation !== false);
             const toolResultContent = resultsForHistory.length > 0 ? formatToolResults(resultsForHistory) : "";
             throwIfAborted(options?.signal);
-            callbacks?.onToolExecution?.(results, toolResultContent || undefined);
+            const toolExecutionId = createToolExecutionId();
+            callbacks?.onToolExecution?.(results, toolResultContent || undefined, { toolExecutionId });
 
             if (toolResultContent && resultsForContinuation.length > 0) {
                 throwIfAborted(options?.signal);
-                callbacks?.onToolResult?.(toolResultContent);
+                callbacks?.onToolResult?.(toolResultContent, { toolExecutionId });
                 const idx = findInsertIdx();
                 const insertions: LLMMessage[] = [
                     { role: "assistant", content: assistantForToolContext, _debugMeta: { _fromHistory: true } },
