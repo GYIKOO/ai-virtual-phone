@@ -30,6 +30,7 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 |---|---|---|---|---|
 | 2026-07-12 | `e136608` | 121 | 无 | 首次同步。新增联机玩法、全屏特效、思维链展示/翻译、栖所 2.0、dock 拖拽等。新依赖 `@supabase/realtime-js`；新增 `docs/online-play-supabase.sql`、`docs/moderation-supabase.sql` 需按需执行。 |
 | 2026-07-27 | `f86efc4` | 24 | 1 处（`chat-room.tsx`） | 聊天扩展插件系统（可执行 JS 沙箱）、Minimax 语音 language_boost、设置页账号管理、记忆库 iOS 内存防护等。无新依赖、无新 SQL、无新环境变量。冲突源于上游把 `chat-room.tsx` 从混合换行符统一为纯 LF，与我们插入的 2 行重叠；取我方内容并跟随上游归一化即可。 |
+| 2026-08-01 | `a3f1419` | 51 | 无（上游未碰我们的 6 个文件） | 微信云端助手（Supabase Edge Function 一键部署）、桌面 DIY 组件套件、预设/世界书/正则条目左滑操作、主页名片组件、应用市场防套取（私有桶签名下载）。无新依赖；build 脚本前置了 `build-weixin-assistant-dist.mjs`。**需重跑 SQL**：`game-hall`、`black-market`、`custom-app-market` 三个脚本有安全加固（收回 anon 直读等），已部署这些功能的站点应在 Supabase 重跑对应脚本（或直接跑 `supabase-all-in-one.sql`）。 |
 
 > 回滚点：同步前会打 tag（如 `pre-upstream-sync-2026-07`），出问题可 `git reset --hard <tag>`。
 
