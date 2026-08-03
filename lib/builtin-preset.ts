@@ -6,7 +6,7 @@ import type { PresetConfig } from "./settings-types";
 import { getCheckPhonePromptTags } from "./checkphone-config";
 
 export const BUILTIN_PRESET_ID = "builtin_default_v1";
-export const BUILTIN_PRESET_VERSION = 257; // 升版本会用出厂内容重写用户的内置预设副本（自定义会丢），非必要不升
+export const BUILTIN_PRESET_VERSION = 258; // 升版本会用出厂内容重写用户的内置预设副本（自定义会丢），非必要不升
 
 export function createBuiltinPreset(): PresetConfig {
     const now = Date.now();
@@ -634,6 +634,7 @@ export function createBuiltinPreset(): PresetConfig {
                     "- *绝对禁止煽情、发鸡汤、强行升华上价值*。别整文绉绉的文案，禁止装逼（除非人设如此）。",
                     "- 从最近真实生活/日程/心情取材，落于实际，别假大空。",
                     "- 不必每条都有意义、都得有人理，允许发一条很日常、甚至没人回的流水账。",
+                    "- 【关于{{user}}的铁律】动态里凡是涉及{{user}}的内容——{{user}}的状态、行程、身体状况（生病发烧受伤等）、说过的话、做过的事——必须能在聊天记录、{{user}}自己的动态或既有记忆里找到出处，严禁虚构。拿不准有没有发生过的，就不要在动态里提{{user}}。你自己的生活细节可以自由发挥。",
                     "- 如需表情，直接输出真实 emoji 字符，如 😂、😏；禁止使用 [抠鼻]、[吃瓜]、[捂脸] 这类方括号表情。",
                     "",
                     "#发朋友圈指令：",
@@ -684,6 +685,7 @@ export function createBuiltinPreset(): PresetConfig {
                     "要求：",
                     "- 像跟朋友互动一样，亲切自然，符合你和{{user}}的关系",
                     "- 看到不认识的人的评论可以忽略，也可以就内容接话，但不要假装认识",
+                    "- 不要虚构{{user}}动态之外的事实（比如断言{{user}}生病了、去过哪里、和谁见过面）；评论只围绕动态本身和你确实知道的事。",
                     "- 评论简短自然（1-2句话）",
                     "- 符合{{char}}的性格和说话方式",
                     "- 可以使用emoji",
@@ -725,6 +727,7 @@ export function createBuiltinPreset(): PresetConfig {
                     "",
                     "- 禁止使用{{user}}、用户人设名、用户昵称、“我”、“本人”、“用户”等用户身份作为NPC昵称发评论、楼中楼回复或点赞",
                     "- 如果已有互动中出现{{user}}的真实评论，只能把{{user}}作为可被回复对象，不能伪装成NPC替{{user}}新增评论、回复或点赞",
+                    "- NPC评论不得虚构{{user}}的经历或状态（生病、行程、做过的事）当作已知信息来聊；NPC不了解的事就不要提。",
                     "- 人数不固定，根据动态内容自然决定，不要每次都很多人互动",
                     "",
                     "#活人感",
