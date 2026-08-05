@@ -30,6 +30,8 @@ import {
   formatShadowCredits,
   getBlackMarketCatalog,
   getBlackMarketSceneSession,
+  isLocalTestTheaterId,
+  upsertLocalTestTheater,
   appendBlackMarketSceneMessage,
   loadAllBlackMarketTheaterProjectionEntries,
   loadBlackMarketSceneSessions,
@@ -61,13 +63,14 @@ import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import type { BlackMarketOwnedTheater, BlackMarketRenderRule, BlackMarketSceneSession, BlackMarketState, BlackMarketTheaterProjectionEntry, BlackMarketTheaterTemplate } from "@/lib/black-market-types";
+import { IFRAME_ERROR_CAPTURE_SCRIPT } from "@/lib/qa-iframe-error-bridge";
 
 type BlackMarketAppProps = {
   onClose: () => void;
 };
 
 type BlackMarketTab = "market" | "vault" | "ledger" | "studio";
-type BlackMarketStudioMode = "published" | "drafts" | "create";
+type BlackMarketStudioMode = "published" | "drafts" | "create" | "localtest";
 type BlackMarketPreviewMode = "info" | "opening";
 type BlackMarketSceneBusy = "reply" | "summary" | null;
 type BlackMarketDeleteTarget =
@@ -316,7 +319,7 @@ html,body{
 })();
 </script>`;
 
-  return /<\/body>/i.test(base) ? base.replace(/<\/body>/i, `${bridge}</body>`) : `${base}${bridge}`;
+  return /<\/body>/i.test(base) ? base.replace(/<\/body>/i, `${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}</body>`) : `${base}${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}`;
 }
 
 function createBlackMarketReplyFrameSrcDoc(html: string, frameId: string): string {
@@ -395,7 +398,7 @@ ${body}
 })();
 </script>`;
 
-  return /<\/body>/i.test(base) ? base.replace(/<\/body>/i, `${bridge}</body>`) : `${base}${bridge}`;
+  return /<\/body>/i.test(base) ? base.replace(/<\/body>/i, `${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}</body>`) : `${base}${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}`;
 }
 
 function BlackMarketTheaterHtmlFrame({
@@ -889,6 +892,12 @@ export function BlackMarketApp({ onClose }: BlackMarketAppProps) {
   const editingStudioDraft = useMemo(
     () => editingDraftId ? studioDrafts.find(item => item.id === editingDraftId) ?? null : null,
     [editingDraftId, studioDrafts],
+  );
+  const localTestTheaters = useMemo(
+    () => state.ownedTheaters
+      .filter(item => isLocalTestTheaterId(item.localId))
+      .sort((a, b) => (b.lastUsedAt || b.purchasedAt).localeCompare(a.lastUsedAt || a.purchasedAt)),
+    [state.ownedTheaters],
   );
   const publishChoiceSourceTemplate = useMemo(
     () => publishChoice ? communityTheaters.find(item => item.id === publishChoice.sourceTemplateId) ?? null : null,
@@ -1671,6 +1680,41 @@ export function BlackMarketApp({ onClose }: BlackMarketAppProps) {
     };
   }
 
+  function localTestDraft(): void {
+    try {
+      const template = { ...buildDraftTemplate(editingTemplate), source: "local" as const };
+      // 稳定 key：优先用草稿 id；若是未保存的新草稿，先存草稿再测，保证重复测试幂等
+      let draftId = editingDraftId;
+      if (!draftId) {
+        draftId = createStudioDraftId();
+        const now = new Date().toISOString();
+        const title = draft.title.trim() || "未命名草稿";
+        setEditingDraftId(draftId);
+        setStudioDrafts(current => saveBlackMarketStudioDrafts([
+          { id: draftId as string, title, draft, createdAt: now, updatedAt: now },
+          ...current.filter(item => item.id !== draftId),
+        ]));
+      }
+      const result = upsertLocalTestTheater(draftId, template);
+      if (!result.ok || !result.ownedTheater) {
+        showNotice("error", result.error || "当前草稿无法测试");
+        return;
+      }
+      setState(result.state);
+      openSceneLauncher(result.ownedTheater);
+    } catch (err) {
+      showNotice("error", err instanceof Error ? err.message : "当前草稿无法测试");
+    }
+  }
+
+  function handleDeleteLocalTestTheater(localId: string): void {
+    const result = deleteBlackMarketOwnedTheater(localId);
+    if (result.ok) {
+      setState(result.state);
+      showNotice("info", "已删除本机测试剧场");
+    }
+  }
+
   async function publishCurrentDraft(mode: "auto" | "new" | "overwrite-source" = "auto"): Promise<void> {
     setPublishing(true);
     try {
@@ -2013,7 +2057,7 @@ export function BlackMarketApp({ onClose }: BlackMarketAppProps) {
               <b>{publishedTheaters.length} PUBLISHED · {studioDrafts.length} DRAFTS</b>
             </div>
 
-            <div className="cp-black-market-studio-tabs" role="tablist" aria-label="发布管理">
+            <div className="cp-black-market-studio-tabs cp-black-market-studio-tabs-4" role="tablist" aria-label="发布管理">
               <button
                 type="button"
                 role="tab"
@@ -2040,6 +2084,15 @@ export function BlackMarketApp({ onClose }: BlackMarketAppProps) {
                 onClick={() => setStudioMode("drafts")}
               >
                 草稿箱
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={studioMode === "localtest"}
+                className={studioMode === "localtest" ? "is-active" : ""}
+                onClick={() => setStudioMode("localtest")}
+              >
+                本机测试
               </button>
             </div>
 
@@ -2113,6 +2166,49 @@ export function BlackMarketApp({ onClose }: BlackMarketAppProps) {
                         </div>
                       </article>
                     ))}
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            {studioMode === "localtest" ? (
+              <div className="cp-black-market-studio-panel">
+                <h3>本机测试</h3>
+                <p className="cp-black-market-studio-hint">从草稿点「本机测试」会本地上架到这里，可反复启封试演，且会写入记忆、进入回传记录，但不会发布到市场，也不扣暗币。</p>
+                {localTestTheaters.length === 0 ? (
+                  <div className="cp-black-market-empty">还没有本机测试的剧场。<br />在草稿编辑里点「本机测试」即可。</div>
+                ) : (
+                  <div className="cp-black-market-published-list">
+                    {localTestTheaters.map(item => {
+                      const linkedDraftId = item.localId.slice("localtest_theater_".length);
+                      const linkedDraft = studioDrafts.find(d => d.id === linkedDraftId);
+                      return (
+                        <article key={item.localId} className="cp-black-market-published-card">
+                          <div>
+                            <span>本机测试{item.useCount > 0 ? ` · 试演 ${item.useCount} 次` : ""}</span>
+                            <strong>{item.templateSnapshot.title}</strong>
+                            <p>{item.templateSnapshot.subtitle || item.templateSnapshot.synopsis || item.templateSnapshot.storyText}</p>
+                            <time>{formatBlackMarketDate(item.lastUsedAt || item.purchasedAt)}</time>
+                          </div>
+                          <div className="cp-black-market-published-actions">
+                            <button type="button" className="is-primary" onClick={() => openSceneLauncher(item)}>
+                              <Play size={14} />
+                              启封试演
+                            </button>
+                            {linkedDraft ? (
+                              <button type="button" onClick={() => beginEditStudioDraft(linkedDraft)}>
+                                <Pencil size={14} />
+                                编辑草稿
+                              </button>
+                            ) : null}
+                            <button type="button" className="is-danger" onClick={() => handleDeleteLocalTestTheater(item.localId)}>
+                              <Trash2 size={14} />
+                              DELETE
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -2298,6 +2394,10 @@ export function BlackMarketApp({ onClose }: BlackMarketAppProps) {
                     <button type="button" onClick={() => setPreviewNonce(value => value + 1)}>
                       <Play size={14} />
                       刷新预览
+                    </button>
+                    <button type="button" onClick={localTestDraft}>
+                      <Play size={14} />
+                      本机测试
                     </button>
                     <button type="button" className="is-primary" disabled={publishing} onClick={() => void handlePublishDraft()}>
                       <Send size={14} />
