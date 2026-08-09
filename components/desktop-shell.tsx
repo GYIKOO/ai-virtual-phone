@@ -63,7 +63,9 @@ import {
 import {
   CUSTOM_APPS_UPDATED_EVENT,
   CUSTOM_APP_PLACE_DESKTOP_EVENT,
+  loadCustomAppIconStyles,
   loadInstalledCustomApps,
+  type CustomAppIconStyle,
 } from "@/lib/custom-app-storage";
 import {
   isCustomAppMarketItemNewerThanInstalled,
@@ -955,6 +957,14 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [notice, setNotice] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
+  // 自定义 APP 桌面图标样式偏好（global = 忽略上传图标走全局效果）
+  const [customAppIconStyles, setCustomAppIconStyles] = useState<Record<string, CustomAppIconStyle>>({});
+  useEffect(() => {
+    const syncIconStyles = () => setCustomAppIconStyles(loadCustomAppIconStyles());
+    syncIconStyles();
+    window.addEventListener(CUSTOM_APPS_UPDATED_EVENT, syncIconStyles);
+    return () => window.removeEventListener(CUSTOM_APPS_UPDATED_EVENT, syncIconStyles);
+  }, []);
   const [customAppUpdatePrompt, setCustomAppUpdatePrompt] = useState<PendingCustomAppUpdatePrompt | null>(null);
   const [customAppUpdateBusy, setCustomAppUpdateBusy] = useState(false);
   const customAppUpdateCheckingRef = useRef<Set<string>>(new Set());
@@ -3907,7 +3917,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                               const builtinIconId = customApp ? null : icon.id as IconId;
                               const iconSkinId = activeIconSkins[iconId];
                               const iconSkinUrl = iconSkinId ? themeAssets[iconSkinId] ?? null : null;
-                              const customIconUrl = customApp?.iconDataUrl ?? null;
+                              const customIconUrl = customApp && customAppIconStyles[customApp.id] !== "global"
+                                ? customApp.iconDataUrl ?? null
+                                : null;
                               const iconImageUrl = iconSkinUrl || customIconUrl;
                               const hasImageIcon = Boolean(iconImageUrl);
                               const isDragging = dragItem?.type === "icon" && dragItem.id === iconId;
@@ -4045,7 +4057,9 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     const builtinIconId = customApp ? null : (icon.id as IconId);
                     const iconSkinId = activeIconSkins[iconId];
                     const iconSkinUrl = iconSkinId ? themeAssets[iconSkinId] ?? null : null;
-                    const customIconUrl = customApp?.iconDataUrl ?? null;
+                    const customIconUrl = customApp && customAppIconStyles[customApp.id] !== "global"
+                      ? customApp.iconDataUrl ?? null
+                      : null;
                     const iconImageUrl = iconSkinUrl || customIconUrl;
                     const hasImageIcon = Boolean(iconImageUrl);
                     const isDragging = dragItem?.type === "icon" && dragItem.id === iconId;

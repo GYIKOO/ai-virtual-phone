@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   Check,
@@ -404,6 +404,91 @@ ${body}
   return /<\/body>/i.test(base) ? base.replace(/<\/body>/i, `${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}</body>`) : `${base}${IFRAME_ERROR_CAPTURE_SCRIPT}${bridge}`;
 }
 
+/** 找到最近的纵向滚动祖先（用于 iframe 高度变化时的手动滚动锚定） */
+function findScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const style = window.getComputedStyle(node);
+    if (/(auto|scroll)/.test(style.overflowY)) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/**
+ * iframe 高度异步上报（加载后 80/500/1600ms 修正）时，若 iframe 整体位于
+ * 滚动视口上方，内容会被向下顶、视口里的内容瞬间上移（iOS 无滚动锚定）。
+ * 这里手动补偿 scrollTop 保持视觉稳定；配套 CSS 已关掉原生 overflow-anchor，
+ * 避免 Chrome 双重补偿。返回 setter：记下补偿量再更新高度。
+ */
+function useAnchoredFrameHeight(
+  iframeRef: { current: HTMLIFrameElement | null },
+  minHeight: number,
+): [number, (next: number) => void] {
+  const [height, setHeight] = useState(minHeight);
+  const heightRef = useRef(minHeight);
+  const pendingAdjustRef = useRef(0);
+
+  const applyHeight = (raw: number) => {
+    const next = Math.max(minHeight, Math.round(raw));
+    const prev = heightRef.current;
+    if (next === prev) return;
+    const el = iframeRef.current;
+    const scroller = findScrollParent(el);
+    if (el && scroller) {
+      if (next < prev) {
+        // 贴底钳位保护：缩小会减短 scrollHeight，若剩余可滚距离不够，
+        // scrollTop 会被浏览器钳位、视口瞬间上跳——此时放弃本次缩小，
+        // 等桥接脚本下次上报（离开底部后）再收紧。
+        const slack = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+        if (prev - next > slack - 4) return;
+      }
+      const frameBottom = el.getBoundingClientRect().bottom;
+      const viewTop = scroller.getBoundingClientRect().top;
+      if (frameBottom <= viewTop + 1) pendingAdjustRef.current += next - prev;
+    }
+    heightRef.current = next;
+    setHeight(next);
+  };
+
+  useLayoutEffect(() => {
+    if (!pendingAdjustRef.current) return;
+    const scroller = findScrollParent(iframeRef.current);
+    if (scroller) scroller.scrollTop += pendingAdjustRef.current;
+    pendingAdjustRef.current = 0;
+  });
+
+  return [height, applyHeight];
+}
+
+/** 终端时钟（独立组件：避免每秒把整个黑市页拉着重渲染） */
+function BlackMarketTerminalClock() {
+  const [time, setTime] = useState("00:00:00");
+  useEffect(() => {
+    const tick = () => {
+      const date = new Date();
+      const pad = (value: number) => String(value).padStart(2, "0");
+      setTime(`${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`);
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <>{time}</>;
+}
+
+/** 假延迟数字（独立组件：避免每 2.6 秒整页重渲染） */
+function BlackMarketLatencyMeter() {
+  const [latency, setLatency] = useState(147);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setLatency(118 + Math.floor(Math.random() * 74));
+    }, 2600);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <>{latency}ms</>;
+}
+
 function BlackMarketTheaterHtmlFrame({
   html,
   title,
@@ -417,7 +502,9 @@ function BlackMarketTheaterHtmlFrame({
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [frameId] = useState(() => `bm_theater_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-  const [height, setHeight] = useState(BLACK_MARKET_THEATER_FRAME_MIN_HEIGHT);
+  const [height, applyHeight] = useAnchoredFrameHeight(iframeRef, BLACK_MARKET_THEATER_FRAME_MIN_HEIGHT);
+  const applyHeightRef = useRef(applyHeight);
+  applyHeightRef.current = applyHeight;
   const [collapsed, setCollapsed] = useState(false);
   const srcDoc = useMemo(() => createBlackMarketTheaterFrameSrcDoc(html, frameId), [frameId, html]);
   const canCollapse = collapsible && height > BLACK_MARKET_THEATER_FRAME_COLLAPSE_THRESHOLD;
@@ -440,7 +527,7 @@ function BlackMarketTheaterHtmlFrame({
       if (!isBridgeResize && !isLegacyResize) return;
       const nextHeight = Number(record.height);
       if (!Number.isFinite(nextHeight)) return;
-      setHeight(Math.max(BLACK_MARKET_THEATER_FRAME_MIN_HEIGHT, Math.round(nextHeight)));
+      applyHeightRef.current(nextHeight);
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
@@ -507,7 +594,9 @@ function renderSceneMessageHtml(content: string, template?: BlackMarketTheaterTe
 function BlackMarketReplyHtmlFrame({ html, title, allowExternalControl = false }: { html: string; title: string; allowExternalControl?: boolean }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [frameId] = useState(() => `bm_reply_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`);
-  const [height, setHeight] = useState(BLACK_MARKET_REPLY_FRAME_MIN_HEIGHT);
+  const [height, applyHeight] = useAnchoredFrameHeight(iframeRef, BLACK_MARKET_REPLY_FRAME_MIN_HEIGHT);
+  const applyHeightRef = useRef(applyHeight);
+  applyHeightRef.current = applyHeight;
   const srcDoc = useMemo(() => createBlackMarketReplyFrameSrcDoc(html, frameId), [frameId, html]);
 
   useEffect(() => {
@@ -519,7 +608,7 @@ function BlackMarketReplyHtmlFrame({ html, title, allowExternalControl = false }
       if (record.source !== "black-market-reply-canvas" || record.type !== "resize" || record.id !== frameId) return;
       const nextHeight = Number(record.height);
       if (!Number.isFinite(nextHeight)) return;
-      setHeight(Math.max(BLACK_MARKET_REPLY_FRAME_MIN_HEIGHT, Math.round(nextHeight)));
+      applyHeightRef.current(nextHeight);
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
@@ -818,6 +907,8 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
   const [communityTheaters, setCommunityTheaters] = useState<BlackMarketTheaterTemplate[]>([]);
   const [communityLoading, setCommunityLoading] = useState(false);
   const [communityError, setCommunityError] = useState<string | null>(null);
+  const [communityErrorDialog, setCommunityErrorDialog] = useState<string | null>(null);
+  const dismissedCommunityErrorRef = useRef<string | null>(null);
   const [walletBusy, setWalletBusy] = useState<"sync" | "checkin" | "purchase" | null>(null);
   const [studioMode, setStudioMode] = useState<BlackMarketStudioMode>("published");
   const defaultDraft = useMemo(() => createDefaultDraft(), []);
@@ -831,8 +922,6 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
   const [deleteTarget, setDeleteTarget] = useState<BlackMarketDeleteTarget | null>(null);
   const [recordMenuId, setRecordMenuId] = useState<string | null>(null);
   const [previewNonce, setPreviewNonce] = useState(0);
-  const [terminalTime, setTerminalTime] = useState("00:00:00");
-  const [latency, setLatency] = useState(147);
   const [launchOwnedId, setLaunchOwnedId] = useState<string | null>(null);
   const [launchCharacterId, setLaunchCharacterId] = useState("");
   const [activeScene, setActiveScene] = useState<BlackMarketSceneSession | null>(null);
@@ -972,23 +1061,13 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
     };
   }, [account.id]);
 
+  // 云端同步失败改为一次性弹窗（同一条错误只弹一次），不再常驻横幅——自部署无云端时界面保持干净
   useEffect(() => {
-    const tick = () => {
-      const date = new Date();
-      const pad = (value: number) => String(value).padStart(2, "0");
-      setTerminalTime(`${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`);
-    };
-    tick();
-    const timer = window.setInterval(tick, 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setLatency(118 + Math.floor(Math.random() * 74));
-    }, 2600);
-    return () => window.clearInterval(timer);
-  }, []);
+    if (communityError && dismissedCommunityErrorRef.current !== communityError) {
+      dismissedCommunityErrorRef.current = communityError;
+      setCommunityErrorDialog(communityError);
+    }
+  }, [communityError]);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -1652,6 +1731,24 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
     }
   }
 
+  // 已发布档案直接导出为草稿文件（拉全量模板转换，不经过创建表单）
+  async function exportPublishedTemplateFile(template: BlackMarketTheaterTemplate): Promise<void> {
+    try {
+      const fullTemplate = await ensureFullTheaterTemplate(template);
+      const payload = {
+        type: "ai-phone-theater-draft",
+        version: 1,
+        title: fullTemplate.title,
+        draft: createDraftFromTemplate(fullTemplate),
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      await downloadFile(blob, `${fullTemplate.title.trim() || "剧场草稿"}.json`);
+      showNotice("success", "已导出为草稿文件");
+    } catch (err) {
+      showNotice("error", err instanceof Error ? err.message : "导出失败");
+    }
+  }
+
   // 导入草稿 JSON：整张创建表单自动填好（入口在「创建发布」表单顶部）
   async function importStudioDraftFile(file: File): Promise<void> {
     try {
@@ -1952,9 +2049,9 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
           <span className="is-green">CONNECTED</span>
           <span>·</span>
           <span>TOR://night-channel.onion</span>
-          <b>{terminalTime}</b>
+          <b><BlackMarketTerminalClock /></b>
           <span>·</span>
-          <span>{latency}ms</span>
+          <span><BlackMarketLatencyMeter /></span>
         </section>
 
         <div className="cp-black-market-warning">△ THIS SESSION IS BEING MONITORED △</div>
@@ -1973,7 +2070,7 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
           <div className="cp-black-market-camera" aria-hidden="true">
             <span className="cp-black-market-camera-rec">● REC</span>
             <span className="cp-black-market-camera-sig">SIG -72dB</span>
-            <span className="cp-black-market-camera-id">OPERATOR_03 / {terminalTime}</span>
+            <span className="cp-black-market-camera-id">OPERATOR_03 / <BlackMarketTerminalClock /></span>
           </div>
           <div className="cp-black-market-operator-info">
             <div className="cp-black-market-operator-label">OPERATOR_03</div>
@@ -1992,7 +2089,6 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
               </button>
             </div>
           </div>
-          {communityError ? <div className="cp-black-market-sync-error">{communityError}</div> : null}
         </section>
 
         <section className="cp-black-market-wallet">
@@ -2139,6 +2235,10 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
                           <button type="button" onClick={() => void beginEditPublished(template)}>
                             <Pencil size={14} />
                             MODIFY
+                          </button>
+                          <button type="button" onClick={() => void exportPublishedTemplateFile(template)}>
+                            <Download size={14} />
+                            EXPORT
                           </button>
                           <button
                             type="button"
@@ -2411,6 +2511,28 @@ export function BlackMarketApp({ onClose, autoOpenLocalId }: BlackMarketAppProps
       {notice ? (
         <div key={notice.id} className={`cp-black-market-toast cp-black-market-toast--${notice.tone}`} role="status">
           {notice.text}
+        </div>
+      ) : null}
+
+      {communityErrorDialog ? (
+        <div className="cp-black-market-modal cp-black-market-confirm-modal" role="presentation" onClick={() => setCommunityErrorDialog(null)}>
+          <section className="cp-black-market-modal-card cp-black-market-confirm-card" role="alertdialog" aria-modal="true" aria-label="云端同步失败" onClick={event => event.stopPropagation()}>
+            <div className="cp-black-market-modal-head">
+              <div>
+                <span>SYNC ERROR</span>
+                <strong>云端同步失败</strong>
+              </div>
+              <button type="button" onClick={() => setCommunityErrorDialog(null)}>关闭</button>
+            </div>
+            <div className="cp-black-market-confirm-body">
+              <div className="cp-black-market-confirm-code">OFFLINE_MODE</div>
+              <p>{communityErrorDialog}</p>
+              <span>本地暗柜、内置档案与本机测试不受影响。</span>
+            </div>
+            <div className="cp-black-market-modal-actions cp-black-market-confirm-actions">
+              <button type="button" className="is-primary" onClick={() => setCommunityErrorDialog(null)}>知道了</button>
+            </div>
+          </section>
         </div>
       ) : null}
 

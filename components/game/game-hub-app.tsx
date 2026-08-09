@@ -708,6 +708,15 @@ export function GameHubApp({ onClose, autoOpenLocalId }: { onClose: () => void; 
   const [communityGames, setCommunityGames] = useState<GameTemplate[]>([]);
   const [communityLoading, setCommunityLoading] = useState(false);
   const [communityError, setCommunityError] = useState<string | null>(null);
+  const [communityErrorDialog, setCommunityErrorDialog] = useState<string | null>(null);
+  const dismissedCommunityErrorRef = useRef<string | null>(null);
+  // 云端同步失败改为一次性弹窗（同一条错误只弹一次），不再常驻横幅——自部署无云端时界面保持干净
+  useEffect(() => {
+    if (communityError && dismissedCommunityErrorRef.current !== communityError) {
+      dismissedCommunityErrorRef.current = communityError;
+      setCommunityErrorDialog(communityError);
+    }
+  }, [communityError]);
   const [notice, setNotice] = useState<GameNotice | null>(null);
   const [selectedTemplate, setSelectedTemplate] = useState<GameTemplate | null>(null);
   const [creatorPageOpen, setCreatorPageOpen] = useState(false);
@@ -1333,6 +1342,24 @@ export function GameHubApp({ onClose, autoOpenLocalId }: { onClose: () => void; 
   }
 
   // 导出草稿为 JSON 文件（blob 下载，不触发页面刷新），可发给别人从草稿箱「从文件导入」
+  // 已发布游戏直接导出为草稿文件（拉全量模板转换，不经过创建表单）
+  async function exportPublishedGameFile(template: GameTemplate): Promise<void> {
+    try {
+      const fullTemplate = await ensureFullGameTemplate(template);
+      const payload = {
+        type: "ai-phone-game-draft",
+        version: 1,
+        title: fullTemplate.title,
+        draft: draftFromTemplate(fullTemplate),
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      await downloadFile(blob, `${fullTemplate.title.trim() || "游戏草稿"}.json`);
+      showNotice("success", "已导出为草稿文件");
+    } catch (err) {
+      showNotice("error", err instanceof Error ? err.message : "导出失败");
+    }
+  }
+
   async function exportDraftFile(item: GameHallDraft): Promise<void> {
     try {
       const payload = { type: "ai-phone-game-draft", version: 1, title: item.title, draft: item.draft };
@@ -2371,6 +2398,7 @@ export function GameHubApp({ onClose, autoOpenLocalId }: { onClose: () => void; 
             <div className="game-studio-card-menu-pop" onClick={event => event.stopPropagation()}>
               <button type="button" onClick={() => { setStudioMenuId(null); void editPublished(template); }}>编辑</button>
               <button type="button" onClick={() => { setStudioMenuId(null); openTemplateDetails(template); }}>查看详情</button>
+              <button type="button" onClick={() => { setStudioMenuId(null); void exportPublishedGameFile(template); }}>导出文件</button>
               <button type="button" className="is-danger" onClick={() => { setStudioMenuId(null); void deletePublished(template); }}>删除</button>
             </div>
           ) : null}
@@ -2699,8 +2727,6 @@ export function GameHubApp({ onClose, autoOpenLocalId }: { onClose: () => void; 
       </header>
 
       <main className={`game-hub-scroll ${creatorPageOpen || selectedTemplate ? "game-hub-scroll--page" : ""} ${selectedTemplate ? "game-hub-scroll--detail" : ""}`}>
-        {communityError ? <div className="game-error">{communityError}</div> : null}
-
         {selectedTemplate ? renderTemplateDetailPage(selectedTemplate) : null}
 
         {!selectedTemplate && !creatorPageOpen && mainView === "hall" ? (
@@ -3151,6 +3177,33 @@ export function GameHubApp({ onClose, autoOpenLocalId }: { onClose: () => void; 
             <div className="game-modal-actions">
               <button type="button" onClick={() => setCoverDeleteConfirmOpen(false)}>取消</button>
               <button type="button" className="is-danger" onClick={confirmDeleteCoverImage}>确认删除</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {communityErrorDialog ? (
+        <div className="game-modal" role="presentation" onClick={() => setCommunityErrorDialog(null)}>
+          <section
+            className="game-modal-card"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="云端同步失败"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="game-modal-head">
+              <div>
+                <span>SYNC</span>
+                <strong>云端同步失败</strong>
+              </div>
+              <button type="button" aria-label="关闭" onClick={() => setCommunityErrorDialog(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="game-delete-copy">{communityErrorDialog}</p>
+            <p className="game-delete-copy">本地草稿、已装内容和本机测试不受影响；自部署未配置云端市场时可通过「导入文件」使用本地内容。</p>
+            <div className="game-modal-actions">
+              <button type="button" onClick={() => setCommunityErrorDialog(null)}>知道了</button>
             </div>
           </section>
         </div>
