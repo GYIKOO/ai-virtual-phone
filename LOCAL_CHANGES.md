@@ -108,6 +108,16 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 
 ---
 
+## 本地构建已知怪癖：OneDrive 竞态偶发吞掉 backdrop-filter 后处理
+
+仓库在 OneDrive 目录下。`next build` 刚写完 `.next/static/css` 时 OneDrive 会抢着上传，
+那几秒内目录项可能不被识别为普通文件，`scripts/restore-backdrop-filter.mjs` 会打出
+`scanned 0 css files` 并静默跳过（2026-08-10 实测复现，几分钟后自愈）。
+
+- **识别**：构建输出末尾若见 `scanned 0 css files`（正常应为 4 个左右）即中招。
+- **修复**：稍等片刻后手动补跑一次 `node scripts/restore-backdrop-filter.mjs`（幂等）。
+- **影响范围**：仅本地构建产物；Netlify/Vercel 在云端构建，不受影响。
+
 ## 换行符陷阱（已于 2026-07-27 同步后解除，保留备查）
 
 本仓库 `core.autocrlf=true` 且没有 `.gitattributes`。**`chat-room.tsx` 曾经**在 blob 里存着
