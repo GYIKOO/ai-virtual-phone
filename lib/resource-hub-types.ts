@@ -25,6 +25,10 @@ export type ShareIndexEntry = {
     description: string;
     /** 投稿人（来自 .author 文件，可为空） */
     author?: string;
+    /** 投稿人头像的仓库路径（.avatar.png，可为空） */
+    avatar?: string;
+    /** 发布者钥匙的 SHA-256 指纹（.owner 内容），用于换设备认领 */
+    ownerHash?: string;
     /** 最近更新时间（ISO），索引生成时来自 git log */
     updatedAt: string | null;
 };
@@ -61,7 +65,9 @@ export type ImportDestination =
     | "custom_app"
     | "game"
     | "theater"
-    | "plugin";
+    | "plugin"
+    | "theme"
+    | "preset_entry";
 
 export const IMPORT_DESTINATIONS: Array<{ key: ImportDestination; label: string; hint: string }> = [
     { key: "preset", label: "预设", hint: "预设管理页导出的 JSON" },
@@ -75,4 +81,6 @@ export const IMPORT_DESTINATIONS: Array<{ key: ImportDestination; label: string;
     { key: "game", label: "游戏", hint: "游戏草稿箱导出的 JSON" },
     { key: "theater", label: "黑市剧场", hint: "剧场草稿箱导出的 JSON" },
     { key: "plugin", label: "插件", hint: "聊天插件 JS 源码文件" },
+    { key: "theme", label: "主题包", hint: "外观页导出的主题包 zip" },
+    { key: "preset_entry", label: "预设条目", hint: "单条预设条目，插入或覆盖到已有预设" },
 ];
