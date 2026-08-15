@@ -5,6 +5,8 @@
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import {
     RESOURCE_HUB_DEFAULT_SOURCE,
+    isPreviewImagePath,
+    stripAssetImageMark,
     type ImportDestination,
     type ResourceHubSource,
     type ShareIndex,
@@ -18,6 +20,7 @@ import {
     loadRegexes, saveRegexes, parseRegexFromJson,
 } from "./settings-storage";
 import { saveScheme } from "./css-scheme-storage";
+import { STATUS_REGION_SCHEME_TARGET } from "./chat-status-region";
 import { createOrGetSession, loadChatSessions, saveChatSessions } from "./chat-storage";
 import { readThemeProfile, writeThemeProfile } from "./theme-storage";
 import { loadGameDrafts, saveGameDrafts } from "./game-storage";
@@ -66,6 +69,16 @@ function effectiveRef(source: ResourceHubSource): string {
     return _resolvedRef?.key === sourceKey(source) ? _resolvedRef.sha : source.branch;
 }
 
+// 中转站 endpoint（与上传/送花同一个;不能 import resource-hub-upload,会循环依赖,直接读同一份配置）
+const RELAY_ENDPOINT_FALLBACK = "https://floatshare.netlify.app/.netlify/functions/upload";
+function relayEndpoint(): string {
+    try {
+        const parsed = JSON.parse(kvGet("ai_phone_resource_hub_upload_cfg_v1") || "{}") as { endpoint?: string };
+        if (parsed && typeof parsed.endpoint === "string" && parsed.endpoint.trim()) return parsed.endpoint.trim();
+    } catch { /* 用默认 */ }
+    return RELAY_ENDPOINT_FALLBACK;
+}
+
 async function resolveLatestSha(source: ResourceHubSource): Promise<string | null> {
     try {
         const res = await fetchWithTimeout(
@@ -76,7 +89,22 @@ async function resolveLatestSha(source: ResourceHubSource): Promise<string | nul
             const sha = (await res.text()).trim();
             if (/^[0-9a-f]{40}$/i.test(sha)) return sha;
         }
-    } catch { /* 拿不到就退回分支名 */ }
+    } catch { /* 走中转站兜底 */ }
+    // GitHub API 匿名配额（60 次/小时）耗尽时,请中转站代查——否则退回分支名,
+    // jsDelivr 对分支的缓存可滞后数小时,刚上传/更新的资源会一直显示旧版
+    try {
+        const res = await fetchWithTimeout(relayEndpoint(), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "head" }),
+        });
+        if (res.ok) {
+            const data = await res.json() as { ok?: boolean; sha?: string; repo?: string };
+            if (data.ok && data.repo === `${source.owner}/${source.repo}` && /^[0-9a-f]{40}$/i.test(data.sha || "")) {
+                return (data.sha as string);
+            }
+        }
+    } catch { /* 兜底也失败就退回分支名 */ }
     return null;
 }
 
@@ -171,7 +199,6 @@ function normalizeIndex(raw: unknown): ShareIndex {
     };
 }
 
-const IMAGE_RE = /\.(jpe?g|png|webp|gif)$/i;
 const DESC_NAME_RE = /^(说明\.txt|readme\.(md|txt))$/i;
 // 基建目录（上传服务/索引脚本等），不是资源，不进市场。
 // 索引脚本同样会跳过它们；这里再过滤一层，防御旧索引缓存。
@@ -239,7 +266,8 @@ async function buildIndexFromTree(source: ResourceHubSource): Promise<ShareIndex
                 });
             }
             const entry = entryMap.get(key)!;
-            if (IMAGE_RE.test(base)) entry.images.push(p);
+            // 带 .asset 标记的图片是资源本体（PNG 角色卡等），要进可下载的 files
+            if (isPreviewImagePath(base)) entry.images.push(p);
             else if (!DESC_NAME_RE.test(base)) entry.files.push(p);
         }
     }
@@ -277,7 +305,7 @@ export async function fetchShareIndex(source: ResourceHubSource): Promise<ShareI
 
 export async function downloadResourceHubFile(source: ResourceHubSource, path: string): Promise<void> {
     const buffer = await fetchResourceHubBinary(source, path);
-    const filename = path.split("/").pop() || "resource";
+    const filename = stripAssetImageMark(path.split("/").pop() || "resource");
     const { downloadFile } = await import("./download-utils");
     await downloadFile(new Blob([buffer]), filename);
 }
@@ -287,7 +315,8 @@ export async function downloadResourceHubFile(source: ResourceHubSource, path: s
 const CHAT_APP_CSS_KEY = "chat-app-custom-css";
 
 function fileBaseName(path: string): string {
-    return (path.split("/").pop() || path).replace(/\.[^.]+$/, "");
+    const name = stripAssetImageMark(path.split("/").pop() || path);
+    return name.replace(/\.[^.]+$/, "");
 }
 
 /** 目的地对文件类型的基本校验；返回错误文案或 null。 */
@@ -300,6 +329,7 @@ export function checkImportFileForDestination(destination: ImportDestination, pa
         case "worldbook":
         case "game":
         case "theater":
+        case "status_bar":
             return isJson ? null : "该目的地需要 JSON 文件";
         case "character":
             return isJson || lower.endsWith(".png") ? null : "角色卡需要 JSON 或 PNG 文件";
@@ -422,6 +452,18 @@ export async function importResourceHubFile(
             savePresets([preset, ...loadPresets()]);
             dispatch("settings-presets-updated");
             return `预设「${preset.name}」已导入`;
+        }
+        case "status_bar": {
+            const statusText = await fetchResourceHubText(source, path);
+            let statusParsed: Record<string, unknown>;
+            try { statusParsed = JSON.parse(statusText) as Record<string, unknown>; }
+            catch { throw new Error("状态栏解析失败，请确认文件是聊天信息页导出的 JSON"); }
+            const statusContract = typeof statusParsed.contract === "string" ? statusParsed.contract : "";
+            const statusRender = typeof statusParsed.renderHtml === "string" ? statusParsed.renderHtml : "";
+            if (!statusContract.trim() || !statusRender.trim()) throw new Error("状态栏解析失败，缺少输出契约或渲染代码");
+            const statusPreview = typeof statusParsed.previewRaw === "string" ? statusParsed.previewRaw : "";
+            saveScheme(STATUS_REGION_SCHEME_TARGET, displayName, JSON.stringify({ contract: statusContract, renderHtml: statusRender, previewRaw: statusPreview }));
+            return `状态栏方案「${displayName}」已存入方案库，在聊天信息 → 自定义状态栏中应用`;
         }
         case "regex": {
             const regexText = await fetchResourceHubText(source, path);

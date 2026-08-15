@@ -109,6 +109,7 @@ export const DATA_MODULES: DataModuleDefinition[] = [
         keys: [
           "ai_phone_icon_layout_v1",
           "ai_phone_icon_layout_v2",
+          "ai_phone_desktop_folders_v1",
           "ai_phone_canvas_pan_v2",
           "ai_phone_widgets_v1",
           "ai_phone_diy_templates_v1",

@@ -8,7 +8,7 @@
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { ensureIdentityKey } from "./resource-hub-identity";
 import { RESOURCE_ROOT } from "./resource-hub-client";
-import type { ResourceHubSource } from "./resource-hub-types";
+import { markAssetImageName, type ResourceHubSource } from "./resource-hub-types";
 
 const UPLOAD_CFG_KEY = "ai_phone_resource_hub_upload_cfg_v1";
 const MY_UPLOADS_KEY = "ai_phone_resource_hub_my_uploads_v1";
@@ -108,6 +108,40 @@ export function removeMyUploadRecord(path: string): void {
     saveMyUploads(loadMyUploads().filter(r => r.path !== path));
 }
 
+// ── 找回作品：丢了摊主钥匙的作者提交证明材料，管理员人工审核 ──
+
+export type OwnershipClaimInput = {
+    endpoint: string;
+    /** 仓库内路径：资源/<分类>/<资源名> */
+    path: string;
+    name: string;
+    /** 申请人当前摊主钥匙的指纹（审核通过后 .owner 会绑到它） */
+    ownerHash: string;
+    nickname: string;
+    note: string;
+    files: UploadPayloadFile[];
+};
+
+/** 提交找回申请：中转函数把证明材料开成申请 PR，等管理员在管理中心裁决 */
+export async function submitOwnershipClaim(input: OwnershipClaimInput): Promise<{ prNumber: number; prUrl: string }> {
+    const res = await fetch(input.endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            action: "claim",
+            path: input.path,
+            name: input.name,
+            ownerHash: input.ownerHash,
+            nickname: input.nickname,
+            note: input.note,
+            files: input.files,
+        }),
+    });
+    const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string; prNumber?: number; prUrl?: string };
+    if (!res.ok || !data.ok) throw new Error(data.error || `提交失败（${res.status}）`);
+    return { prNumber: data.prNumber || 0, prUrl: data.prUrl || "" };
+}
+
 // 发布用的钥匙 = 本机「摊主钥匙」。以前是一个资源一把随机钥匙，换设备就全丢；
 // 现在全部资源共用一把，导出这一行短码就能在新设备上认领回所有发布。
 function generateOwnerKey(): Promise<string> {
@@ -126,7 +160,12 @@ async function sha256Hex(text: string): Promise<string> {
     return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
 }
 
-export async function fileToUploadEntry(file: File): Promise<UploadPayloadFile> {
+/**
+ * 选中的文件 → 上传条目。
+ * asset=true 表示投稿人是从「选择资源文件」进来的：如果它是图片，加上 .asset 标记，
+ * 索引才知道这张图是资源本体（PNG 角色卡、表情包），而不是配图。
+ */
+export async function fileToUploadEntry(file: File, options?: { asset?: boolean }): Promise<UploadPayloadFile> {
     const buffer = await file.arrayBuffer();
     let binary = "";
     const bytes = new Uint8Array(buffer);
@@ -134,7 +173,8 @@ export async function fileToUploadEntry(file: File): Promise<UploadPayloadFile> 
     for (let i = 0; i < bytes.length; i += chunk) {
         binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
     }
-    return { name: file.name, contentBase64: btoa(binary) };
+    const name = options?.asset ? markAssetImageName(file.name) : file.name;
+    return { name, contentBase64: btoa(binary) };
 }
 
 // ── 方案 B：上传服务 ──

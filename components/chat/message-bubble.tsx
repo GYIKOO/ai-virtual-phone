@@ -281,14 +281,17 @@ function buildChatHtmlDocument(html: string, inline = false): string {
                 var t=e.target.closest("[data-action]");
                 if(t){e.preventDefault();window.parent.postMessage({type:"_chat_action",text:t.getAttribute("data-action")},"*")}
             },true);`;
+    // 只量 body，绝不掺 documentElement.scrollHeight：后者至少等于 iframe 视口高，
+    // 而视口高就是父层刚设下去的 iframe 高度——量到的是自己，于是高度只涨不缩，
+    // 内容收起后卡片底下会留一大片空白。body 的高度是内容撑出来的，可涨可缩。
     const resize = inline ? `
             var n=0;
             var send=function(){
                 if(n>=12)return;
                 n++;
                 var b=document.body;
-                var d=document.documentElement;
-                var h=Math.max(b?b.scrollHeight:0,d?d.scrollHeight:0,80);
+                if(!b)return;
+                var h=Math.max(Math.ceil(b.getBoundingClientRect().height),b.scrollHeight||0,80);
                 window.parent.postMessage({type:"_chat_inline_html_resize",h:h},"*");
             };
             window.addEventListener("load",send);
@@ -2057,7 +2060,15 @@ function MediaFileBubble({
 
     return (
         <div className="chat-media-file-wrap">
-            <div className="chat-media-file-card chat-media-file-generic" onClick={(e) => { e.stopPropagation(); if (url) window.open(url, "_blank"); }}>
+            <div className="chat-media-file-card chat-media-file-generic" onClick={(e) => {
+                e.stopPropagation();
+                if (!url) return;
+                // 与右侧保存按钮同路：iOS 走系统分享卡，其余平台常规下载（window.open 在 iOS 上会跳浏览器）
+                void (async () => {
+                    const { downloadUrl } = await import("@/lib/download-utils");
+                    await downloadUrl(url, ensureExtension(title, "file"));
+                })();
+            }}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                     <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" />
                 </svg>

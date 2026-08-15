@@ -25,6 +25,7 @@ import type { CustomAppToolDefinition } from "@/lib/custom-app-types";
 import { downloadFile } from "@/lib/download-utils";
 import {
     CALENDAR_MANAGEMENT_CAPABILITY_ID,
+    AGENT_COMPUTER_CAPABILITY_ID,
     LOCAL_DATA_LIBRARY_CAPABILITY_ID,
     loadInternalCapabilities,
     saveInternalCapabilities,
@@ -33,6 +34,7 @@ import {
     TOOLBOX_MANAGEMENT_CAPABILITY_ID,
 } from "@/lib/internal-capability-storage";
 import { discoverMcpTools, startMcpOAuth } from "@/lib/tool-executor";
+import { getMaxToolRounds, loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
 import { SettingsContext } from "@/components/phone-settings-app";
 import { Toggle, Input, Textarea, Select } from "@/components/ui/form";
 import { ConfirmDialog, ContentDialog } from "@/components/ui/modal";
@@ -135,6 +137,13 @@ export function ToolboxSettings() {
     const [toolboxImportError, setToolboxImportError] = useState<string | null>(null);
     const [expandedCompositePackageIds, setExpandedCompositePackageIds] = useState<Set<string>>(() => new Set());
     const [expandedCustomAppGroupIds, setExpandedCustomAppGroupIds] = useState<Set<string>>(() => new Set());
+    const [maxToolRounds, setMaxToolRounds] = useState(() => getMaxToolRounds());
+
+    const handleMaxToolRoundsChange = (value: number) => {
+        const settings = loadChatAppSettings();
+        saveChatAppSettings({ ...settings, maxToolRounds: value });
+        setMaxToolRounds(value);
+    };
 
     function refreshCustomAppTools() {
         setCustomAppTools(loadCustomAppChatTools());
@@ -794,6 +803,21 @@ export function ToolboxSettings() {
                 className="hidden"
                 onChange={handleImportTools}
             />
+            {/* 通用：单条消息的工具循环轮数上限 */}
+            <div className="ui-group-card !flex-row !items-center">
+                <div className="flex-1 flex flex-col gap-1 min-w-0">
+                    <span className="menu-label">工具轮数上限</span>
+                    <span className="menu-desc !mt-0 !whitespace-normal">单条消息最多进行几轮工具调用（每轮一次模型请求，轮内条数不限）。连续干活的任务（如角色电脑跑命令）可调高</span>
+                </div>
+                <div className="shrink-0 w-[112px]">
+                    <Select
+                        value={String(maxToolRounds)}
+                        onChange={e => handleMaxToolRoundsChange(Number(e.target.value))}
+                    >
+                        {[3, 5, 8, 12, 20].map(n => <option key={n} value={n}>{n === 5 ? "5（默认）" : n}</option>)}
+                    </Select>
+                </div>
+            </div>
             {/* REST Tools */}
             <div className="flex justify-between items-center gap-3">
                 <p className="settings-menu-section-title">Tools</p>
@@ -1048,7 +1072,8 @@ export function ToolboxSettings() {
             </div>
 
             <div className="flex flex-col gap-2">
-                {internalCapabilities.map(item => {
+                {/* 角色电脑的开关收进 设置 → 角色电脑，与小坊的开关放在一处 */}
+                {internalCapabilities.filter(item => item.id !== AGENT_COMPUTER_CAPABILITY_ID).map(item => {
                     const summary = (
                         <div className="flex-1 flex flex-col gap-1 min-w-0">
                             <div className="flex items-center gap-[6px] min-w-0">

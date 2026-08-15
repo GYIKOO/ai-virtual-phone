@@ -29,7 +29,19 @@ export type IconId =
   | "worldbuilder"
   | "qa";
 
-export type DesktopIconId = IconId | CustomAppIconId;
+// 桌面文件夹：以 folder: 前缀的 id 伪装成图标占一个格子参与拖拽/换页，
+// 内容（名字 + 成员图标）另存 DesktopFolderMap。文件夹不允许进 dock。
+export type FolderIconId = `folder:${string}`;
+
+export function isFolderIconId(id: string): id is FolderIconId {
+  return id.startsWith("folder:");
+}
+
+export function createFolderIconId(): FolderIconId {
+  return `folder:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export type DesktopIconId = IconId | CustomAppIconId | FolderIconId;
 
 export type IconPosition = { id: DesktopIconId; row: number; col: number };
 
