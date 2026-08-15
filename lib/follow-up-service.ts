@@ -99,6 +99,13 @@ export function stopFollowUpService() {
 export function scheduleFollowUp(sessionId: string, count: number, stateValues?: StateValue[]) {
     const config = loadFollowUpConfig();
 
+    // 会话级主动消息开关：关闭的会话不再排任何追发（在创建侧掐断，不留幽灵调用）
+    const proactiveSession = loadChatSessions().find(s => s.id === sessionId);
+    if (proactiveSession?.proactiveDisabled) {
+        clearFollowUpSchedule(sessionId);
+        return;
+    }
+
     if (!stateValues || stateValues.length === 0) {
         console.log(`[FollowUp] No state values, not scheduling.`);
         clearFollowUpSchedule(sessionId);
@@ -368,6 +375,8 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === sched.sessionId);
         if (!session || session.contactId !== sched.characterId) return;
+        // 会话级主动消息开关：schedule 已在上方移除，这里静默丢弃即可
+        if (session.proactiveDisabled) return;
 
         const latestMessages = loadChatMessages(session.id);
         const elapsedMinutes = Math.max(1, Math.round((Date.now() - sched.createdAt) / 60000));

@@ -40,6 +40,7 @@ export type ChatSession = {
     unreadCount: number;
     updatedAt: string; // ISO date
     isPinned: boolean;
+    proactiveDisabled?: boolean; // 屏蔽此会话的主动消息（追发/定时唤醒均不触发）；默认 undefined=允许，老会话行为不变
     backgroundImage?: string; // Add support for custom background
     autoReplied?: boolean; // Whether the initial greeting auto-reply has been triggered
     alias?: string;
