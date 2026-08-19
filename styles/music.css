@@ -2502,13 +2502,23 @@
 .music-discovery::after,
 .music-list::after {
     content: "";
-    flex: 0 0 210px;
+    flex: 0 0 96px;
 }
 
 .music-playlist-detail::after {
     content: "";
     display: block;
-    height: 210px;
+    height: 96px;
+}
+
+/* 正在播放胶囊条在场时（root 挂 data-nowbar），让位加到底栏+胶囊条全量 */
+.music-app[data-nowbar] .music-discovery::after,
+.music-app[data-nowbar] .music-list::after {
+    flex-basis: 175px;
+}
+
+.music-app[data-nowbar] .music-playlist-detail::after {
+    height: 175px;
 }
 
 /* 嵌套复用的列表（歌单详情内层、我的页分区内）不占位 */
@@ -4217,11 +4227,14 @@
     right: 20px;
 }
 
-/* Content clearance for the docked stack (tabbar 74 + bar 56 + breathing room) */
-.music-list,
-.music-discovery,
-.music-playlists,
-.music-playlist-detail {
+/* Content clearance for the docked stack (tabbar 74 + bar 56 + breathing room)
+   滚动容器（list/discovery/playlist-detail）的让位由 ::after 占位块承担，
+   这里再叠 padding 会双份留白 */
+.music-playlists {
+    padding-bottom: 96px;
+}
+
+.music-app[data-nowbar] .music-playlists {
     padding-bottom: 175px;
 }
 

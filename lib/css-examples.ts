@@ -335,7 +335,8 @@ export const CHAT_SESSION_CSS_EXAMPLE = `/* ═══ 单独聊天室 CSS 示例
   max-height: min(36vh, 340px);
 }
 
-.chat-thought-card .chat-html-inline-frame {
+.chat-thought-card .chat-html-inline-frame,
+.chat-status-bare .chat-html-inline-frame {
   max-height: min(52vh, 420px);
 }
 
@@ -848,7 +849,8 @@ export const CHAT_APP_CSS_EXAMPLE = `/* ═══ 聊天应用 CSS 示例 ══
   max-height: min(36vh, 340px);
 }
 
-.chat-thought-card .chat-html-inline-frame {
+.chat-thought-card .chat-html-inline-frame,
+.chat-status-bare .chat-html-inline-frame {
   max-height: min(52vh, 420px);
 }
 
