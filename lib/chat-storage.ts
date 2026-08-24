@@ -244,6 +244,8 @@ export type ChatMessage = {
         externalId?: string;
         direction?: "inbound" | "outbound" | "local";
         syncedAt?: string;
+        /** 云端主动回复对应的本地触发消息，用于跨时钟因果排序。 */
+        replyAfterLocalMessageId?: string;
     };
     // Group chat fields
     senderCharacterId?: string; // which character sent this assistant message in a group chat
@@ -273,6 +275,8 @@ export const CHAT_APP_SETTINGS_UPDATED_EVENT = "chat-app-settings-updated";
 export const CHAT_MESSAGE_PUSHED_EVENT = "chat-message-pushed";
 export const CHAT_MESSAGES_DELETED_EVENT = "chat-messages-deleted";
 export const CHAT_REQUEST_REPLY_EVENT = "chat-request-reply";
+/** 长按编辑整批回复后重建消息：携带新消息与编辑后的原文，供云同步回写。 */
+export const CHAT_RESPONSE_BATCH_REPLACED_EVENT = "chat-response-batch-replaced";
 
 // ── Media Preview Map ─────────────────────────
 const MEDIA_PREVIEW_MAP: Record<string, string> = {
@@ -1113,11 +1117,14 @@ export function createToolExecutionId(): string {
     return `toolrun_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & { status?: ChatMessageStatus }): ChatMessage {
+export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "status"> & {
+    status?: ChatMessageStatus;
+    createdAt?: string;
+}): ChatMessage {
     let newMsg: ChatMessage = {
         ...msg,
         id: createMessageId(),
-        createdAt: new Date().toISOString(),
+        createdAt: msg.createdAt || new Date().toISOString(),
         order: getNextMessageOrder(msg.sessionId),
         status: msg.status || "sent"
     };
@@ -1940,6 +1947,9 @@ export function replaceResponseBatchWithParts(
         rawResponseText,
         responseRoundId: firstMessage.responseRoundId,
         editableResponseText: firstMessage.editableResponseText,
+        // 云消息身份必须跟着走：丢了它，微信云同步下一轮会把原文当成「还没导入过」
+        // 再导一遍，编辑后的版本和原文并存（编辑一次多一条）。
+        cloudSync: firstMessage.cloudSync,
         statusPanel: index === (options?.metaPartIndex ?? 0) ? options?.statusPanel : undefined,
         statusRegionMode: index === (options?.metaPartIndex ?? 0) && options?.statusPanel ? options?.statusRegionMode : undefined,
         innerMonologue: index === (options?.metaPartIndex ?? 0) ? options?.innerMonologue : undefined,
@@ -1964,6 +1974,7 @@ export function replaceResponseBatchWithParts(
             responseBatchId,
             responseRoundId: firstMessage.responseRoundId,
             editableResponseText: firstMessage.editableResponseText,
+            cloudSync: firstMessage.cloudSync,
             followUpIndex: firstMessage.followUpIndex,
             senderCharacterId: firstMessage.senderCharacterId,
             senderName: firstMessage.senderName,
@@ -1990,7 +2001,20 @@ export function replaceResponseBatchWithParts(
         saveChatSessions(sessions);
     }
 
+    dispatchResponseBatchReplaced(sessionId, newMessages, rawResponseText);
     return newMessages;
+}
+
+/**
+ * 整批回复被编辑重建：这里不能走 CHAT_MESSAGE_PUSHED / CHAT_MESSAGES_DELETED
+ * （前者会被当成新消息新建云端对象，后者会把云端原件删掉），所以单独发一个事件，
+ * 由云同步侧「就地覆盖同一条云消息」。
+ */
+function dispatchResponseBatchReplaced(sessionId: string, messages: ChatMessage[], rawResponseText: string): void {
+    if (typeof window === "undefined" || messages.length === 0) return;
+    window.dispatchEvent(new CustomEvent(CHAT_RESPONSE_BATCH_REPLACED_EVENT, {
+        detail: { sessionId, messages, rawResponseText },
+    }));
 }
 
 export function replaceGroupResponseRound(
@@ -2045,6 +2069,7 @@ export function replaceGroupResponseRound(
         rawResponseText: msg.rawResponseText,
         responseRoundId,
         editableResponseText,
+        cloudSync: firstMessage.cloudSync,
         statusPanel: msg.statusPanel,
         statusRegionMode: msg.statusRegionMode,
         innerMonologue: msg.innerMonologue,
