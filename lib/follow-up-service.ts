@@ -712,6 +712,9 @@ async function fireMenstrualPeriodCare(input: {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === input.sessionId);
         if (!session || session.isGroup || session.contactId !== input.characterId) return;
+        // Respect the per-session proactive-message switch for newly added
+        // automatic care triggers as well as ordinary follow-ups/timed wakes.
+        if (session.proactiveDisabled) return;
         if (hasMenstrualPeriodCareTriggered(input.characterId, input.event.cycleKey)) return;
 
         const latestMessages = loadChatMessages(session.id);
