@@ -50,14 +50,6 @@ function pickLaterTime(a?: string | null, b?: string | null): string {
     return parseTime(a) >= parseTime(b) ? a : b;
 }
 
-/**
- * 会话在列表里是否有内容：线上可见消息、线下模式记录都算。
- * 只在线下聊过的会话（或线上记录被清空的会话）不该从列表里消失。
- */
-function hasSessionListContent(sessionId: string): boolean {
-    return Boolean(getLastVisibleSessionMessage(sessionId)) || Boolean(getLastChatOfflineTurn(sessionId));
-}
-
 /** 列表排序用的活跃时间：线上最后一条与线下最后一条里更晚的那个 */
 function getSessionListTime(session: ChatSession): string {
     const onlineTime = getLastVisibleSessionMessage(session.id)?.createdAt;
@@ -288,7 +280,9 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             const regularItems = [...sessions]
                             .filter(s => {
                                 if (!(s.isGroup || contactIds.has(s.contactId))) return false;
-                                if (!hasSessionListContent(s.id)) return false;
+                                // 私货：不按「有无内容」过滤。上游 hasSessionListContent 仍会隐藏一条消息都没有的
+                                // 新会话（建群后删掉系统消息就退出那种），而角色侧该群仍存活，用户找不到入口。
+                                // 空会话的预览与排序已有 updatedAt / getLastNonEmptyPreview 兜底。
                                 if (listTab === "private" && s.isGroup) return false;
                                 if (listTab === "group" && !s.isGroup) return false;
                                 if (!keyword) return true;
