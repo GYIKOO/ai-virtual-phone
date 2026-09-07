@@ -147,6 +147,15 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 
 ---
 
+## 合并期间还原 package-lock 噪音的正确姿势（2026-09 踩坑）
+
+本地 `npm install` 会给 lock 加 `"peer": true` / `"license"` 元数据噪音，惯例是不提交、还原。
+**但在合并进行中（有 MERGE_HEAD 时）绝不能用 `git restore --staged` + `git restore`**：
+它会把锁退回**合并前的旧 HEAD**，丢掉上游新增依赖的锁条目（2026-09 实测丢了 101 行，
+含 `remark-cjk-friendly`），部署端 `npm ci` 会因 lock 与 package.json 不一致而失败。
+正确做法：`git checkout upstream/main -- package-lock.json`（直接取上游版），或干脆不在
+合并提交里碰锁文件、合并后再单独处理。
+
 ## 本地构建已知怪癖：OneDrive 竞态偶发吞掉 backdrop-filter 后处理
 
 仓库在 OneDrive 目录下。`next build` 刚写完 `.next/static/css` 时 OneDrive 会抢着上传，
