@@ -139,13 +139,15 @@ const IMAGE_MARKER = "SCREEN_CHAT_IMAGE_SLOT";
 
 const MAX_BODY_BYTES = 3 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const DEFAULT_DAILY_CAP = 120;
+// 每日次数不设上限：已部署的个人云 RPC 签名里仍有 p_daily_cap 参数，传一个够不着的数即可
+const UNLIMITED_DAILY_CAP = 1_000_000_000;
 const MAX_PENDING_TURNS = 500;
 
 type ScreenSnapshot = {
   replyRequest?: { url: string; headers: Record<string, string>; body: Record<string, unknown>; providerKind: ProviderKind };
   enableVision?: boolean;
   ackSequence?: number;
+  /** 旧字段：曾用于覆盖每日上限，上限已取消，读它的只剩未重新部署的旧函数 */
   dailyCap?: number;
   chat?: { characterId?: string; sessionId?: string; characterName?: string };
   reply?: Record<string, unknown>;
@@ -452,7 +454,6 @@ Deno.serve(async (request: Request) => {
     }
 
     // 按角色原子串行生成并计数；不会因双击过快而覆盖另一轮。
-    const dailyCap = Math.max(10, Math.min(500, Number(snapshot.dailyCap) || DEFAULT_DAILY_CAP));
     const lockToken = crypto.randomUUID();
     let lockHeld = false;
     try {
@@ -463,7 +464,7 @@ Deno.serve(async (request: Request) => {
           p_character_id: characterId,
           p_session_id: canonicalSessionId,
           p_lock_token: lockToken,
-          p_daily_cap: dailyCap,
+          p_daily_cap: UNLIMITED_DAILY_CAP,
         }),
       });
       if (!beginResponse.ok) {
@@ -472,9 +473,6 @@ Deno.serve(async (request: Request) => {
       }
       const begin = await beginResponse.json().catch(() => ({})) as BeginResult;
       if (begin.status === "busy") return json({ ok: false, error: "角色正在回复上一条，请稍后再试。" }, 409);
-      if (begin.status === "daily_cap") {
-        return json({ ok: false, error: `今天的屏幕速聊次数已达上限（${dailyCap} 次），明天再来吧。` }, 429);
-      }
       if (begin.status !== "ok") return json({ ok: false, error: "无法取得屏幕速聊会话锁。" }, 500);
       lockHeld = true;
 
@@ -536,7 +534,9 @@ Deno.serve(async (request: Request) => {
 
       // 弹窗通道不直接执行控制标记；只同步角色最终说出口的内容。
       rawText = rawText
-        .replace(/【快捷动作[：:][^】\n]{1,60}】/g, "")
+        // 与 push-generate 的标记形状保持一致：也要吃掉带参数的 ({...}) 写法，
+        // 否则弹窗通道会漏出半截标记（本通道从不注入该能力，纯属兜底）
+        .replace(/【快捷动作[：:]\s*[^(（）)】\n]{1,60}?\s*(?:[(（][\s\S]{0,2000}?[)）])?\s*】/g, "")
         .replace(/【发到微信】/g, "")
         .replace(/[\[【]我(?:向[^\]】\r\n]{1,80})?发起了语音通话[\]】]/g, "")
         .replace(/【拨打电话】/g, "")
