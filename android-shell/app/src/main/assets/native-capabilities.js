@@ -47,7 +47,10 @@
         },
     };
     function refreshPermission() {
-        request('permission').then(value => { client.permissionGranted = value; }).catch(() => {});
+        request('permission').then(value => {
+            client.permissionGranted = value;
+            window.dispatchEvent(new Event('float-native-permission'));
+        }).catch(() => {});
     }
     refreshPermission();
     window.addEventListener('focus', refreshPermission);

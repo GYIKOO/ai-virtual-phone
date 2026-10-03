@@ -215,6 +215,16 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
         return () => window.removeEventListener(WALLET_UPDATED_EVENT, syncWallet);
     }, []);
 
+    useEffect(() => {
+        const syncNativePermission = () => {
+            if (!getAndroidNative()) return;
+            setNotifEnabled(loadChatAppSettings().browserNotificationsEnabled === true && isBrowserNotificationGranted());
+            setNotifHint(readBrowserNotificationPermissionHint());
+        };
+        window.addEventListener("float-native-permission", syncNativePermission);
+        return () => window.removeEventListener("float-native-permission", syncNativePermission);
+    }, []);
+
     const handleNotificationToggle = async (enabled: boolean) => {
         if (notifChecking) return;
 

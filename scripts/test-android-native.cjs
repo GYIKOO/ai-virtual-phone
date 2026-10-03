@@ -7,7 +7,7 @@ const source = readFileSync('android-shell/app/src/main/assets/native-capabiliti
 function harness({ cancel = false, failChunk = false } = {}) {
     const calls = [], chunks = [], errors = [];
     class Anchor { click() {} }
-    const window = { addEventListener() {} };
+    const window = { addEventListener() {}, dispatchEvent() {} };
     window.top = window;
     const bridge = { postMessage(raw) {
         const message = JSON.parse(raw);
@@ -23,7 +23,7 @@ function harness({ cancel = false, failChunk = false } = {}) {
     window.FloatNative = bridge;
     const context = { window, FloatNative: bridge, HTMLAnchorElement: Anchor, Element: class {},
         document: { addEventListener() {} }, Uint8Array, Blob, Map, JSON, Error,
-        setTimeout, clearTimeout, fetch, btoa, alert: message => errors.push(message) };
+        setTimeout, clearTimeout, fetch, btoa, Event, alert: message => errors.push(message) };
     runInNewContext(source, context);
     return { client: window.FloatNativeClient, calls, chunks, errors, context };
 }

@@ -52,6 +52,7 @@ class NativeCapabilities(private val activity: AppCompatActivity) {
     private val permission = activity.registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         permissionReply?.let { reply(it, notificationsEnabled()) }
         permissionReply = null
+        if (notificationsEnabled()) PushService.start(activity)
     }
 
     private fun notificationsEnabled() = NotificationManagerCompat.from(activity).areNotificationsEnabled()
