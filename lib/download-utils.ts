@@ -1,3 +1,5 @@
+import { getAndroidNative } from "./android-native";
+
 export type DownloadFileOptions = {
     disableNativeShare?: boolean;
     nativeShareOnly?: boolean;
@@ -15,6 +17,11 @@ export function isIOSBrowser(): boolean {
 }
 
 export async function downloadFile(blob: Blob, filename: string, options: DownloadFileOptions = {}): Promise<void> {
+    const native = getAndroidNative();
+    if (native) {
+        await native.downloadBlob(blob, filename);
+        return;
+    }
     const url = URL.createObjectURL(blob);
     const anchorDownload = () => {
         const a = document.createElement("a");

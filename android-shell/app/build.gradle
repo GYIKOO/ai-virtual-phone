@@ -16,8 +16,8 @@ android {
         applicationId "app.floatphone.shell"
         minSdk 26
         targetSdk 34
-        versionCode 3
-        versionName "1.0.2"
+        versionCode 4
+        versionName "1.0.3"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
     }
 
@@ -48,6 +48,7 @@ android {
 }
 
 dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.activity:activity-ktx:1.9.0'

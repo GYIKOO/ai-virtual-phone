@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var webView: WebView
+    private val nativeCapabilities = NativeCapabilities(this)
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
     private val fileChooserLauncher = registerForActivityResult(
@@ -105,14 +106,23 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
 
         webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
+        nativeCapabilities.install(webView)
 
         webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                nativeCapabilities.reset()
+            }
+            override fun onPageFinished(view: WebView, url: String) {
+                nativeCapabilities.onPageFinished(view)
+            }
+
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url
                 val scheme = url.scheme ?: return false
                 // 站内导航留在壳里；http(s) 外链和自定义协议（shortcuts:// 等）交给系统
                 if (scheme == "http" || scheme == "https") {
-                    if (url.host == Uri.parse(SITE_URL).host) return false
+                    val site = Uri.parse(SITE_URL)
+                    if (url.scheme == site.scheme && url.encodedAuthority == site.encodedAuthority) return false
                     return runCatching {
                         startActivity(Intent(Intent.ACTION_VIEW, url)); true
                     }.getOrDefault(true)
@@ -155,8 +165,8 @@ class MainActivity : AppCompatActivity() {
         webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
             runCatching {
                 if (url.startsWith("blob:") || url.startsWith("data:")) {
-                    // blob/data 由页面内 JS 触发的 a[download] 处理；提示用户等待
-                    Toast.makeText(this, "正在导出…", Toast.LENGTH_SHORT).show()
+                    val name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+                    webView.evaluateJavascript("window.FloatNativeClient ? window.FloatNativeClient.downloadUrl(${org.json.JSONObject.quote(url)}, ${org.json.JSONObject.quote(name)}).catch(e => alert(e.message)) : alert('请更新 Android System WebView 后重试下载')", null)
                     return@DownloadListener
                 }
                 val request = DownloadManager.Request(Uri.parse(url)).apply {
@@ -170,7 +180,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 (getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
                 Toast.makeText(this, "已开始下载到「下载」目录", Toast.LENGTH_SHORT).show()
-            }
+            }.onFailure { Toast.makeText(this, "下载失败：${it.message}", Toast.LENGTH_LONG).show() }
         })
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -211,6 +221,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        nativeCapabilities.reset()
         CookieManager.getInstance().flush()
         webView.destroy()
         super.onDestroy()

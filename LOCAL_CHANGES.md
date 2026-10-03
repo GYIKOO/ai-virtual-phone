@@ -14,6 +14,14 @@
 
 ## 同步上游的操作
 
+### APK 文件保存与通知适配（2026-10-03）
+
+- `android-shell` 1.0.3：新增仅部署站点主框架可调用的原生能力桥。Blob/data 下载通过系统另存为选择位置，逐块写入并确认完成；取消、写入失败和页面关闭时清理本次创建的未完成文件。普通下载异常不再静默吞掉。
+- `lib/android-native.ts`、`lib/download-utils.ts`：APK 导出等待实际保存结果，普通浏览器保持原下载逻辑。
+- `lib/browser-notification.ts`、`components/chat/user-profile-panel.tsx`：APK 浏览器通知开关改为查询系统通知权限，消息提醒走原生通知；不改变角色主动消息开关和调度规则。
+- `PushService.kt`：收到频道订阅成功确认后才显示已连接；未注册成功单独提示。原生消息提醒不等于被杀进程后的云端离线推送，后者仍依赖后台服务和站点推送配置。
+- 回归脚本：`node scripts/test-android-native.cjs`。这些 APK 修复不属于上游 PR #225。
+
 ```bash
 git fetch upstream
 git checkout main

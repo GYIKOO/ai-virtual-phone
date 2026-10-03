@@ -2,19 +2,30 @@
 // Browser Notification API wrapper for background alerts.
 
 import { loadChatAppSettings } from "./chat-storage";
+import { getAndroidNative } from "./android-native";
+
+export function isNotificationPermissionGranted(): boolean {
+    const native = getAndroidNative();
+    if (native) return native.permissionGranted;
+    return typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted";
+}
 
 let _notifCounter = 0;
 
 /** Check if notifications are enabled in app settings. */
 export function isNotificationEnabled(): boolean {
     if (typeof window === "undefined") return false;
-    if (!("Notification" in window)) return false;
     const settings = loadChatAppSettings();
-    return settings.browserNotificationsEnabled === true && Notification.permission === "granted";
+    return settings.browserNotificationsEnabled === true && isNotificationPermissionGranted();
 }
 
 /** Request notification permission from the browser. Returns true if granted. */
 export async function requestNotificationPermission(): Promise<boolean> {
+    const native = getAndroidNative();
+    if (native) {
+        native.permissionGranted = await native.request("requestPermission").catch(() => false) === true;
+        return native.permissionGranted;
+    }
     if (typeof window === "undefined" || !("Notification" in window)) return false;
     if (Notification.permission === "granted") return true;
     if (Notification.permission === "denied") return false;
@@ -69,6 +80,12 @@ export function sendBrowserNotification(
 ): void {
     if (!isNotificationEnabled()) return;
     if (!document.hidden) return;
+
+    const native = getAndroidNative();
+    if (native) {
+        void native.request("notify", { title, body: options?.body || "" }).catch(error => console.warn("APK 通知失败", error));
+        return;
+    }
 
     const payload: NotificationOptions = {
         body: options?.body,

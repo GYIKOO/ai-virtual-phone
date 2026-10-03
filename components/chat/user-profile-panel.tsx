@@ -24,7 +24,8 @@ import { loadChatContacts } from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { triggerImmediatePost } from "@/lib/moments-engine";
 import type { Character } from "@/lib/character-types";
-import { requestNotificationPermission } from "@/lib/browser-notification";
+import { requestNotificationPermission, isNotificationPermissionGranted } from "@/lib/browser-notification";
+import { getAndroidNative } from "@/lib/android-native";
 import { disableOfflinePush, enableOfflinePush, getOfflinePushState, isShellEnvironment, loadPushQuietHours, savePushQuietHours, sendTestOfflinePush, type OfflinePushState } from "@/lib/push-client";
 import { isPersonalPushCloudActive, setPersonalPushCloudScheduled } from "@/lib/personal-push-cloud";
 import { loadPushCloudScheduled, savePushCloudScheduled } from "@/lib/cloud-deploy-status";
@@ -129,6 +130,8 @@ function ProfileSettingsSliderItem({
 }
 
 function readBrowserNotificationPermissionHint(): string {
+    const native = getAndroidNative();
+    if (native) return native.permissionGranted ? "APK 系统通知权限：已允许" : "请在手机系统设置 → Float → 通知中允许通知";
     if (typeof window === "undefined") return "当前浏览器权限：未知（服务端渲染）";
     if (!("Notification" in window)) return "当前浏览器权限：不支持 Notification API";
     const permission = Notification.permission;
@@ -140,9 +143,7 @@ function readBrowserNotificationPermissionHint(): string {
 }
 
 function isBrowserNotificationGranted(): boolean {
-    return typeof window !== "undefined"
-        && "Notification" in window
-        && Notification.permission === "granted";
+    return isNotificationPermissionGranted();
 }
 
 /* ══════════════════════════════════════════
@@ -449,7 +450,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                             <Keyboard size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
                             <div className="flex flex-col flex-1 text-left gap-0.5">
                                 <span className="ts-14 font-semibold text-[var(--c-text-title)]">回车发送 · 线下</span>
-                                <span className="ts-11 text-[var(--c-text)] opacity-70">线下多为长段落，通常保持关闭更顺手</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">关闭后 Enter 换行，方便撰写长篇或多段回复</span>
                             </div>
                             <Toggle checked={offlineEnterToSendEnabled} onChange={handleOfflineEnterToSendToggle} />
                         </div>

@@ -87,7 +87,7 @@ class PushService : Service() {
                 updateKeepAlive("未登录或站点不可达，稍后重试")
                 sleepSec(60); continue
             }
-            updateKeepAlive("已连接，等待角色消息")
+            updateKeepAlive("正在连接消息通道…")
             val closedNormally = runSocket(config)
             if (stopped) break
             updateKeepAlive("连接断开，重连中…")
@@ -201,6 +201,15 @@ class PushService : Service() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 runCatching {
                     val msg = JSONObject(text)
+                    if (msg.optString("event") == "phx_reply" && msg.optString("ref") == "1") {
+                        if (msg.optJSONObject("payload")?.optString("status") == "ok") {
+                            updateKeepAlive(if (shellSubRegistered) "已连接，等待角色消息" else "消息通道已连接，但推送注册失败")
+                        } else {
+                            updateKeepAlive("消息频道订阅失败，正在重试")
+                            webSocket.close(1000, "subscription failed")
+                        }
+                        return
+                    }
                     if (msg.optString("event") != "broadcast") return
                     val payload = msg.optJSONObject("payload") ?: return
                     if (payload.optString("event") != "notify") return
