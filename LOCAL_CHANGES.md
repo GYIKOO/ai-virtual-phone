@@ -58,6 +58,11 @@ git push origin main         # 推到我们自己的仓库（触发部署重建�
 
 ## 改动登记
 
+### 安卓壳图标（2026-10-03）
+- `android-shell/app/src/main/res/drawable/appicon.png` 直接复用 `public/icon-512.png`，与网页版保持一致。
+- 壳版本升至 `versionCode 2` / `versionName 1.0.1`，包名和签名配置不变，支持相同签名覆盖安装。
+- 后续同步若上游采用网页版图标，优先采用上游实现；发布新版壳时保持 versionCode 递增。
+
 ### 1. 打开便签墙入口
 - **文件**：`components/diary/diary-app.tsx`
 - **改动**：`const NOTE_WALL_UI_ENABLED = false;` → `true`
