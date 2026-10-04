@@ -8,6 +8,7 @@ import type { ChatSession, ChatMessage } from "./chat-storage";
 import type { ChatOfflineTurn } from "./chat-offline-storage";
 
 export function formatOfflineTurnXml(turn: ChatOfflineTurn): string {
+    if (!turn.assistantContent.trim() && !turn.rawText?.trim()) return "";
     if (turn.rawText?.trim()) return turn.rawText.trim();
     const summaryTag = turn.summaryTag?.trim() || "summary";
     // rawText 缺失（旧数据）时重建完整 XML：思维链（thinkingText）存在则按原标签拼回，
@@ -47,7 +48,7 @@ export function buildOfflinePromptHistory(
                 createdAt: userAt,
             });
         }
-        history.push({
+        if (formatOfflineTurnXml(turn).trim()) history.push({
             id: `${turn.id}_assistant`,
             sessionId: session.id,
             role: "assistant",

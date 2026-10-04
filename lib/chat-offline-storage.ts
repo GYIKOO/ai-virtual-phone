@@ -138,17 +138,33 @@ export function updateChatOfflineTurn(
     return updated;
 }
 
-export function deleteChatOfflineTurn(sessionId: string, turnId: string): ChatOfflineTurn[] {
-    const next = loadChatOfflineTurns(sessionId).filter((turn) => turn.id !== turnId);
+/** Clear one visible floor without deleting its paired input/reply. */
+function removeOfflineFloor(turn: ChatOfflineTurn, role: "user" | "assistant"): ChatOfflineTurn {
+    return role === "user" ? { ...turn, userContent: "" } : {
+        ...turn, assistantContent: "", summary: "", rawText: undefined,
+        reasoningText: undefined, thinkingText: undefined, thinkingTag: undefined,
+    };
+}
+
+export function deleteChatOfflineTurn(sessionId: string, turnId: string, role?: "user" | "assistant"): ChatOfflineTurn[] {
+    const next = loadChatOfflineTurns(sessionId).flatMap(turn => {
+        if (turn.id !== turnId) return [turn];
+        if (!role) return [];
+        const remaining = removeOfflineFloor(turn, role);
+        return remaining.userContent.trim() || remaining.assistantContent.trim() ? [remaining] : [];
+    });
     saveChatOfflineTurns(sessionId, next);
     return next;
 }
 
-export function deleteChatOfflineTurnsFrom(sessionId: string, turnId: string): ChatOfflineTurn[] {
+export function deleteChatOfflineTurnsFrom(sessionId: string, turnId: string, role?: "user" | "assistant"): ChatOfflineTurn[] {
     const turns = loadChatOfflineTurns(sessionId);
     const idx = turns.findIndex((turn) => turn.id === turnId);
     if (idx < 0) return turns;
     const next = turns.slice(0, idx);
+    if (role === "assistant" && turns[idx].userContent.trim()) {
+        next.push(removeOfflineFloor(turns[idx], "assistant"));
+    }
     saveChatOfflineTurns(sessionId, next);
     return next;
 }

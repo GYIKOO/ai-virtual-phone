@@ -64,6 +64,10 @@ import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { STORY_CSS_EXAMPLE } from "@/lib/css-examples";
 import { applyEditOutputRegex } from "@/lib/llm-prompt-assembler";
 import { MacroEngine } from "@/lib/macro-engine";
+import { getStoryRetryContext } from "@/lib/story-instructions";
+import { kvGet, kvSet } from "@/lib/kv-db";
+import { StoryActions, StoryDirectorNote, type StoryActionRequest } from "./story-actions";
+import { replaceStoryMessages } from "@/lib/story-storage";
 
 type StoryAppProps = {
   onClose: () => void;
@@ -132,6 +136,7 @@ const STORY_THEMES = [
 function getStoryPreview(messages: StoryMessage[]): string {
   const last = messages[messages.length - 1];
   if (!last) return "从这里开始新的剧情。";
+  if (last.kind === "director") return "导演指令";
   const source = last.renderedContent || last.rawContent || "";
   // Strip HTML tags and collapse whitespace for preview text
   const text = source.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -200,12 +205,14 @@ const StoryComposer = memo(function StoryComposer({
   appendRequest,
   onSend,
   onStop,
+  tools,
 }: {
   characterName: string;
   isGenerating: boolean;
   appendRequest: StoryComposerAppendRequest | null;
   onSend: (text: string) => void;
   onStop: () => void;
+  tools?: React.ReactNode;
 }) {
   const [draft, setDraft] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -240,6 +247,7 @@ const StoryComposer = memo(function StoryComposer({
 
   return (
     <div className="story-composer">
+      {tools}
       <textarea
         ref={textareaRef}
         rows={1}
@@ -290,6 +298,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const dragStartXRef = useRef<number | null>(null);
   const dragDeltaXRef = useRef(0);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
+  const [actionRequest, setActionRequest] = useState<StoryActionRequest | null>(null);
+  useEffect(() => { setActionRequest(null); }, [activeSessionId]);
   const [contextMenuPoint, setContextMenuPoint] = useState<{ x: number; y: number } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
@@ -343,7 +353,9 @@ export function StoryApp({ onClose }: StoryAppProps) {
 
   useEffect(() => {
     hydrateStoryStorage().then(() => {
-      const initialChar = loadCharacters()[0]?.id || "";
+      const availableCharacters = loadCharacters();
+      const lastCharacterId = kvGet("ai_phone_story_last_character");
+      const initialChar = availableCharacters.find(character => character.id === lastCharacterId)?.id || availableCharacters[0]?.id || "";
       if (initialChar) {
         const session = createOrGetStorySession(initialChar);
         setActiveCharacterId(initialChar);
@@ -362,6 +374,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
 
   useEffect(() => {
     if (!activeCharacterId) return;
+    kvSet("ai_phone_story_last_character", activeCharacterId);
     const session = createOrGetStorySession(activeCharacterId);
     setActiveSessionId(session.id);
     activeSessionIdRef.current = session.id; // 同步更新，堵住生成完成回调的守卫空窗
@@ -608,7 +621,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     setStorageVersion((value) => value + 1);
   }
 
-  async function handleSend(userTextInput: string) {
+  async function handleSend(userTextInput: string, kind?: "director") {
     const userText = userTextInput.trim();
     if (!activeSessionId || !userText || isGenerating) return;
     const sessionId = activeSessionId;
@@ -617,6 +630,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     const userMessage = pushStoryMessage({
       sessionId,
       role: "user",
+      kind,
       rawContent: userText,
       renderedContent: userText,
     });
@@ -757,31 +771,35 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }
 
   function handleStoryDelete(msgId: string) {
+    if (isGenerating) return;
     deleteStoryMessage(msgId);
     setMessages(prev => prev.filter(m => m.id !== msgId));
     setActiveMessageId(null);
     setStorageVersion(v => v + 1);
   }
   function handleStoryDeleteFrom(msgId: string) {
+    if (isGenerating) return;
     deleteStoryMessagesFrom(activeSessionId, msgId);
     setMessages(prev => { const idx = prev.findIndex(m => m.id === msgId); return idx >= 0 ? prev.slice(0, idx) : prev; });
     setActiveMessageId(null);
     setStorageVersion(v => v + 1);
   }
   function handleStoryEditStart(msg: StoryMessage) {
+    if (isGenerating) return;
     setEditingMessageId(msg.id);
     setEditingContent(msg.rawContent); // 仅作为非受控 textarea 的初始值
     editingDraftRef.current = msg.rawContent;
     setActiveMessageId(null);
   }
   function handleStoryEditSave() {
+    if (isGenerating) return;
     const draft = editingDraftRef.current;
     if (!editingMessageId || !draft.trim()) { setEditingMessageId(null); setEditingContent(""); return; }
     let newRawContent = draft.trim();
     // Apply runOnEdit regex rules (placement=2, isEdit=true) to the edited content.
     try {
       const { regexes } = getStoryRenderSignature(activeCharacterId);
-      if (regexes.length > 0) {
+      if (regexes.length > 0 && messages.find(message => message.id === editingMessageId)?.kind !== "director") {
         const macroEngine = new MacroEngine(currentCharacter?.name ?? "", userIdentity?.name ?? "用户");
         newRawContent = applyEditOutputRegex(newRawContent, regexes, { macroEngine, activeTags: ["story"] });
       }
@@ -790,7 +808,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     }
     editStoryMessage(editingMessageId, newRawContent);
     setMessages(prev => prev.map(m => m.id === editingMessageId
-      ? { ...m, rawContent: newRawContent, renderedContent: undefined, regexSignature: undefined, parserVersion: undefined }
+      ? { ...m, rawContent: newRawContent, storySummary: undefined, renderedContent: undefined, regexSignature: undefined, parserVersion: undefined }
       : m
     ));
     setEditingMessageId(null);
@@ -810,25 +828,19 @@ export function StoryApp({ onClose }: StoryAppProps) {
     else { fallbackCopy(); }
     setActiveMessageId(null);
   }
-  async function handleStoryRetry(msgId: string) {
+  async function handleStoryRetry(msgId: string, retryInstruction = "") {
+    if (isGenerating) return;
     const msgIndex = messages.findIndex(m => m.id === msgId);
     if (msgIndex === -1) return;
     const retryMessage = messages[msgIndex];
     if (retryMessage.role !== "assistant" && retryMessage.role !== "user") return;
     const sessionId = activeSessionId;
     const characterId = activeCharacterId;
-    const contextMessages = retryMessage.role === "user"
-      ? messages.slice(0, msgIndex + 1)
-      : messages.slice(0, msgIndex);
-    const firstDiscardedMessage = messages[contextMessages.length];
-    if (firstDiscardedMessage) {
-      deleteStoryMessagesFrom(activeSessionId, firstDiscardedMessage.id);
-    }
-    setMessages(contextMessages);
+    const contextMessages = getStoryRetryContext(messages, msgId);
+    if (!contextMessages) return;
     setActiveMessageId(null);
     setStorageVersion(v => v + 1);
-    // 重试会截掉一条长消息，内容变矮时浏览器把滚动位置钳回新底部，
-    // 看起来像"页面跳到上面"；这里主动贴底，让视线落在生成指示器上
+    // 请求期间保留旧文，先贴底显示生成指示器；成功后再替换历史。
     autoBottomLockRef.current = true;
     requestAnimationFrame(() => scrollStoryToBottom());
     markGenerating(sessionId, true);
@@ -837,11 +849,14 @@ export function StoryApp({ onClose }: StoryAppProps) {
     const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
     try {
       const result = await generateStoryCompletion(characterId, contextMessages, {
+        sessionId,
+        retryInstruction,
         sessionFoldTags: currentSession?.foldTags,
         sessionContextExcludedTags: currentSession?.contextExcludedTags,
         signal: generationRun.controller.signal,
       });
       if (!isCurrentGeneration()) return;
+      replaceStoryMessages(sessionId, contextMessages);
       const assistantMessage = pushStoryMessage({
         sessionId, role: "assistant",
         rawContent: result.rawText, renderedContent: result.renderedText,
@@ -1100,7 +1115,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   </button>
                 ) : null}
                 {visibleMessages.map((message) => {
-                  const speakerName = message.role === "user"
+                  const speakerName = message.kind === "director" ? "导演指令" : message.role === "user"
                     ? (userIdentity?.name?.trim() || "我")
                     : message.role === "assistant"
                       ? currentCharacter.name
@@ -1161,7 +1176,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
                                 <button onClick={handleStoryEditSave} className="story-inline-edit-btn story-inline-edit-btn-save">保存</button>
                               </div>
                             </div>
-                          ) : (
+                          ) : message.kind === "director" ? <StoryDirectorNote text={message.rawContent} /> : (
                             <StoryHtmlRenderer
                               content={message.renderedContent || message.rawContent}
                               messageId={message.id}
@@ -1181,7 +1196,11 @@ export function StoryApp({ onClose }: StoryAppProps) {
                                 <button onClick={() => handleStoryCopy(message.rawContent)} className="story-ctx-btn">复制</button>
                                 <button onClick={() => handleStoryEditStart(message)} className="story-ctx-btn">编辑</button>
                                 {(message.role === "assistant" || message.role === "user") && (
-                                  <button onClick={() => { void handleStoryRetry(message.id); }} className="story-ctx-btn story-ctx-btn-danger">重试</button>
+                                  <button disabled={isGenerating} onClick={() => {
+                                    setActiveMessageId(null);
+                                    const context = getStoryRetryContext(messages, message.id);
+                                    setActionRequest({ mode: "retry", messageId: message.id, discardsFollowing: !!context && messages.slice(context.length).length > 1 });
+                                  }} className="story-ctx-btn story-ctx-btn-danger">重试</button>
                                 )}
                               </div>
                               <div style={{ display: "flex" }}>
@@ -1210,11 +1229,20 @@ export function StoryApp({ onClose }: StoryAppProps) {
       </div>
 
       <StoryComposer
+        key={activeSessionId}
         characterName={currentCharacter.name}
         isGenerating={isGenerating}
         appendRequest={composerAppendRequest}
         onSend={(text) => { void handleSend(text); }}
         onStop={handleStopGeneration}
+        tools={<StoryActions busy={isGenerating}
+          retryTarget={[...messages].reverse().find(message => message.role === "user" || message.role === "assistant")?.id}
+          request={actionRequest} onRequest={setActionRequest}
+          onSubmit={(request, instruction) => {
+            setActionRequest(null);
+            if (request.mode === "director") void handleSend(instruction, "director");
+            else void handleStoryRetry(request.messageId, instruction);
+          }} />}
       />
 
       {/* CSS Style Modal */}

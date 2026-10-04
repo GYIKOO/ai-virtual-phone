@@ -4270,13 +4270,15 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setEditingOfflineContent("");
     };
 
-    const handleOfflineDeleteTurn = (turnId: string) => {
-        setOfflineTurns(deleteChatOfflineTurn(session.id, turnId));
+    const handleOfflineDeleteTurn = (turnId: string, role: OfflineActionTarget["role"]) => {
+        if (isOfflineGenerating) { showChatToast("线下回复生成中"); return; }
+        setOfflineTurns(deleteChatOfflineTurn(session.id, turnId, role));
         setActiveOfflineTarget(null);
     };
 
-    const handleOfflineDeleteTurnsFrom = (turnId: string) => {
-        setOfflineTurns(deleteChatOfflineTurnsFrom(session.id, turnId));
+    const handleOfflineDeleteTurnsFrom = (turnId: string, role: OfflineActionTarget["role"]) => {
+        if (isOfflineGenerating) { showChatToast("线下回复生成中"); return; }
+        setOfflineTurns(deleteChatOfflineTurnsFrom(session.id, turnId, role));
         setActiveOfflineTarget(null);
     };
 
@@ -4301,8 +4303,6 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
         setShowEmojiPanel(false);
         setShowStickerPanel(false);
         setRichModal(null);
-        saveChatOfflineTurns(session.id, baseTurns);
-        setOfflineTurns(baseTurns);
         setPendingOfflineUserText(retryInput);
         offlineGenerationInputRef.current = retryInput;
         setIsOfflineGenerating(true);
@@ -4343,6 +4343,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             const assistantContent = result.content.trim() || result.rawText.trim();
             if (!assistantContent) throw new Error("AI 没有返回线下正文");
             if (!result.summary.trim()) showChatToast(`未提取到 <${result.summaryTag}> 摘要`);
+            saveChatOfflineTurns(session.id, baseTurns);
             const saved = appendChatOfflineTurn({
                 sessionId: session.id,
                 userContent: retryInput,
@@ -4866,8 +4867,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     <button onClick={() => void handleOfflineRetryFrom(turn.id)} className="ctx-menu-btn ctx-menu-btn-danger">重试以下</button>
                 </div>
                 <div className="flex">
-                    <button onClick={() => handleOfflineDeleteTurn(turn.id)} className="ctx-menu-btn ctx-menu-btn-danger">删除</button>
-                    <button onClick={() => handleOfflineDeleteTurnsFrom(turn.id)} className="ctx-menu-btn ctx-menu-btn-danger">删除以下</button>
+                    <button onClick={() => handleOfflineDeleteTurn(turn.id, role)} className="ctx-menu-btn ctx-menu-btn-danger">删除</button>
+                    <button onClick={() => handleOfflineDeleteTurnsFrom(turn.id, role)} className="ctx-menu-btn ctx-menu-btn-danger">删除以下</button>
                 </div>
                 <div data-menu-triangle className="ctx-menu-triangle absolute -top-[6px] w-0 h-0" />
             </div>
@@ -5525,7 +5526,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                         />
                                     </div>
                                 </div>
-                                <div className="chat-offline-entry" data-role="assistant">
+                                <div className="chat-offline-entry" data-role="assistant" style={turn.assistantContent.trim() ? undefined : { display: "none" }}>
                                     {/* 头像占位：默认 display:none（见 chat.css），供自定义 CSS 显示 */}
                                     <div className="chat-offline-avatar" aria-hidden="true">
                                         {character?.avatar ? <img src={character.avatar} alt="" /> : <ChatFallbackAvatar />}

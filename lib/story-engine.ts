@@ -22,6 +22,7 @@ import { STORY_PARSER_VERSION } from "./story-parser";
 import { loadStoryMessages, replaceStoryMessages, type StoryMessage } from "./story-storage";
 import type { ChatMessage } from "./chat-storage";
 import { MacroEngine } from "./macro-engine";
+import { prepareStoryInstructionHistory, wrapStoryInstruction } from "./story-instructions";
 
 const DEFAULT_STORY_FOLD_TAGS = "think,thinking,summary";
 const DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS = "think,thinking";
@@ -136,7 +137,7 @@ export function getStoryRenderSignature(characterId: string): { regexSignature: 
 export async function generateStoryCompletion(
   characterId: string,
   history: StoryMessage[],
-  options?: { sessionFoldTags?: string; sessionContextExcludedTags?: string; signal?: AbortSignal },
+  options?: { sessionId?: string; sessionFoldTags?: string; sessionContextExcludedTags?: string; signal?: AbortSignal; retryInstruction?: string },
 ): Promise<StoryGenerationResult> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -146,7 +147,10 @@ export async function generateStoryCompletion(
   const { apiConfig, preset, regexes, worldBooks, regexSignature, summaryTag } = resolveStoryConfigs(characterId);
   const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
-  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags);
+  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, options?.sessionId);
+  if (options?.retryInstruction?.trim()) {
+    llmMessages.push({ role: "user", content: wrapStoryInstruction(options.retryInstruction), _debugMeta: { marker: "临时重试要求" } });
+  }
 
   const userIdentity = resolveUserIdentity(characterId, "story");
   const macroEngine = new MacroEngine(character.name, userIdentity?.name ?? "用户");
@@ -180,6 +184,7 @@ async function buildStoryPromptMessages(
   regexes: RegexConfig[],
   worldBooks: WorldBookConfig[],
   contextExcludedTags: string = DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS,
+  sessionId?: string,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -187,11 +192,16 @@ async function buildStoryPromptMessages(
   }
 
   const userIdentity = resolveUserIdentity(characterId, "story");
-  const historyMessages = history.map((message) => toHistoryMessage(message, contextExcludedTags));
+  const instructionHistory = prepareStoryInstructionHistory(history);
+  const historyMessages = instructionHistory.history.map((message) => toHistoryMessage(message, contextExcludedTags));
+  const historyIds = new Set(history.map(message => message.id));
+  const historySessionId = sessionId || history[0]?.sessionId;
+  const storedMessages = historySessionId ? loadStoryMessages(historySessionId) : [];
   const memConfig = loadMemoryConfig();
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "story", {
     userName: userIdentity?.name ?? "用户",
     history: historyMessages,
+    excludeStoryMessageIds: storedMessages.filter(message => !historyIds.has(message.id)).map(message => message.id),
   });
 
   const [memories, coreMemories] = await Promise.all([
@@ -201,7 +211,7 @@ async function buildStoryPromptMessages(
 
   const now = new Date();
 
-  return assemblePromptPayload({
+  const payload = assemblePromptPayload({
     character,
     history: truncatedHistory,
     preset,
@@ -217,6 +227,10 @@ async function buildStoryPromptMessages(
     recentBlocks,
     unifiedRecentItems,
   });
+  if (instructionHistory.directorInstruction.trim()) {
+    payload.push({ role: "user", content: wrapStoryInstruction(instructionHistory.directorInstruction), _debugMeta: { marker: "本轮导演指令" } });
+  }
+  return payload;
 }
 
 export async function previewStoryPromptPayload(
@@ -266,7 +280,7 @@ export function rebuildStorySessionRenderCache(characterId: string, sessionId: s
     return {
       ...message,
       renderedContent: parsed.renderedText,
-      storySummary: parsed.summaryText || message.storySummary,
+      storySummary: parsed.summaryText,
       regexSignature,
       parserVersion,
     };

@@ -930,6 +930,8 @@ export function prepareShortTermContext(
         includeDirectChatEntries?: boolean;
         timeAware?: boolean;
         promptTimestampOptions?: PromptTimestampOptions;
+        /** Story rerolls exclude superseded projections without deleting the saved story first. */
+        excludeStoryMessageIds?: string[];
     },
 ): {
     recentBlocks: RecentBlock[];
@@ -947,6 +949,10 @@ export function prepareShortTermContext(
     });
 
     const memConfig = loadMemoryConfig();
+    if (options?.excludeStoryMessageIds?.length) {
+        const excluded = new Set(options.excludeStoryMessageIds.map(id => `story_projection_${id}`));
+        timeline = timeline.filter(entry => !excluded.has(entry.id));
+    }
     timeline = filterTimelineByAllowedSources(timeline, memConfig.shortTermAllowedSources);
 
     // Activation context: full timeline for keyword matching (not truncated)

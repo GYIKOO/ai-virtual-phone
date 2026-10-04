@@ -27,6 +27,8 @@ export type StoryMessage = {
   id: string;
   sessionId: string;
   role: StoryMessageRole;
+  /** Absent on existing records. Director notes are UI history, not story events. */
+  kind?: "director";
   rawContent: string;
   renderedContent?: string;
   storySummary?: string;
@@ -197,7 +199,7 @@ export function pushStoryMessage(
   _messagesCache.push(message);
   storyDb.messages.put(message).catch(() => undefined);
 
-  const previewSource = message.renderedContent || message.rawContent;
+  const previewSource = message.kind === "director" ? "导演指令" : message.renderedContent || message.rawContent;
   const preview = previewSource.replace(/\s+/g, " ").trim().slice(0, 64);
   updateStorySession(message.sessionId, {
     lastMessageId: message.id,
@@ -232,6 +234,7 @@ export function editStoryMessage(messageId: string, newRawContent: string): void
     _messagesCache[idx] = {
         ..._messagesCache[idx],
         rawContent: newRawContent,
+        storySummary: undefined,
         renderedContent: undefined,
         regexSignature: undefined,
         parserVersion: undefined,
@@ -242,9 +245,10 @@ export function editStoryMessage(messageId: string, newRawContent: string): void
 export function replaceStoryMessages(sessionId: string, messages: StoryMessage[]): void {
   _messagesCache = _messagesCache.filter((message) => message.sessionId !== sessionId);
   _messagesCache.push(...messages);
-  storyDb.messages.where("sessionId").equals(sessionId).delete()
-    .then(() => storyDb.messages.bulkPut(messages))
-    .catch(() => undefined);
+  void storyDb.transaction("rw", storyDb.messages, async () => {
+    await storyDb.messages.where("sessionId").equals(sessionId).delete();
+    await storyDb.messages.bulkPut(messages);
+  }).catch(() => undefined);
 }
 
 function compactProjectionText(text: string, maxLen = 160): string {
