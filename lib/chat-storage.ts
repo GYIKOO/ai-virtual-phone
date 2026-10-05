@@ -114,6 +114,7 @@ export type ChatMessage = {
     createdAt: string; // ISO date
     order?: number; // Stable per-session display order
     responseBatchId?: string; // Assistant raw-response batch id
+    proactiveTiming?: import("./proactive-replay").ProactiveTiming;
     rawResponseText?: string; // Assistant raw response before parsing/splitting
     responseRoundId?: string; // Group-chat whole-round id shared across all bubbles in one assistant turn
     toolExecutionId?: string; // Links visible tool attachments to their persisted tool result

@@ -14,6 +14,10 @@ function load(file, dependencies = {}, globals = {}) {
 const p = load('lib/proactive-policy.ts');
 const clock = load('lib/proactive-clock.ts', { './proactive-policy': p });
 const followup = load('lib/proactive-followup.ts');
+const replay = load('lib/proactive-replay.ts');
+assert.equal(replay.replayTime({ fixedAt: 1000 }, 'fixed', 100000), 1000);
+assert.equal(replay.replayTime({ fixedAt: 1000, deferred: { fixed: true } }, 'fixed', 100000), undefined);
+assert.equal(replay.knownAt('2026-10-05T08:00:00Z', Date.parse('2026-10-05T09:00:00Z'), '2026-10-05T10:00:00Z'), false);
 const rules = { followUpFieldName: '跟进意愿', maxConsecutive: 3, anxietyThreshold: 50, anxietyMinDelay: 15, anxietyMaxDelay: 180 };
 assert.equal(followup.followUpDelay(4, undefined, 0, rules), null);
 assert.equal(followup.followUpDelay(0, 100, 0, rules), null);
@@ -61,14 +65,14 @@ assert.equal(storage.loadProactive('b').config.personalityEnabled, false);
 storage.removeProactive('a');
 assert.ok(storage.loadProactive('b'), 'deleting one session preserves others');
 
-async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0 } = {}) {
+async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0, overdue = 1, deferred = false } = {}) {
   let now = 100000000;
   const session = { id: 's', contactId: 'c', isGroup: group };
   const createdAt = new Date(now - 3600000).toISOString();
   const history = [{ id: 'u', role: 'user', createdAt }];
-  let record = { config: { ...config, followUpTier: 2 }, state: { revision: 1, [`${source}At`]: now - 1, followupCount: used, followupRules: JSON.stringify(rules),
+  let record = { config: { ...config, followUpTier: 2 }, state: { revision: 1, [`${source}At`]: now - overdue, deferred: { [source]: deferred }, quietReleased: { [source]: true }, followupCount: used, followupRules: JSON.stringify(rules),
     anchor: `u:${createdAt}`, anchorAt: now - 3600000, clockVersion: 2, quietSetting: '' } };
-  const calls = [], saved = [], events = [];
+  const calls = [], saved = [], events = [], builds = [];
   const store = {
     loadProactive: () => structuredClone(record),
     saveProactiveState: (_s, state) => { if (state.revision !== record.state.revision) return false; record.state = structuredClone(state); return true; },
@@ -78,17 +82,18 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
   const service = load('lib/proactive-service.ts', {
     './chat-storage': { loadChatSessions: () => [session], loadChatMessages: () => history, clearFollowUpSchedule() {} },
     './chat-engine': {
-      buildChatPromptMessages: async () => prompt, stripPresetTexts: x => x,
+      buildChatPromptMessages: async (...args) => { builds.push(args); return prompt; }, stripPresetTexts: x => x,
       sendLLMRequest: async (...args) => { calls.push(args); if (mutate) mutate({ session, record, history, service }); if (failure) throw new Error('mock failure'); return output; },
     },
-    './group-chat-engine': { buildGroupChatPromptMessages: async () => prompt, parseGroupChatResponse: text => [{ characterId: 'c', characterName: 'C', responseText: text }] },
+    './group-chat-engine': { buildGroupChatPromptMessages: async (...args) => { builds.push(args); return prompt; }, parseGroupChatResponse: text => [{ characterId: 'c', characterName: 'C', responseText: text }] },
     './push-bailout-client': { cancelFollowUpBailout() {}, cancelBailoutPrefix() {} },
     './idle-reconnect-storage': { loadIdleReconnectRules: () => [] },
     './push-client': { isWithinPushQuietHours: () => quiet, loadPushQuietHours: () => '' },
     './kv-db': { kvGet: () => foreground ? JSON.stringify({ startedAt: now }) : null },
     './proactive-storage': store, './proactive-policy': p, './proactive-clock': clock,
     './settings-storage': { loadFollowUpConfig: () => rules }, './proactive-followup': followup,
-    './follow-up-service': { parseAndSaveResponse: async (...args) => { saved.push(args); history.push({ id: 'a', role: 'assistant', createdAt: new Date(now).toISOString(), stateValues: [{ name: '跟进意愿', value: 90 }], freshStateValues: fresh ? [{ name: '跟进意愿', value: 90 }] : [] }); return { hasVisible: true }; } },
+    './proactive-replay': replay,
+    './follow-up-service': { parseAndSaveResponse: async (...args) => { saved.push(args); history.push({ id: 'a', role: 'assistant', createdAt: args[5]?.createdAt ?? new Date(now).toISOString(), proactiveTiming: args[5]?.proactiveTiming, stateValues: [{ name: '跟进意愿', value: 90 }], freshStateValues: fresh ? [{ name: '跟进意愿', value: 90 }] : [] }); return { hasVisible: true }; } },
     './memory-storage': { incrementEventCounter() {} }, './memory-summarizer': { maybeRunSummarization: async () => {} },
     './character-storage': { loadCharacters: () => [{ id: 'c', name: 'C' }] },
   }, {
@@ -99,10 +104,21 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
   await new Promise(resolve => setImmediate(resolve));
   service.pollNewProactive(now, () => false);
   await new Promise(resolve => setImmediate(resolve));
-  return { calls, saved, events, record, service };
+  return { calls, saved, events, record, service, builds };
 }
 (async () => {
   const normal = await scenario();
+  for (const group of [false, true]) {
+    const backfill = await scenario({ overdue: 120000, group });
+    assert.equal(backfill.builds[0][2].historicalAt, 100000000 - 120000);
+    assert.equal(backfill.saved[0][5].createdAt, new Date(100000000 - 120000).toISOString());
+    assert.equal(backfill.saved[0][5].historicalReplay, true);
+    assert.ok(backfill.calls[0][2].some(m => m.content.includes(new Date(100000000 - 120000).toISOString())));
+    assert.ok(backfill.record.state.fixedAt > 100000000, 'next cycle is not another overdue replay');
+  }
+  const quietRecovery = await scenario({ overdue: 120000, deferred: true });
+  assert.equal(quietRecovery.builds[0][2].historicalAt, undefined);
+  assert.equal(quietRecovery.saved[0][5].createdAt, undefined);
   assert.equal(normal.calls.length, 1);
   assert.equal(normal.saved.length, 1);
   assert.ok(normal.record.state.followupAt, 'human reply schedule independent of anxiety status');

@@ -281,6 +281,7 @@ function scheduleGroupMemorySummarization(
  * Shared prompt builder for group chat — used by both generate and preview.
  */
 export type GroupChatPromptBuildOptions = {
+    historicalAt?: number;
     appTags?: string[];
     excludeOfflineSessionId?: string;
     disableTools?: boolean;
@@ -332,20 +333,21 @@ export async function buildGroupChatPromptMessages(
     const memConfig = loadMemoryConfig();
     const allWorldBooks = loadWorldBooks();
 
-    const now = new Date();
+    const now = new Date(options?.historicalAt ?? Date.now());
     const memberTimeContexts: Record<string, ReturnType<typeof buildCharacterTimeContext>> = {};
     const memberDataPromises = participantIds.map(async (charId): Promise<GroupMemberData | null> => {
         const character = charMap.get(charId);
         if (!character) return null;
         const memberTimeContext = buildCharacterTimeContext(character.timeZone, now);
         memberTimeContexts[charId] = memberTimeContext;
-        const scheduleSummary = buildCalendarScheduleMarker("character", charId, getWeekStartIso(now));
-        const currentSchedule = getCurrentCalendarScheduleForPrompt("character", charId, now);
+        const scheduleSummary = options?.historicalAt === undefined ? buildCalendarScheduleMarker("character", charId, getWeekStartIso(now)) : "";
+        const currentSchedule = options?.historicalAt === undefined ? getCurrentCalendarScheduleForPrompt("character", charId, now) : "";
         const charSlot = resolveBinding(bindings, charId, "group_chat");
         const worldBooks = promptProfile?.enableWorldBooks === false
             ? []
             : (charSlot.worldBookIds || []).map(id => allWorldBooks.find(w => w.id === id)).filter(Boolean) as typeof allWorldBooks;
         const { wbActivationContext } = prepareShortTermContext(charId, "group_chat", {
+            historicalAt: options?.historicalAt,
             userName,
             excludeGroupSessionId: isOfflineMode ? undefined : session.id,
             excludeOfflineSessionId: options?.excludeOfflineSessionId,
@@ -354,8 +356,8 @@ export async function buildGroupChatPromptMessages(
         let coreMemories = "", longTermMemories = "";
         try {
             const [coreResults, results] = await Promise.all([
-                retrieveCoreMemoriesForPrompt(charId, memConfig),
-                retrieveMemoriesForPrompt(charId, wbActivationContext, memConfig),
+                retrieveCoreMemoriesForPrompt(charId, memConfig, options?.historicalAt),
+                retrieveMemoriesForPrompt(charId, wbActivationContext, memConfig, options?.historicalAt),
             ]);
             coreMemories = formatCoreMemories(coreResults);
             longTermMemories = formatLongTermMemories(results);
@@ -367,7 +369,7 @@ export async function buildGroupChatPromptMessages(
             currentSchedule,
             coreMemories,
             longTermMemories,
-            currentStateValues: getLatestCharacterStateValues(charId),
+            currentStateValues: getLatestCharacterStateValues(charId, options?.historicalAt === undefined ? undefined : { before: { createdAt: now.toISOString(), id: "" } }),
         };
     });
 
@@ -392,6 +394,7 @@ export async function buildGroupChatPromptMessages(
         wbActivationContext,
         unifiedRecentItems,
     } = prepareGroupShortTermContext(participantIds, annotatedHistory, {
+        historicalAt: options?.historicalAt,
         userName,
         excludeGroupSessionId: isOfflineMode ? undefined : session.id,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
@@ -417,7 +420,7 @@ export async function buildGroupChatPromptMessages(
         ? `每个角色只能使用自己名下的表情包：\n${stickerRows.join("\n")}`
         : "无可用表情包，该功能不可用";
     const firstExample = members.map(m => getCustomStickerExample(m.character.id)).find(Boolean) || "";
-    const [musicLocal, musicCloud] = await Promise.all([buildMusicLocalMacro(), buildMusicCloudMacro()]);
+    const [musicLocal, musicCloud] = options?.historicalAt === undefined ? await Promise.all([buildMusicLocalMacro(), buildMusicCloudMacro()]) : ["", ""];
     const activeMemberSchedules = members
         .map(m => ({ name: m.character.name, schedule: m.currentSchedule?.trim() || "" }))
         .filter(item => item.schedule && item.schedule !== "无");
@@ -425,7 +428,7 @@ export async function buildGroupChatPromptMessages(
         ? activeMemberSchedules.map(item => `${item.name}：${item.schedule}`).join("；")
         : "无";
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
-    const pluginPrompt = await runChatPluginTransform("prompt.system", {
+    const pluginPrompt = options?.historicalAt !== undefined ? { hint: "" } : await runChatPluginTransform("prompt.system", {
         sessionId: session.id,
         isGroup: true,
         hint: buildChatPluginPromptFragments(session.id),

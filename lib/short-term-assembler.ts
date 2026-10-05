@@ -925,6 +925,7 @@ export function prepareShortTermContext(
     characterId: string,
     appId: string,
     options?: {
+        historicalAt?: number;
         userName?: string;
         history?: ChatMessage[];
         excludeGroupSessionId?: string;
@@ -954,6 +955,9 @@ export function prepareShortTermContext(
         promptTimestampOptions: options?.promptTimestampOptions,
     });
 
+    // Cross-app projections can bundle later comments/edits into an earlier event.
+    // Without version snapshots, historical replay conservatively uses chat entries only.
+    if (options?.historicalAt !== undefined) timeline = timeline.filter(e => e.sourceApp === "chat" && Date.parse(e.timestamp) <= options.historicalAt!);
     const memConfig = loadMemoryConfig();
     if (options?.excludeStoryMessageIds?.length) {
         const excluded = new Set(options.excludeStoryMessageIds.map(id => `story_projection_${id}`));
@@ -965,7 +969,7 @@ export function prepareShortTermContext(
     const wbActivationContext = timeline.slice(-10).map(e => e.content).join("\n");
     const budget = memConfig.shortTermTokenBudget;
     const currentTag = getFeatureTag(appId);
-    const history = options?.history ?? [];
+    const history = (options?.history ?? []).filter(m => options?.historicalAt === undefined || Date.parse(m.createdAt) <= options.historicalAt);
     const characterName = loadCharacters().find(c => c.id === characterId)?.name ?? "角色";
     const wrapsCurrentHistory = appId === "chat" || appId === "group_chat" || appId === "story" || appId === "vn" || appId === "adventure";
     const skipDirectChatEntries = appId === "chat" && !options?.includeDirectChatEntries;
@@ -1193,6 +1197,7 @@ export function prepareGroupShortTermContext(
     characterIds: string[],
     history: ChatMessage[],
     options?: {
+        historicalAt?: number;
         userName?: string;
         excludeGroupSessionId?: string;
         excludeOfflineSessionId?: string;
@@ -1205,6 +1210,7 @@ export function prepareGroupShortTermContext(
     wbActivationContext: string;
     unifiedRecentItems: UnifiedRecentItem[];
 } {
+    if (options?.historicalAt !== undefined) history = history.filter(m => Date.parse(m.createdAt) <= options.historicalAt!);
     const uniqueCharacterIds = [...new Set(characterIds)];
     const timelineByKey = new Map<string, NativeTimelineEntry>();
     const timeAware = resolvePromptTimeAware(options?.timeAware);
@@ -1219,6 +1225,7 @@ export function prepareGroupShortTermContext(
             timeAware,
             promptTimestampOptions: options?.promptTimestampOptions,
         });
+        if (options?.historicalAt !== undefined) timeline = timeline.filter(e => e.sourceApp === "chat" && Date.parse(e.timestamp) <= options.historicalAt!);
         timeline = filterTimelineByAllowedSources(timeline, allowed);
         for (const entry of timeline) {
             if (entry.sourceApp === "chat" && entry.sourceDetail === "group" && entry.groupSessionId === options?.excludeGroupSessionId) {

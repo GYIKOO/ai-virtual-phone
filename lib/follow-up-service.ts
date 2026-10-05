@@ -946,6 +946,8 @@ export async function parseAndSaveResponse(
         responseBatchId?: string;
         /** 离线回端时沿用云端生成时间，避免多轮补账被“当前时间”打乱因果顺序。 */
         createdAt?: string;
+        historicalReplay?: boolean;
+        proactiveTiming?: import("./proactive-replay").ProactiveTiming;
         rawResponseText?: string;
         reasoningText?: string;
         /** 这轮回复实际触发过的快捷动作标记：按 insertAt 在原始位置落一对
@@ -960,7 +962,8 @@ export async function parseAndSaveResponse(
     void contextMessages;
     const sessions = loadChatSessions();
     const sess = sessions.find(s => s.id === sessionId);
-    const previousState = sess && !sess.isGroup ? getLatestCharacterStateValues(sess.contactId) : [];
+    const previousState = sess && !sess.isGroup ? getLatestCharacterStateValues(sess.contactId,
+        options?.historicalReplay && options.createdAt ? { before: { createdAt: options.createdAt, id: "" } } : undefined) : [];
 
     const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(rawText, previousState);
 
@@ -995,6 +998,8 @@ export async function parseAndSaveResponse(
 
     const filteredParts: ParsedMessagePart[] = [];
     for (const p of parts) {
+        // Historical text must never execute a present-day call, transfer, invitation or tool action.
+        if (options?.historicalReplay && p.mediaType) continue;
         if (p.mediaType === "voice_call") { triggerCall = "voice"; continue; }
         if (p.mediaType === "video_call") { triggerCall = "video"; continue; }
         // 「丢弃角色输出的无效表情包」开关（主动消息路径）
@@ -1042,6 +1047,7 @@ export async function parseAndSaveResponse(
                 content: "",
                 createdAt: options?.createdAt,
                 responseBatchId,
+                proactiveTiming: options?.proactiveTiming,
                 rawResponseText,
                 statusPanel,
                 statusRegionMode,
@@ -1128,6 +1134,7 @@ export async function parseAndSaveResponse(
             mediaData: generatedPart.mediaData,
             responseBatchId,
             rawResponseText,
+            proactiveTiming: options?.proactiveTiming,
             statusPanel: i === metaIdx && statusPanel ? statusPanel : undefined,
             statusRegionMode: i === metaIdx && statusPanel ? statusRegionMode : undefined,
             innerMonologue: i === metaIdx && innerMonologue ? innerMonologue : undefined,

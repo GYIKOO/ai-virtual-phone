@@ -350,6 +350,7 @@ export type DebugPromptRequestOptions = {
 };
 
 type ChatPromptBuildOptions = {
+    historicalAt?: number;
     followUpCount?: number;
     followUpDelay?: number;
     timedWakeElapsedMinutes?: number;
@@ -1857,7 +1858,7 @@ export async function buildChatPromptMessages(
         ]
         : history;
 
-    const now = new Date();
+    const now = new Date(options?.historicalAt ?? Date.now());
     const promptTimeContext = buildCharacterTimeContext(character.timeZone, now);
     const promptTimestampOptions = getPromptTimestampOptionsForTimeContext(promptTimeContext);
     const memConfig = loadMemoryConfig();
@@ -1869,6 +1870,7 @@ export async function buildChatPromptMessages(
         && (options?.forceEnableTools === true || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
     const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
+        historicalAt: options?.historicalAt,
         history: historyForPrompt,
         includeDirectChatEntries: isOfflineMode,
         includeNativeToolHistory: usesNativeActions,
@@ -1887,18 +1889,18 @@ export async function buildChatPromptMessages(
     }
 
     const [memResults, coreResults, musicLocal, musicCloud] = await Promise.all([
-        retrieveMemoriesForPrompt(character.id, wbActivationContext, memConfig).catch(() => null),
-        retrieveCoreMemoriesForPrompt(character.id, memConfig).catch(() => null),
-        buildMusicLocalMacro(),
-        buildMusicCloudMacro(),
+        retrieveMemoriesForPrompt(character.id, wbActivationContext, memConfig, options?.historicalAt).catch(() => null),
+        retrieveCoreMemoriesForPrompt(character.id, memConfig, options?.historicalAt).catch(() => null),
+        options?.historicalAt === undefined ? buildMusicLocalMacro() : "",
+        options?.historicalAt === undefined ? buildMusicCloudMacro() : "",
     ]);
 
     const longTermMemories = memResults ? formatLongTermMemories(memResults) : "";
     const coreMemories = coreResults ? formatCoreMemories(coreResults) : "";
-    const scheduleSummary = buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now));
-    const currentSchedule = getCurrentCalendarScheduleForPrompt("character", character.id, now);
+    const scheduleSummary = options?.historicalAt === undefined ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now)) : "";
+    const currentSchedule = options?.historicalAt === undefined ? getCurrentCalendarScheduleForPrompt("character", character.id, now) : "";
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
-    const pluginPrompt = await runChatPluginTransform("prompt.system", {
+    const pluginPrompt = options?.historicalAt !== undefined ? { hint: "" } : await runChatPluginTransform("prompt.system", {
         sessionId: session.id,
         isGroup: !!session.isGroup,
         characterId: character.id,
@@ -1929,7 +1931,7 @@ export async function buildChatPromptMessages(
         userIdentity,
         appId: resolvedAppId,
         appTags: effectiveAppTags,
-        initialStateValues: getLatestCharacterStateValues(character.id),
+        initialStateValues: getLatestCharacterStateValues(character.id, options?.historicalAt === undefined ? undefined : { before: { createdAt: now.toISOString(), id: "" } }),
         followUpCount: options?.followUpCount,
         followUpDelay: options?.followUpDelay,
         timedWakeElapsedMinutes: options?.timedWakeElapsedMinutes,
@@ -1963,7 +1965,7 @@ export async function buildChatPromptMessages(
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
     });
-    const avatarChangeIntent = !session.isGroup
+    const avatarChangeIntent = !session.isGroup && options?.historicalAt === undefined
         ? findUserAvatarChangeIntent(historyForPrompt, session.id, character.id)
         : null;
     // 当前状态用一条直白提示兜底；具体拉黑/解除事件已写入私聊短期记忆。
@@ -1973,7 +1975,7 @@ export async function buildChatPromptMessages(
             content: `当前会话状态：${character.name}已被${userIdentity?.name || "用户"}拉黑，${character.name}知道自己发出的消息会被拒收。`,
         });
     }
-    if (!session.isGroup && !isOfflineMode && resolvedAppId === "chat") {
+    if (!session.isGroup && !isOfflineMode && resolvedAppId === "chat" && options?.historicalAt === undefined) {
         const meetingInviteConfig = resolveMeetingInviteCardConfig(loadChatAppSettings());
         llmMessages.push({
             role: "system",

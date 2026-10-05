@@ -8,6 +8,7 @@ import { anchorPlan, changeQuiet, releaseQuiet } from "./proactive-clock";
 import { kvGet } from "./kv-db";
 import { loadFollowUpConfig } from "./settings-storage";
 import { followUpDelay } from "./proactive-followup";
+import { replayTime } from "./proactive-replay";
 import { loadProactive, saveProactiveState, refreshProactive, flushProactive, type ProactiveRecord } from "./proactive-storage";
 import { dueProactive, maxFollowUps, nextProactiveAt, proactiveInstruction, type ProactiveSource } from "./proactive-policy";
 
@@ -22,7 +23,7 @@ function synchronize(session: ChatSession, record: ProactiveRecord, now: number)
     const setting = loadPushQuietHours();
     let state = record.state;
     if (state.clockVersion !== 2 || state.anchor !== anchor) {
-        const parsed = Date.parse(latest?.createdAt ?? session.updatedAt);
+        const parsed = Date.parse(latest?.proactiveTiming?.generatedAt ?? latest?.createdAt ?? session.updatedAt);
         const at = Number.isFinite(parsed) ? Math.min(now, parsed) : now;
         state = anchorPlan(record.config, state.revision, !!session.isGroup, anchor, at, setting, now);
         if (latest?.role === "assistant") state.followupCount = record.state.followupCount;
@@ -119,6 +120,7 @@ export function pollNewProactive(now: number, legacyBusy: (sessionId: string) =>
 async function fire(session: ChatSession, record: ProactiveRecord, source: ProactiveSource): Promise<void> {
     const controller = new AbortController();
     const { config } = record;
+    const historicalAt = replayTime(record.state, source, Date.now());
     const state = { ...record.state, lastAttemptAt: Date.now(), retryAt: Date.now() + 30 * 60000, lastError: undefined };
     // Persist a retry lease, not a fictional new conversation, before calling the API.
     if (!saveProactiveState(session.id, state)) return;
@@ -133,10 +135,11 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
         const history = loadChatMessages(session.id);
         const tags = [session.isGroup ? "group_chat" : "chat", "text", "proactive"];
         const prompt = session.isGroup
-            ? await buildGroupChatPromptMessages(session, history, { appTags: tags, disableTools: true })
-            : await buildChatPromptMessages(session, history, { appTags: tags, toolsAllowed: false });
+            ? await buildGroupChatPromptMessages(session, history, { appTags: tags, disableTools: true, historicalAt })
+            : await buildChatPromptMessages(session, history, { appTags: tags, toolsAllowed: false, historicalAt });
         if (!valid() || lastMessage(session.id) !== anchor) return;
-        prompt.llmMessages.push({ role: "system", content: proactiveInstruction(config, source) });
+        prompt.llmMessages.push({ role: "system", content: proactiveInstruction(config, source, historicalAt ?? Date.now()) });
+        if (historicalAt !== undefined) prompt.llmMessages.push({ role: "system", content: "本轮场景时间以调度事件给出的时间为准。沿用当前聊天的文字分条格式表达；此轮只生成文字交流，保持沉默时返回 <proactive-skip/>。" });
         let raw = await sendLLMRequest(prompt.config, prompt.preset, prompt.llmMessages, prompt.regexes, undefined,
             { appId: session.isGroup ? "group_chat" : "chat", appTags: tags, signal: controller.signal, debugSessionId: session.id });
         if (!valid() || lastMessage(session.id) !== anchor) return;
@@ -154,11 +157,14 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
         const results = "nameToId" in prompt ? parseGroupChatResponse(raw, prompt.nameToId)
             : [{ characterId: session.contactId, characterName: prompt.character.name, responseText: raw }];
         const { parseAndSaveResponse } = await import("./follow-up-service");
+        const generatedAt = new Date().toISOString();
         let visible = false;
         for (const result of results) {
             if (!valid()) break;
             const saved = await parseAndSaveResponse(result.responseText, session.id, 0, undefined, history,
-                session.isGroup ? { senderCharacterId: result.characterId, senderName: result.characterName } : undefined);
+                { ...(session.isGroup ? { senderCharacterId: result.characterId, senderName: result.characterName } : {}),
+                    ...(historicalAt !== undefined ? { createdAt: new Date(historicalAt).toISOString(), historicalReplay: true,
+                        proactiveTiming: { scheduledAt: new Date(historicalAt).toISOString(), generatedAt, backfilled: true } } : {}) });
             visible ||= saved.hasVisible;
         }
         if (visible && valid()) {

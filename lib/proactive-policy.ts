@@ -108,7 +108,7 @@ export function dueProactive(state: ProactiveState, now: number): ProactiveSourc
 export function consumeProactive(config: ProactiveConfig, state: ProactiveState, now: number, isGroup: boolean): ProactiveState {
     return { ...planProactive(config, now, state.revision, isGroup), followupCount: state.followupCount, lastAttemptAt: now };
 }
-export function proactiveInstruction(config: ProactiveConfig, source: ProactiveSource): string {
+export function proactiveInstruction(config: ProactiveConfig, source: ProactiveSource, at = Date.now()): string {
     const focus = source === "followup" ? "\n本次是上一轮交流的跟进机会。结合尚待确认、补充或继续讨论的具体内容，以及角色自己的动机决定是否再开口。发言后重新评估这件事是否还需要跟进；已经告一段落时可以保持沉默。" : "";
-    return `${config.instruction}${focus}\n[系统调度事件：${source === "followup" ? "补充联系机会" : "自主交流机会"}；时间：${new Date().toISOString()}]\n输出协议：发言时沿用当前聊天格式；本轮保持沉默时返回唯一标记 <proactive-skip/>。`;
+    return `${config.instruction}${focus}\n[系统调度事件：${source === "followup" ? "补充联系机会" : "自主交流机会"}；时间：${new Date(at).toISOString()}]\n输出协议：发言时沿用当前聊天格式；本轮保持沉默时返回唯一标记 <proactive-skip/>。`;
 }
