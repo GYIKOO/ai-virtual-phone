@@ -61,6 +61,7 @@ import {
 } from "@/lib/media-maintenance";
 import { clearStorageCategory, scanStorageSpace, type StorageCategoryId, type StorageCategoryStat } from "@/lib/storage-space";
 import { isAndroidBrowser, isIOSBrowser } from "@/lib/download-utils";
+import { StorageCleanup } from "./storage-cleanup";
 import type { BackupManifest, DataModuleId, DataSnapshot, ImportResult, ModuleStats } from "@/lib/data-management/types";
 
 type PendingImport = {
@@ -626,6 +627,7 @@ export function DataManagement({ onNotice }: DataManagementProps) {
 
   return (
     <div className="page-menu data-management-menu" style={{ padding: 0 }}>
+      <StorageCleanup />
       <div className="data-section">
         <DataSectionTitle>Module Breakdown</DataSectionTitle>
         <div className="menu-group">
