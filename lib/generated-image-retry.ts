@@ -76,6 +76,7 @@ export async function generateAndApplyChatGeneratedImage(
         const generated = await generateImageFromConfiguredApi({
             description,
             characterId,
+            appId: "chat",
             useReferenceImage: effectiveUseReference,
             signal: options?.signal,
         });
@@ -156,6 +157,7 @@ export async function retryMomentGeneratedPhoto(
         const generated = await generateImageFromConfiguredApi({
             description,
             characterId: post.authorType === "character" ? post.authorId : undefined,
+            appId: "moments",
             useReferenceImage: effectiveUseReference,
         });
         if (!generated) throw new Error("生图配置未启用或不完整");

@@ -33,6 +33,8 @@ export type StatusRegionConfig = {
 };
 
 const STORAGE_KEY = "ai_phone_chat_status_region_v1";
+/** 全局私聊状态栏使用的保留键，不会与真实会话 id 冲突。 */
+export const GLOBAL_CHAT_STATUS_REGION_ID = "__global_private_chat__";
 
 /** 配置被外部改写（小卷工具）后广播，已打开的聊天信息页据此刷新，
  *  否则面板的状态只在挂载时初始化一次，会停在旧值——写了但前台看不见。 */
@@ -113,8 +115,7 @@ function loadAll(): Record<string, StatusRegionConfig> {
     }
 }
 
-export function getStatusRegionConfig(sessionId: string): StatusRegionConfig {
-    const raw = loadAll()[sessionId];
+function normalizeConfig(raw: StatusRegionConfig | undefined): StatusRegionConfig {
     if (!raw || typeof raw !== "object") return { ...DEFAULT_STATUS_REGION_CONFIG };
     const mode = raw.mode === "off" || raw.mode === "custom" ? raw.mode : "native";
     return {
@@ -123,6 +124,32 @@ export function getStatusRegionConfig(sessionId: string): StatusRegionConfig {
         renderHtml: typeof raw.renderHtml === "string" ? raw.renderHtml : "",
         previewRaw: typeof raw.previewRaw === "string" ? raw.previewRaw : "",
     };
+}
+
+/**
+ * 读取状态栏配置。私聊默认按“单独会话 > 全局聊天信息 > 原生”回退；
+ * 群聊调用方应传 inheritGlobal=false，避免继承私聊设置。
+ */
+export function getStatusRegionConfig(sessionId: string, inheritGlobal = true): StatusRegionConfig {
+    const all = loadAll();
+    const own = all[sessionId];
+    if (own) return normalizeConfig(own);
+    if (inheritGlobal && sessionId !== GLOBAL_CHAT_STATUS_REGION_ID) {
+        return normalizeConfig(all[GLOBAL_CHAT_STATUS_REGION_ID]);
+    }
+    return { ...DEFAULT_STATUS_REGION_CONFIG };
+}
+
+export function hasOwnStatusRegionConfig(sessionId: string): boolean {
+    return !!loadAll()[sessionId];
+}
+
+export function clearStatusRegionConfig(sessionId: string): void {
+    if (typeof window === "undefined") return;
+    const all = loadAll();
+    delete all[sessionId];
+    kvSet(STORAGE_KEY, JSON.stringify(all));
+    window.dispatchEvent(new CustomEvent(STATUS_REGION_UPDATED_EVENT, { detail: { sessionId } }));
 }
 
 export function saveStatusRegionConfig(sessionId: string, config: StatusRegionConfig): void {
@@ -134,6 +161,7 @@ export function saveStatusRegionConfig(sessionId: string, config: StatusRegionCo
         all[sessionId] = config;
     }
     kvSet(STORAGE_KEY, JSON.stringify(all));
+    window.dispatchEvent(new CustomEvent(STATUS_REGION_UPDATED_EVENT, { detail: { sessionId } }));
 }
 
 /** custom 是否真正生效（契约与渲染都要有内容，缺一回退 native 行为） */

@@ -36,7 +36,8 @@ import {
   Heart,
   ChevronRight,
   Languages,
-  History
+  History,
+  LayoutGrid,
 } from "lucide-react";
 import { PageShell } from "@/components/ui/page-shell";
 import { ConfirmDialog, Toggle } from "@/components/ui";
@@ -71,19 +72,25 @@ import {
   isCheckPhoneAppId,
   type CheckPhoneAppId,
   type CheckPhoneManifest,
+  type CheckPhoneSnapshot,
 } from "@/lib/checkphone-config";
-import { generateCheckPhoneManifest } from "@/lib/checkphone-engine";
+import { generateCheckPhoneAppBatch, generateCheckPhoneManifest } from "@/lib/checkphone-engine";
 import {
   clearPhoneManifest,
   loadPhoneManifest,
+  loadPhoneSnapshot,
   savePhoneManifest,
+  savePhoneSnapshot,
   hydrateCheckPhoneStorage,
   readPhoneManifestCache,
+  loadCheckPhoneUnreadAppIds,
+  saveCheckPhoneUnreadAppIds,
   loadCheckPhoneProjectionEntries,
   removeCheckPhoneProjectionEntry,
   clearCheckPhoneProjectionEntries,
   type CheckPhoneProjectionEntry,
 } from "@/lib/checkphone-storage";
+import { ContentDialog } from "@/components/ui/modal";
 import {
   loadCheckPhoneSettings,
   saveCheckPhoneSettings,
@@ -270,7 +277,7 @@ function AppGlyph({ appId, size = 26, strokeWidth = 1.5 }: { appId: CheckPhoneAp
 }
 
 function getAppIconClass(appId: CheckPhoneAppId, isDock = false) {
-  const baseClass = isDock ? "cp-app-icon cp-app-icon--dock" : "cp-app-icon";
+  const baseClass = isDock ? "cp-app-icon cp-app-icon--dock relative" : "cp-app-icon relative";
   // Interspersed distribution to ensure grey icons don't cluster in one column
   const midGreyApps: string[] = ["photos", "weibo", "steam", "telegram", "reddit"];
   const lightGreyApps: string[] = ["messages", "bilibili", "xiaohongshu", "email", "instagram"];
@@ -345,6 +352,11 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
   const [historyGroups, setHistoryGroups] = useState<{ characterId: string; name: string; entries: CheckPhoneProjectionEntry[] }[]>([]);
   const [confirmClearHistoryCharId, setConfirmClearHistoryCharId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchAppIds, setBatchAppIds] = useState<CheckPhoneAppId[]>([]);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchStatus, setBatchStatus] = useState<{ success: boolean; message: string } | null>(null);
+  const [unreadAppIdsByCharacter, setUnreadAppIdsByCharacter] = useState<Record<string, CheckPhoneAppId[]>>({});
   const [promptEditorOpen, setPromptEditorOpen] = useState(false);
   const [promptDraft, setPromptDraft] = useState(DEFAULT_CHECKPHONE_BILINGUAL_PROMPT);
   const [checkPhoneSettings, setCheckPhoneSettings] = useState<CheckPhoneSettings>({
@@ -358,6 +370,9 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
     const all = loadCharacters();
     setCharacters(all);
     setCheckPhoneSettings(loadCheckPhoneSettings());
+    setUnreadAppIdsByCharacter(Object.fromEntries(
+      all.map((character) => [character.id, loadCheckPhoneUnreadAppIds(character.id)]),
+    ));
 
     (async () => {
       await hydrateCheckPhoneStorage();
@@ -428,6 +443,21 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
     CHECKPHONE_EMBEDDED_APP_IDS.includes(selectedAppId as (typeof CHECKPHONE_EMBEDDED_APP_IDS)[number]);
 
   const closeSelectedApp = () => setSelectedAppId(null);
+
+  function updateUnreadApps(characterId: string, update: (current: CheckPhoneAppId[]) => CheckPhoneAppId[]) {
+    setUnreadAppIdsByCharacter((previous) => {
+      const nextIds = [...new Set(update(previous[characterId] || []))];
+      saveCheckPhoneUnreadAppIds(characterId, nextIds);
+      return { ...previous, [characterId]: nextIds };
+    });
+  }
+
+  function openApp(appId: CheckPhoneAppId) {
+    if (activeCharId) {
+      updateUnreadApps(activeCharId, (current) => current.filter((id) => id !== appId));
+    }
+    setSelectedAppId(appId);
+  }
 
   function updateCheckPhoneSettings(patch: Partial<CheckPhoneSettings>) {
     const next = { ...checkPhoneSettings, ...patch };
@@ -535,6 +565,59 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
     }));
   }
 
+  function toggleBatchApp(appId: CheckPhoneAppId) {
+    setBatchStatus(null);
+    setBatchAppIds((current) => {
+      if (current.includes(appId)) return current.filter((id) => id !== appId);
+      if (current.length >= 4) {
+        setBatchStatus({ success: false, message: "一次最多选择 4 个应用。" });
+        return current;
+      }
+      return [...current, appId];
+    });
+  }
+
+  async function handleBatchGenerate() {
+    if (!activeCharId || batchLoading || batchAppIds.length === 0) {
+      if (batchAppIds.length === 0) setBatchStatus({ success: false, message: "请至少选择一个应用。" });
+      return;
+    }
+    setBatchLoading(true);
+    setBatchStatus(null);
+    const previousSnapshots = await Promise.all(batchAppIds.map((appId) => loadPhoneSnapshot(activeCharId, appId)));
+    const result = await generateCheckPhoneAppBatch(activeCharId, batchAppIds);
+    const now = new Date().toISOString();
+    let savedCount = 0;
+    for (const item of result.items) {
+      if (!item.payload) continue;
+      const previous = previousSnapshots.find((snapshot) => snapshot?.appId === item.appId);
+      const snapshot: CheckPhoneSnapshot = {
+        id: `${activeCharId}:${item.appId}`,
+        characterId: activeCharId,
+        appId: item.appId,
+        generatedAt: previous?.generatedAt ?? now,
+        updatedAt: now,
+        summary: item.summary,
+        payload: item.payload,
+      };
+      await savePhoneSnapshot(snapshot);
+      savedCount += 1;
+    }
+    const generatedAppIds = result.items.filter((item) => item.payload).map((item) => item.appId);
+    if (generatedAppIds.length > 0) {
+      updateUnreadApps(activeCharId, (current) => [...current, ...generatedAppIds]);
+    }
+    const failures = result.items.filter((item) => !item.payload).map((item) => CHECKPHONE_APP_SPECS[item.appId].label);
+    if (result.error) {
+      setBatchStatus({ success: false, message: result.error });
+    } else if (failures.length > 0) {
+      setBatchStatus({ success: savedCount > 0, message: `已更新 ${savedCount} 个；${failures.join("、")}返回格式未通过校验，可单独重试。` });
+    } else {
+      setBatchStatus({ success: true, message: `已用一次 API 调用更新 ${savedCount} 个应用。` });
+    }
+    setBatchLoading(false);
+  }
+
   const handleBack = () => {
     if (activeCharId) {
       setActiveCharId(null);
@@ -563,11 +646,13 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
       },
     }));
     setSelectedAppId(null);
+    updateUnreadApps(activeCharId, () => []);
     setConfirmClearOpen(false);
   }
 
   const topApps = sanitizeCheckPhoneAppIds(manifest?.topAppIds);
   const dockApps = sanitizeCheckPhoneAppIds(manifest?.dockAppIds);
+  const unreadAppIds = activeCharId ? unreadAppIdsByCharacter[activeCharId] || [] : [];
   const selectedAppSpec = selectedAppId && isCheckPhoneAppId(selectedAppId) ? CHECKPHONE_APP_SPECS[selectedAppId] : null;
 
   // STAGE 2: PURE FULLSCREEN IMMERSIVE SIMULATOR
@@ -635,6 +720,20 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
               </div>
 
               <div className="cp-floating-actions">
+                {manifest && (
+                  <button
+                    className="cp-float-refresh"
+                    onClick={() => {
+                      setBatchAppIds([]);
+                      setBatchStatus(null);
+                      setBatchOpen(true);
+                    }}
+                    aria-label="批量生成应用"
+                    disabled={!!activeState?.loading || batchLoading}
+                  >
+                    <LayoutGrid size={18} strokeWidth={2.25} />
+                  </button>
+                )}
                 <button className="cp-float-refresh" onClick={handleGenerate} aria-label="Refresh Signal" disabled={!!activeState?.loading}>
                   <RefreshCw size={18} strokeWidth={2.5} className={activeState?.loading ? "cp-spin" : undefined} />
                 </button>
@@ -769,9 +868,12 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
                               key={appId}
                               type="button"
                               className="cp-app-btn"
-                              onClick={() => setSelectedAppId(appId)}
+                              onClick={() => openApp(appId)}
                             >
-                              <div className={getAppIconClass(appId)}><AppGlyph appId={appId} size={32} strokeWidth={1.4} /></div>
+                              <div className={getAppIconClass(appId)}>
+                                <AppGlyph appId={appId} size={32} strokeWidth={1.4} />
+                                {unreadAppIds.includes(appId) && <span className="pointer-events-none absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-[#ff3b30] shadow-sm" aria-label="有新内容" />}
+                              </div>
                               <span className="cp-app-label">{spec.shortLabel ?? spec.label}</span>
                             </button>
                           );
@@ -818,10 +920,13 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
                               key={appId} 
                               type="button" 
                               className="cp-app-btn" 
-                              onClick={() => setSelectedAppId(appId)}
+                              onClick={() => openApp(appId)}
                               style={isBottomRow ? { transform: "translateY(-8px)" } : undefined}
                             >
-                              <div className={getAppIconClass(appId)}><AppGlyph appId={appId} size={32} strokeWidth={1.4} /></div>
+                              <div className={getAppIconClass(appId)}>
+                                <AppGlyph appId={appId} size={32} strokeWidth={1.4} />
+                                {unreadAppIds.includes(appId) && <span className="pointer-events-none absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-[#ff3b30] shadow-sm" aria-label="有新内容" />}
+                              </div>
                               <span className="cp-app-label">{spec.shortLabel ?? spec.label}</span>
                             </button>
                           );
@@ -856,8 +961,11 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
                         {topApps.slice(8, 12).map((appId) => {
                           const spec = CHECKPHONE_APP_SPECS[appId];
                           return (
-                            <button key={appId} type="button" className="cp-app-btn" onClick={() => setSelectedAppId(appId)}>
-                              <div className={getAppIconClass(appId)}><AppGlyph appId={appId} size={32} strokeWidth={1.4} /></div>
+                            <button key={appId} type="button" className="cp-app-btn" onClick={() => openApp(appId)}>
+                              <div className={getAppIconClass(appId)}>
+                                <AppGlyph appId={appId} size={32} strokeWidth={1.4} />
+                                {unreadAppIds.includes(appId) && <span className="pointer-events-none absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-[#ff3b30] shadow-sm" aria-label="有新内容" />}
+                              </div>
                               <span className="cp-app-label">{spec.shortLabel ?? spec.label}</span>
                             </button>
                           );
@@ -879,10 +987,11 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
                             key={appId}
                             type="button"
                             className="cp-app-btn cp-app-btn--dock"
-                            onClick={() => setSelectedAppId(appId)}
+                            onClick={() => openApp(appId)}
                           >
                             <div className={getAppIconClass(appId, true)}>
                               <AppGlyph appId={appId} />
+                              {unreadAppIds.includes(appId) && <span className="pointer-events-none absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-[#ff3b30] shadow-sm" aria-label="有新内容" />}
                             </div>
                           </button>
                         );
@@ -892,6 +1001,43 @@ export function CheckPhoneApp({ onClose }: CheckPhoneAppProps) {
                 </div>
               )}
              </>
+          )}
+
+          {batchOpen && manifest && (
+            <ContentDialog
+              title="批量生成手机内容"
+              confirmLabel={batchLoading ? "生成中…" : `生成所选（${batchAppIds.length}/4）`}
+              cancelLabel="取消"
+              onCancel={() => { if (!batchLoading) setBatchOpen(false); }}
+              onConfirm={handleBatchGenerate}
+            >
+              <div className="flex flex-col gap-3">
+                <p className="menu-desc">选择 1–4 个应用，只调用一次 API 并分别保存结果。选择越多，模型输出越长。</p>
+                <div className="grid max-h-[48vh] grid-cols-2 gap-2 overflow-y-auto pr-1">
+                  {sanitizeCheckPhoneAppIds(manifest.allAppIds).map((appId) => {
+                    const selected = batchAppIds.includes(appId);
+                    return (
+                      <button
+                        key={appId}
+                        type="button"
+                        className={`flex items-center gap-2 rounded-xl border px-3 py-3 text-left transition ${selected ? "border-black bg-black text-white" : "border-black/10 bg-black/[0.03] text-black"}`}
+                        onClick={() => toggleBatchApp(appId)}
+                        disabled={batchLoading}
+                      >
+                        <span className="shrink-0"><AppGlyph appId={appId} size={19} strokeWidth={1.8} /></span>
+                        <span className="min-w-0 flex-1 truncate text-sm font-medium">{CHECKPHONE_APP_SPECS[appId].label}</span>
+                        <span className={`h-4 w-4 shrink-0 rounded-full border ${selected ? "border-white bg-white" : "border-black/25"}`} />
+                      </button>
+                    );
+                  })}
+                </div>
+                {batchStatus && (
+                  <div className={`rounded-xl px-3 py-2 text-sm ${batchStatus.success ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
+                    {batchStatus.message}
+                  </div>
+                )}
+              </div>
+            </ContentDialog>
           )}
 
           {/* Temporary App Modal */}

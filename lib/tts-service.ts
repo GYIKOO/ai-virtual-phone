@@ -162,6 +162,9 @@ async function synthesizeOpenAI(text: string, config: VoiceApiConfig): Promise<B
             input: text,
             voice: config.defaultVoice || "alloy",
             response_format: "mp3",
+            ...(typeof config.speechSpeed === "number" && Number.isFinite(config.speechSpeed)
+                ? { speed: Math.min(2, Math.max(0.5, config.speechSpeed)) }
+                : {}),
         }),
     });
 

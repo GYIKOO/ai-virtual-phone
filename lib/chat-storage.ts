@@ -5,14 +5,15 @@ import {
     initChatDb,
     dbPutMessage, dbDeleteMessage, dbDeleteMessagesBySession, dbDeleteMessagesByIds,
     dbPutMessages, dbPutSessions, dbPutContacts, dbDeleteSession,
-    dbReplaceContacts, dbReplaceSessions,
+    dbReplaceContacts, dbReplaceSessions, dbBulkPutMessages,
 } from "./chat-db";
 import { resolveUserIdentity } from "./settings-storage";
-import { loadCharacters } from "./character-storage";
+import { loadCharacters, saveCharacters } from "./character-storage";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { emitChatPluginEvent, runChatPluginTransformSync } from "./chat-plugin-hooks";
 import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
+import { findUserAvatarChangeIntent, inferAvatarDecisionFromReply } from "./chat-avatar-intent";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -43,6 +44,16 @@ export type ChatSession = {
     isPinned: boolean;
     proactiveDisabled?: boolean; // 屏蔽此会话的主动消息（追发/定时唤醒均不触发）；默认 undefined=允许，老会话行为不变
     backgroundImage?: string; // Add support for custom background
+    /** 仅当前私聊里展示的用户头像；不修改用户身份、主页或其他会话 */
+    userAvatarOverride?: string;
+    /** 用户更换当前会话头像后是否通知角色。未设置时默认开启 */
+    notifyCharacterOnUserAvatarChange?: boolean;
+    /** 角色给用户设置的私聊备注；会显示在“查手机”的真实私聊列表中。 */
+    characterRemarkForUser?: string;
+    /** 角色给用户备注的最后更新时间。 */
+    characterRemarkForUserUpdatedAt?: string;
+    /** 用户修改“给TA备注”后是否立即通知角色并触发回应；默认关闭。 */
+    notifyCharacterOnAliasChange?: boolean;
     autoReplied?: boolean; // Whether the initial greeting auto-reply has been triggered
     alias?: string;
     videoBackground?: string;
@@ -58,6 +69,8 @@ export type ChatSession = {
     offlineBilingualTranslationPrompt?: string;
     nativeExpandedToolSourceIds?: string[];
     visionImagePromptLimit?: number;
+    /** false 表示当前私聊明确覆盖全局最近图片数量；旧会话默认跟随已设置的全局值 */
+    visionImagePromptLimitUsesGlobal?: boolean;
     /** 流式生成（线上）：开启后该会话的线上 AI 回复边生成边显示（默认关，保持原整段请求行为） */
     streamOnline?: boolean;
     /** 流式生成（线下）：开启后该会话的线下 AI 回复边生成边显示（默认关，保持原整段请求行为） */
@@ -67,6 +80,11 @@ export type ChatSession = {
      * 关掉就只调一次 API，那一轮没摘要（不进短期记忆的事件流）。按次计费的接口想省一半调用时关它。
      */
     offlineSummaryRetry?: boolean;
+    /**
+     * 角色专属提示音（私聊聊天信息里设置）。按种类覆盖全局聊天信息里的同名配置：
+     * 会话里显式设置的字段优先，其余（音频来源、子开关等）继承全局；群聊暂无设置入口。
+     */
+    sounds?: ChatSoundsConfig;
     // Group chat fields
     isGroup?: boolean;
     groupName?: string;
@@ -80,7 +98,7 @@ export type ChatSession = {
     isSpectator?: boolean; // 围观群：用户不在群内，只能生成/线下
 };
 
-export type ChatMessageStatus = "sending" | "sent" | "read" | "failed";
+export type ChatMessageStatus = "sending" | "sent" | "read" | "failed" | "rejected";
 export type ChatMessageRole = "user" | "assistant" | "system" | "tool";
 
 export type StateValue = { name: string; value: number };
@@ -105,6 +123,7 @@ export type ChatMessage = {
         | "red_packet" | "transfer" | "location"
         | "poke" | "sticker" | "quote" | "dice"
         | "voice_call" | "video_call"
+        | "meeting_invite"
         | "accept_red_packet" | "decline_red_packet" | "accept_transfer" | "decline_transfer"
         | "payment_request" | "accept_payment_request" | "decline_payment_request"
         | "music" | "music_share" | "music_notify" | "music_not_found"
@@ -121,7 +140,7 @@ export type ChatMessage = {
         | "group_admin_notice"
         | "media_file"
         | `plugin:${string}`; // 聊天插件自定义消息类型（由注册该 kind 的插件渲染气泡）
-    origin?: "chat" | "reading_discuss" | "custom_app" | "custom_app_background";
+    origin?: "chat" | "reading_discuss" | "custom_app" | "custom_app_background" | "story_floating_phone";
     mediaUrl?: string;
     mediaData?: {
         amount?: number;          // 红包/转账金额
@@ -186,6 +205,9 @@ export type ChatMessage = {
         adminActorName?: string;  // 群管理操作执行人显示名
         adminTargetName?: string; // 群管理操作目标显示名
         adminMuteMinutes?: number;// 禁言时长（分钟）
+        blacklistEvent?: "block" | "unblock"; // 仿真拉黑系统事件类型（私聊：用户拉黑/解除拉黑角色）
+        blacklistCharacterName?: string; // 拉黑事件发生时的角色名（用于事件详情与上下文）
+        blacklistUserName?: string;      // 拉黑事件发生时的用户名（用于事件详情与上下文）
         musicTitle?: string;      // 音乐标题
         musicArtist?: string;     // 音乐歌手
         xiaohongshuAuthor?: string;       // 小红书分享作者
@@ -204,6 +226,18 @@ export type ChatMessage = {
         memoryReason?: string;    // 记忆写入原因
         memoryImportance?: number;// 记忆写入重要性
         memoryRequestStatus?: "pending" | "approved" | "ignored";
+        /** 角色发起的线下见面邀请。 */
+        meetingInviteStatus?: "pending" | "accepted" | "declined";
+        meetingInviteCharacterId?: string;
+        meetingInviteCharacterName?: string;
+        /** 角色本轮输出的邀请卡片原始字段，交给自定义 HTML 灵活渲染。 */
+        meetingInviteRaw?: string;
+        meetingInviteTitle?: string;
+        meetingInviteDescription?: string;
+        meetingInviteAcceptResponse?: string;
+        meetingInviteDeclineResponse?: string;
+        meetingInviteResolvedAt?: string;
+        meetingInviteStorySessionId?: string;
         fileType?: "audio" | "image" | "video" | "file";
         fileName?: string;
         fileDuration?: number;
@@ -232,6 +266,12 @@ export type ChatMessage = {
         appTags?: string[];
         appHistoryText?: string;
         appHistoryRole?: ChatMessageRole;
+        avatarRecommendationForCharacterId?: string;
+        avatarRecommendationStatus?: "pending" | "accepted" | "declined";
+        /** 内部系统事件只在聊天流里显示一条小横条，不展示完整系统指令卡片。 */
+        compactSystemInstruction?: boolean;
+        /** 该内部系统事件需要作为私聊短期事件进入统一记忆时间线。 */
+        shortTermMemoryEvent?: boolean;
     };
     isTyping?: boolean; // temporary flag for UI rendering
     statusPanel?: string; // AI display-only status content from [状态栏] tags
@@ -261,8 +301,58 @@ export type ChatMessage = {
     senderName?: string; // cached display name to avoid repeated lookups
 };
 
+export type MeetingInviteCardConfig = {
+    mode: "native" | "custom";
+    /** 附加到私聊提示词中的邀请输出约定；固定控制标记仍由系统兜底。 */
+    contract: string;
+    /** 沙盒中运行的 HTML/CSS/JS；可用 window.STATUS_RAW / {{RAW}} 读取卡片数据。 */
+    renderHtml: string;
+    previewRaw: string;
+};
+
+export const DEFAULT_MEETING_INVITE_CONTRACT = [
+    "当你确实希望与用户线下见面时，才输出一张邀请卡片；不要机械邀请，不要频繁邀请，每轮最多一次。",
+    "卡片内容必须结合当前语境与人设填写，按下面格式逐行输出：",
+    "邀请人=<你的名字>",
+    "标题=<你给用户的邀请标题>",
+    "说明=<本次见面的具体说明>",
+    "同意反应=<用户同意后你会说的话>",
+    "拒绝反应=<用户拒绝后你会说的话>",
+].join("\n");
+
+export const DEFAULT_MEETING_INVITE_PREVIEW = "邀请人=江来汛\n标题=江来汛给你递来了一张心动邀请函💌\n说明=就在楼下车里，暖气打好了，想抱抱你、亲亲你，顺便带你吃宵夜\n同意反应=算你有良心！赶紧套好外套下楼，副驾驶已经给你留好了，抱不到五分钟谁也别想走！\n拒绝反应=宝宝你耍我呢……小狗真要在车里冻死了，你真忍心看我一个人在这受冻啊？\n状态=pending";
+
+export const DEFAULT_MEETING_INVITE_RENDER = `<style>
+*{box-sizing:border-box}body{margin:0;background:transparent;color:#47382d;font:13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.card{padding:16px;border-radius:16px;background:linear-gradient(145deg,#fffaf2,#fff);border:1px solid rgba(160,120,76,.18);box-shadow:0 8px 24px rgba(82,58,34,.10)}.eyebrow{font-size:10px;letter-spacing:.16em;opacity:.56;margin-bottom:8px}.title{display:block;font-size:15px;line-height:1.45}.desc{margin:7px 0 14px;font-size:12px;opacity:.65}.actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.actions button{border-radius:10px;padding:9px 8px;font:inherit}.decline{border:1px solid rgba(71,56,45,.16);background:rgba(255,255,255,.72);color:inherit}.accept{border:0;background:#4b4038;color:#fff}.result{font-size:12px;opacity:.72}
+</style>
+<section class="card"><div class="eyebrow">OFFLINE INVITATION</div><strong id="title" class="title"></strong><p id="desc" class="desc"></p><div id="actions" class="actions"><button class="decline" data-meeting-action="decline">不同意（不要见面）</button><button class="accept" data-meeting-action="accept">同意</button></div><div id="result" class="result" hidden></div></section>
+<script>
+const data={};for(const line of (window.STATUS_RAW||'').split(/\\n+/)){const i=line.indexOf('=');if(i>0)data[line.slice(0,i).trim()]=line.slice(i+1).trim()}
+document.getElementById('title').textContent=data['标题']||((data['邀请人']||'他')+'想邀请你见面，是否同意？');document.getElementById('desc').textContent=data['说明']||'';const status=data['状态']||'pending';if(status!=='pending'){document.getElementById('actions').hidden=true;const result=document.getElementById('result');result.hidden=false;result.textContent=status==='accepted'?(data['同意反应']||'已同意，正在进入见面剧情'):(data['拒绝反应']||'已选择不见面')}
+</script>`;
+
+export function resolveMeetingInviteCardConfig(settings?: ChatAppSettings): MeetingInviteCardConfig {
+    const raw = settings?.meetingInviteCard;
+    return {
+        mode: raw?.mode === "custom" ? "custom" : "native",
+        contract: typeof raw?.contract === "string" ? raw.contract : DEFAULT_MEETING_INVITE_CONTRACT,
+        renderHtml: typeof raw?.renderHtml === "string" ? raw.renderHtml : DEFAULT_MEETING_INVITE_RENDER,
+        previewRaw: typeof raw?.previewRaw === "string" ? raw.previewRaw : DEFAULT_MEETING_INVITE_PREVIEW,
+    };
+}
+
 export type ChatAppSettings = {
     globalAppBackground?: string; // base64 or URL
+    /** 私聊内“我的头像”默认值；单独会话头像优先 */
+    globalChatUserAvatar?: string;
+    /** 私聊背景默认值；单独会话背景优先 */
+    globalChatBackgroundImage?: string;
+    /** 聊天室 CSS 默认值；单独会话 CSS 优先，主页外观 CSS 优先级最低 */
+    globalChatCustomCSS?: string;
+    /** 全局私聊的邀请见面卡片输出契约与沙盒渲染。 */
+    meetingInviteCard?: MeetingInviteCardConfig;
+    /** 私聊默认传入的最近图片数量；单独会话设置优先 */
+    globalVisionImagePromptLimit?: number;
     timeAware?: boolean; // When true, inject timestamps into prompt so AI knows message timing (default: true)
     promptViewerEnabled?: boolean; // When true, show the floating prompt viewer entry
     quickActionEnabled?: boolean; // When true, show the floating quick action entry
@@ -271,14 +361,89 @@ export type ChatAppSettings = {
     offlineEnterToSendEnabled?: boolean; // Same but for 线下模式 — kept separate because offline writing is long-form
     callVibrationEnabled?: boolean; // 语音/视频来电等待接听时循环振动（默认开；iOS 网页不支持振动则无效果）
     maxToolRounds?: number; // 单条消息的工具循环轮数上限（默认 5；每轮=一次模型请求，轮内调用条数不限）
+    /** 全局聊天提示音配置（新消息/发送消息/来电/致电/挂断），在“全局聊天信息”里设置 */
+    globalChatSounds?: ChatSoundsConfig;
     floatingDockEnabled?: boolean; // 悬浮球贴边半隐藏收拢模式（默认关）
 };
+
+// ── 聊天提示音配置 ────────────────────────────────────────────────
+
+export type ChatSoundKind = "newMessage" | "sendMessage" | "incomingCall" | "outgoingCall" | "hangup";
+
+export type ChatSoundConfig = {
+    /** 是否开启该提示音 */
+    enabled?: boolean;
+    /** 音频来源："file"=用户上传的音频文件（IndexedDB 资产 id）；"url"=音频 URL */
+    sourceType?: "file" | "url";
+    /** sourceType="file" 时为资产 id；sourceType="url" 时为音频地址 */
+    value?: string;
+    /** （仅新消息音效）开启后当前正打开该聊天时，角色新消息不播放音效 */
+    muteActiveChat?: boolean;
+    /** （仅新消息音效）开启后同一角色连续多条消息只播一次音效 */
+    notifyOncePerBurst?: boolean;
+};
+
+export type ChatSoundsConfig = {
+    newMessage?: ChatSoundConfig;
+    sendMessage?: ChatSoundConfig;
+    incomingCall?: ChatSoundConfig;
+    outgoingCall?: ChatSoundConfig;
+    hangup?: ChatSoundConfig;
+};
+
+/**
+ * 提示音配置解析：私聊角色专属（单独会话 sounds）＞ 全局聊天信息（globalChatSounds）。
+ * 会话里显式设置的字段（开关 / 音频来源 / 子开关）覆盖全局，其余字段继承全局；
+ * “专属开启但没配音频”时沿用全局音频，“专属关闭”则该角色不播这个音。
+ */
+export function resolveChatSoundConfig(
+    kind: ChatSoundKind,
+    session: Pick<ChatSession, "sounds"> | null | undefined,
+): ChatSoundConfig {
+    const merged: ChatSoundConfig = { ...(loadChatAppSettings().globalChatSounds?.[kind] ?? {}) };
+    const own = session?.sounds?.[kind];
+    if (own) {
+        // 只覆盖会话里显式设置的字段；undefined（如“清除音频”后的残留键）不参与覆盖
+        for (const [key, value] of Object.entries(own)) {
+            if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+        }
+    }
+    return merged;
+}
+
+/** 按 id 从会话缓存取会话（提示音等同步读取路径用；找不到时返回 null）。 */
+export function findChatSessionById(sessionId: string): ChatSession | null {
+    return loadChatSessions().find(s => s.id === sessionId) ?? null;
+}
 
 /** 单条消息工具循环轮数上限（默认 5，夹在 1–20 之间） */
 export function getMaxToolRounds(): number {
     const raw = loadChatAppSettings().maxToolRounds;
     if (typeof raw !== "number" || !Number.isFinite(raw)) return 5;
     return Math.max(1, Math.min(20, Math.round(raw)));
+}
+
+/** 视觉上下文数量：单独会话 > 全局聊天信息 > 内置默认值，私聊与群聊通用。 */
+export function resolveVisionImagePromptLimit(session: Pick<ChatSession, "visionImagePromptLimit" | "visionImagePromptLimitUsesGlobal" | "isGroup"> | null | undefined): number {
+    const globalValue = loadChatAppSettings().globalVisionImagePromptLimit;
+    if (session?.visionImagePromptLimitUsesGlobal === false) {
+        return normalizeVisionImagePromptLimit(session.visionImagePromptLimit);
+    }
+    return normalizeVisionImagePromptLimit(globalValue ?? session?.visionImagePromptLimit);
+}
+
+/** 聊天内用户头像：单独会话 > 全局聊天信息 > 用户资料头像，私聊与群聊通用。 */
+export function resolveChatUserAvatar(
+    session: Pick<ChatSession, "userAvatarOverride" | "isGroup"> | null | undefined,
+    identityAvatar?: string | null,
+): string {
+    return session?.userAvatarOverride || loadChatAppSettings().globalChatUserAvatar || identityAvatar || "";
+}
+
+/** 聊天背景：单独会话 > 全局聊天信息，私聊与群聊通用。 */
+export function resolveChatBackgroundImage(session: Pick<ChatSession, "backgroundImage" | "isGroup"> | null | undefined): string {
+    if (session?.backgroundImage) return session.backgroundImage;
+    return loadChatAppSettings().globalChatBackgroundImage || "";
 }
 
 /** 会话是否开启线上流式生成（默认关；按会话独立控制，单聊/群聊都生效） */
@@ -293,6 +458,84 @@ export const CHAT_MESSAGES_DELETED_EVENT = "chat-messages-deleted";
 export const CHAT_REQUEST_REPLY_EVENT = "chat-request-reply";
 /** 长按编辑整批回复后重建消息：携带新消息与编辑后的原文，供云同步回写。 */
 export const CHAT_RESPONSE_BATCH_REPLACED_EVENT = "chat-response-batch-replaced";
+
+let _activeChatSessionId: string | null = null;
+
+/** 告诉共享消息层当前真正显示在前台的聊天室，供未读计数统一判断。 */
+export function setActiveChatSessionId(sessionId: string | null): void {
+    _activeChatSessionId = sessionId;
+}
+
+/** 当前显示在前台的聊天室 id（没有打开任何聊天室时为 null）。 */
+export function getActiveChatSessionId(): string | null {
+    return _activeChatSessionId;
+}
+
+export function markChatSessionRead(sessionId: string): void {
+    const session = _sessionsCache.find(item => item.id === sessionId);
+    if (!session || session.unreadCount === 0) return;
+    session.unreadCount = 0;
+    dbPutSessions([session]);
+    if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId } }));
+    }
+}
+
+const AVATAR_ACCEPT_RE = /[\[【]\s*接受头像推荐\s*[\]】]/;
+const AVATAR_DECLINE_RE = /[\[【]\s*拒绝头像推荐\s*[\]】]/;
+
+function resolvePendingAvatarRecommendation(message: ChatMessage): void {
+    if (message.role !== "assistant" || !message.rawResponseText) return;
+
+    const session = _sessionsCache.find(item => item.id === message.sessionId);
+    if (!session || session.isGroup) return;
+    const legacyRecommendation = [..._messagesCache].reverse().find(item =>
+        item.sessionId === message.sessionId
+        && item.role === "user"
+        && item.mediaType === "image"
+        && item.mediaData?.avatarRecommendationForCharacterId === session.contactId
+        && item.mediaData?.avatarRecommendationStatus === "pending"
+        && Boolean(item.mediaUrl),
+    );
+    const recommendation = legacyRecommendation
+        || findUserAvatarChangeIntent(_messagesCache, message.sessionId, session.contactId)?.image;
+    if (!recommendation) return;
+
+    const explicitAccepted = AVATAR_ACCEPT_RE.test(message.rawResponseText);
+    const explicitDeclined = AVATAR_DECLINE_RE.test(message.rawResponseText);
+    const inferredDecision = !explicitAccepted && !explicitDeclined
+        ? inferAvatarDecisionFromReply(`${message.rawResponseText}\n${message.content}`)
+        : null;
+    const accepted = explicitAccepted || inferredDecision === "accepted";
+    const declined = explicitDeclined || inferredDecision === "declined";
+    if (!accepted && !declined) return;
+
+    recommendation.mediaData = {
+        ...recommendation.mediaData,
+        avatarRecommendationForCharacterId: session.contactId,
+        avatarRecommendationStatus: accepted ? "accepted" : "declined",
+    };
+    dbPutMessage(recommendation);
+
+    if (accepted && recommendation.mediaUrl) {
+        const characters = loadCharacters();
+        const index = characters.findIndex(character => character.id === session.contactId);
+        if (index >= 0) {
+            characters[index] = {
+                ...characters[index],
+                avatar: recommendation.mediaUrl,
+                updatedAt: new Date().toISOString(),
+            };
+            saveCharacters(characters);
+        }
+    }
+
+    if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("chat-avatar-recommendation-resolved", {
+            detail: { sessionId: message.sessionId, accepted },
+        }));
+    }
+}
 
 // ── Media Preview Map ─────────────────────────
 const MEDIA_PREVIEW_MAP: Record<string, string> = {
@@ -319,6 +562,24 @@ export function isSystemInstructionMessage(msg: Pick<ChatMessage, "role" | "medi
     return msg.role === "system" && msg.mediaType === "system_instruction";
 }
 
+const HIDDEN_SYSTEM_INSTRUCTION_RE = /<hidden-system>([\s\S]*?)<\/hidden-system>/gi;
+
+/** 系统事件在聊天界面中可见的小横条文案；隐藏标签中的提示词绝不渲染。 */
+export function getSystemInstructionDisplayContent(content: string): string {
+    return content.replace(HIDDEN_SYSTEM_INSTRUCTION_RE, "").replace(/\n{2,}/g, "\n").trim();
+}
+
+/** 取出供角色与短期记忆读取的详细内容；有隐藏标签时不重复带上外层展示文案。 */
+export function getSystemInstructionPromptContent(content: string): string {
+    const hidden: string[] = [];
+    content.replace(HIDDEN_SYSTEM_INSTRUCTION_RE, (_full, body: string) => {
+        const normalized = body.trim();
+        if (normalized) hidden.push(normalized);
+        return "";
+    });
+    return hidden.length > 0 ? hidden.join("\n") : content.trim();
+}
+
 export function getChatMessagePreview(msg: ChatMessage): string {
     if (isReadingDiscussMessage(msg)) return "";
 
@@ -338,7 +599,8 @@ export function getChatMessagePreview(msg: ChatMessage): string {
         return "[记忆写入申请]";
     }
     if (isSystemInstructionMessage(msg)) {
-        const content = msg.content.trim();
+        const content = getSystemInstructionDisplayContent(msg.content);
+        if (msg.mediaData?.compactSystemInstruction) return content;
         return content ? `[系统指令] ${content}` : "[系统指令]";
     }
 
@@ -1074,7 +1336,6 @@ export function createOrGetSession(contactId: string): ChatSession {
         isPinned: false,
         bilingualTranslationEnabled: true,
         collapseBilingualTranslation: true,
-        visionImagePromptLimit: DEFAULT_VISION_IMAGE_PROMPT_LIMIT,
     };
     saveChatSessions([newSession, ...sessions]); // Prepend new session
     return newSession;
@@ -1169,8 +1430,20 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
         newMsg = pluginResult.message;
     }
 
+    // 仿真拉黑（私聊）：用户把角色拉黑后，角色发出去的消息会被用户拒收——
+    // 角色消息标记 rejected（界面上显示仿微信红色感叹号 + 拒收提示）；
+    // 用户自己发的消息正常送达，不带任何标记。统一在这里处理，
+    // 聊天页生成、后台兜底回复、follow-up 等所有落库路径全覆盖。
+    if (newMsg.role === "assistant") {
+        const sessionForBlock = _sessionsCache.find(s => s.id === newMsg.sessionId);
+        if (sessionForBlock && !sessionForBlock.isGroup && sessionForBlock.isBlacklisted) {
+            newMsg.status = "rejected";
+        }
+    }
+
     _messagesCache.push(newMsg);
     dbPutMessage(newMsg);
+    resolvePendingAvatarRecommendation(newMsg);
 
     // Auto update session last message only for records that can produce a list preview.
     // 优化：直接增量更新内存会话缓存并异步写单条，避免每次发送都走 loadChatSessions +
@@ -1182,6 +1455,13 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
         target.lastMessageId = newMsg.id;
         if (preview) target.lastMessagePreview = preview;
         target.updatedAt = newMsg.createdAt;
+        if (
+            newMsg.role === "assistant"
+            && (_activeChatSessionId !== newMsg.sessionId
+                || (typeof document !== "undefined" && document.visibilityState !== "visible"))
+        ) {
+            target.unreadCount = Math.max(0, target.unreadCount || 0) + 1;
+        }
         dbPutSessions([target]);
     } else if (sessIdx === -1) {
         // 缓存未命中（极端情况）：回退全量路径，保证列表预览仍会刷新
@@ -1191,6 +1471,13 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
             sessions[idx2].lastMessageId = newMsg.id;
             if (preview) sessions[idx2].lastMessagePreview = preview;
             sessions[idx2].updatedAt = newMsg.createdAt;
+            if (
+                newMsg.role === "assistant"
+                && (_activeChatSessionId !== newMsg.sessionId
+                    || (typeof document !== "undefined" && document.visibilityState !== "visible"))
+            ) {
+                sessions[idx2].unreadCount = Math.max(0, sessions[idx2].unreadCount || 0) + 1;
+            }
             saveChatSessions(sessions);
         }
     }
@@ -1217,20 +1504,98 @@ export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMess
     _messagesCache.push(newMsg);
     dbPutMessage(newMsg);
 
-    const preview = getChatMessagePreview(newMsg);
-    const sessions = loadChatSessions();
-    const sessIdx = sessions.findIndex(s => s.id === newMsg.sessionId);
-    if (sessIdx !== -1 && isSessionPreviewCandidate(newMsg)) {
-        const currentLast = getLastVisibleSessionMessage(newMsg.sessionId);
-        if (!currentLast || currentLast.id === newMsg.id) {
-            sessions[sessIdx].lastMessageId = newMsg.id;
-            if (preview) sessions[sessIdx].lastMessagePreview = preview;
-            sessions[sessIdx].updatedAt = newMsg.createdAt;
-            saveChatSessions(sessions);
+    // 只有真正可能成为「最后一条可见消息」时才做全量预览刷新：
+    // loadChatSessions() 会遍历全部会话并对整张消息缓存排序，逐条导入
+    // （云同步拉取等循环调用）时会退化成 O(条数 × 会话数 × 消息数 log 消息数)。
+    if (isSessionPreviewCandidate(newMsg)) {
+        const preview = getChatMessagePreview(newMsg);
+        const sessions = loadChatSessions();
+        const sessIdx = sessions.findIndex(s => s.id === newMsg.sessionId);
+        if (sessIdx !== -1) {
+            const currentLast = getLastVisibleSessionMessage(newMsg.sessionId);
+            if (!currentLast || currentLast.id === newMsg.id) {
+                sessions[sessIdx].lastMessageId = newMsg.id;
+                if (preview) sessions[sessIdx].lastMessagePreview = preview;
+                sessions[sessIdx].updatedAt = newMsg.createdAt;
+                saveChatSessions(sessions);
+            }
         }
     }
 
     return { message: newMsg, inserted: true };
+}
+
+// 批量导入（聊天记录迁移专用）。旧的逐条 upsert 路径每条消息都会触发
+// loadChatSessions() 的全量预览重算（每个会话都对整张消息缓存做一次
+// filter+sort），并且目标会话 updatedAt 变化会让 sessions 表排队一次
+// clear+bulkPut 事务——几千条记录就能把主线程冻结数分钟、堆积上千个清表
+// 事务，中途任何一次失败/杀进程/配额满都可能把会话表写坏（「导入后数据
+// 被清空、小手机回到初始状态」事故的直接来源）。
+// 这里改为：一次性去重、一次分块等待落库（失败上抛）、最后只刷新一次
+// 受影响会话的预览，不再触碰其余会话。
+export async function bulkUpsertImportedMessages(
+    messages: ChatMessage[],
+): Promise<{ insertedCount: number; skippedCount: number }> {
+    if (messages.length === 0) return { insertedCount: 0, skippedCount: 0 };
+
+    const existingIds = new Set(_messagesCache.map(item => item.id));
+    const nextOrderBySession = new Map<string, number>();
+    const inserted: ChatMessage[] = [];
+    let skippedCount = 0;
+
+    for (const source of messages) {
+        if (existingIds.has(source.id)) {
+            skippedCount += 1;
+            continue;
+        }
+        let order = getStableMessageOrder(source);
+        if (order === null) {
+            const sessionId = source.sessionId || "";
+            const next = nextOrderBySession.get(sessionId) ?? getNextMessageOrder(sessionId);
+            nextOrderBySession.set(sessionId, next + 1);
+            order = next;
+        }
+        const newMsg: ChatMessage = {
+            ...source,
+            status: source.status || "sent",
+            createdAt: source.createdAt || new Date().toISOString(),
+            order,
+        };
+        existingIds.add(newMsg.id);
+        inserted.push(newMsg);
+    }
+
+    if (inserted.length === 0) return { insertedCount: 0, skippedCount };
+
+    // concat 而不是 push(...arr)：超大数组（数万条）展开会触发 RangeError。
+    _messagesCache = _messagesCache.concat(inserted);
+    // 可等待、分块、错误上抛的真实落库；失败时调用方能感知并提示用户，
+    // 而不是内存里「导入成功」、重启后数据消失。
+    await dbBulkPutMessages(inserted);
+
+    // 会话预览 / updatedAt 只在全部落库后统一刷新一次。
+    const affectedSessionIds = new Set(inserted.map(msg => msg.sessionId));
+    const sessions = loadChatSessions();
+    let sessionsChanged = false;
+    for (const sessionId of affectedSessionIds) {
+        const sessIdx = sessions.findIndex(s => s.id === sessionId);
+        if (sessIdx === -1) continue;
+        const currentLast = getLastVisibleSessionMessage(sessionId);
+        if (!currentLast) continue;
+        const preview = getChatMessagePreview(currentLast);
+        if (
+            sessions[sessIdx].lastMessageId === currentLast.id
+            && (sessions[sessIdx].lastMessagePreview || "") === preview
+            && sessions[sessIdx].updatedAt === currentLast.createdAt
+        ) continue;
+        sessions[sessIdx].lastMessageId = currentLast.id;
+        if (preview) sessions[sessIdx].lastMessagePreview = preview;
+        sessions[sessIdx].updatedAt = currentLast.createdAt;
+        sessionsChanged = true;
+    }
+    if (sessionsChanged) saveChatSessions(sessions);
+
+    return { insertedCount: inserted.length, skippedCount };
 }
 
 function removeFirstExactResponsePart(rawResponseText: string, content: string): string {

@@ -150,6 +150,8 @@ export type BackupManifest = {
   totalRecords: number;
   /** True when images/multimedia were stripped to keep the backup small. */
   mediaExcluded?: boolean;
+  /** Dynamic chat/moments images are limited to this many recent days. */
+  dynamicImageDays?: 3 | 7;
 };
 
 export type BackupEnvelope = {

@@ -1,7 +1,7 @@
 // lib/group-chat-engine.ts
 // Group chat engine: single API call for all characters.
 
-import { ChatSession, ChatMessage, loadChatAppSettings, createResponseBatchId, createResponseRoundId, createToolExecutionId, loadChatSessions, getLatestCharacterStateValues, isSessionStreamingEnabled } from "./chat-storage";
+import { ChatSession, ChatMessage, loadChatAppSettings, createResponseBatchId, createResponseRoundId, createToolExecutionId, loadChatSessions, getLatestCharacterStateValues, isSessionStreamingEnabled, resolveVisionImagePromptLimit } from "./chat-storage";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
 import type { ApiConfig, PresetConfig, RegexConfig } from "./settings-types";
 import { loadCharacters } from "./character-storage";
@@ -400,7 +400,7 @@ async function buildGroupChatPromptMessages(
     });
     const promptHistory = applyVisionImagePromptLimit(
         truncatedAnnotatedHistory.map(msg => ({ ...msg })),
-        session.visionImagePromptLimit,
+        resolveVisionImagePromptLimit(session),
     );
     if (config.enableImageRecognition) {
         for (const msg of promptHistory) {
@@ -440,7 +440,7 @@ async function buildGroupChatPromptMessages(
         : formatGroupToolsForPrompt(enabledTools);
     // 状态区（自定义状态栏）：群聊与单聊同一套配置，按会话存；群聊变体的 native 原文
     // 与单聊不同，custom 挡还会补一条"每个发言角色各出一份"的群规则。
-    const statusRegionCfg = getStatusRegionConfig(session.id);
+    const statusRegionCfg = getStatusRegionConfig(session.id, false);
     const chatBilingualInstruction = buildChatBilingualInstruction(
         session.bilingualTranslationEnabled !== false,
         "group",

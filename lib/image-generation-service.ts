@@ -1,5 +1,6 @@
 import type { ImageGenerationSettings, NovelAiPreset } from "./settings-types";
-import { loadImageGenerationSettings, DEFAULT_NOVELAI_PRESET } from "./settings-storage";
+import { loadBindingConfig, loadImageGenerationSettings, resolveBinding, DEFAULT_NOVELAI_PRESET } from "./settings-storage";
+import { applyImageGenerationBinding } from "./image-generation-binding";
 import JSZip from "jszip";
 import { getChatImageFromIndexedDB } from "./chat-asset-storage";
 import { storeMediaBlob } from "./media-cache-storage";
@@ -94,8 +95,11 @@ function loadDataUrlImage(dataUrl: string): Promise<HTMLImageElement> {
   });
 }
 
-async function normalizeReferenceImageForEdit(dataUrl: string): Promise<string> {
-  if (dataUrlMimeType(dataUrl) === "image/png") return dataUrl;
+async function normalizeReferenceImageForEdit(
+  dataUrl: string,
+  crop?: { x: number; y: number; size: number },
+): Promise<string> {
+  if (!crop && dataUrlMimeType(dataUrl) === "image/png") return dataUrl;
   if (typeof document === "undefined") return dataUrl;
 
   try {
@@ -105,11 +109,23 @@ async function normalizeReferenceImageForEdit(dataUrl: string): Promise<string> 
     if (!width || !height) return dataUrl;
 
     const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
+    const normalizedSize = crop ? Math.max(0.18, Math.min(1, crop.size)) : 1;
+    const sourceSize = Math.max(1, Math.round(Math.min(width, height) * normalizedSize));
+    const sourceX = crop
+      ? Math.round(Math.max(0, Math.min(width - sourceSize, crop.x * width)))
+      : 0;
+    const sourceY = crop
+      ? Math.round(Math.max(0, Math.min(height - sourceSize, crop.y * height)))
+      : 0;
+    canvas.width = crop ? sourceSize : width;
+    canvas.height = crop ? sourceSize : height;
     const context = canvas.getContext("2d");
     if (!context) return dataUrl;
-    context.drawImage(image, 0, 0, width, height);
+    if (crop) {
+      context.drawImage(image, sourceX, sourceY, sourceSize, sourceSize, 0, 0, sourceSize, sourceSize);
+    } else {
+      context.drawImage(image, 0, 0, width, height);
+    }
     return canvas.toDataURL("image/png");
   } catch {
     return dataUrl;
@@ -727,11 +743,20 @@ export async function fetchNovelAiModels(apiKey: string): Promise<string[]> {
 export async function generateImageFromConfiguredApi(params: {
   description: string;
   characterId?: string;
+  /** 内容所属 APP；用于按“角色 > APP > 全局”解析生图方案。 */
+  appId?: string;
   useReferenceImage?: boolean;
   settings?: ImageGenerationSettings;
   signal?: AbortSignal;
 }): Promise<ImageGenerationResult | null> {
-  const settings = params.settings ?? loadImageGenerationSettings();
+  const storedSettings = params.settings ?? loadImageGenerationSettings();
+  // 显式传入 settings 的配置测试/工具调用保持原样；正常业务调用才读取绑定。
+  const settings = params.settings
+    ? storedSettings
+    : applyImageGenerationBinding(
+        storedSettings,
+        resolveBinding(loadBindingConfig(), params.characterId, params.appId).imageConfigId,
+      );
   if (!settings.enabled) return null;
 
   const description = params.description.trim();
@@ -749,10 +774,18 @@ export async function generateImageFromConfiguredApi(params: {
 
     const positiveParts: string[] = [];
     if (activePreset.positivePrompt?.trim()) positiveParts.push(activePreset.positivePrompt.trim());
+    const novelAiCharacterReference = params.characterId
+      ? settings.characterReferences?.[params.characterId]
+      : undefined;
+    const characterFeaturePrompt = novelAiCharacterReference?.novelAiFeaturePromptEnabled !== false
+      ? novelAiCharacterReference?.featurePrompt?.trim()
+      : "";
+    if (characterFeaturePrompt) positiveParts.push(characterFeaturePrompt);
     if (description) positiveParts.push(description);
     const fullPrompt = positiveParts.join(", ");
 
-    const data = settings.requestMode === "direct"
+    const novelAiRequestMode = settings.novelai?.requestMode || settings.requestMode;
+    const data = novelAiRequestMode === "direct"
       ? await generateNovelAiDirect({ apiKey: naiApiKey, preset: activePreset, prompt: fullPrompt, signal: params.signal })
       : await generateNovelAiViaServer({ apiKey: naiApiKey, preset: activePreset, prompt: fullPrompt, signal: params.signal });
 
@@ -779,16 +812,26 @@ export async function generateImageFromConfiguredApi(params: {
   const openaiSettings = openaiPreset ? { ...settings, ...openaiPreset } : settings;
   if (!openaiSettings.apiKey.trim() || !openaiSettings.baseUrl.trim() || !openaiSettings.model.trim()) return null;
 
-  const reference = params.characterId ? settings.characterReferences[params.characterId] : undefined;
-  const rawReferenceImageDataUrl = params.useReferenceImage && reference?.assetId
+  const reference = params.characterId ? settings.characterReferences?.[params.characterId] : undefined;
+  // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成
+  const shouldUseReference = Boolean(
+    params.useReferenceImage
+    && reference?.assetId
+    && reference.enabled !== false,
+  );
+  const rawReferenceImageDataUrl = shouldUseReference && reference?.assetId
     ? await getChatImageFromIndexedDB(reference.assetId)
     : null;
   throwIfAborted(params.signal);
   const referenceImageDataUrl = rawReferenceImageDataUrl
-    ? await normalizeReferenceImageForEdit(rawReferenceImageDataUrl)
+    ? await normalizeReferenceImageForEdit(rawReferenceImageDataUrl, reference?.faceCrop)
     : null;
   throwIfAborted(params.signal);
-  const prompt = mergePrompt(description, openaiSettings.extraPrompt);
+  const characterPrompt = reference?.featurePrompt?.trim() || "";
+  const prompt = mergePrompt(
+    characterPrompt ? `${description}\n\n【角色固定外观】${characterPrompt}` : description,
+    openaiSettings.extraPrompt,
+  );
 
   const data = openaiSettings.requestMode === "direct"
     ? await generateImageDirect({ settings: openaiSettings, prompt, referenceImageDataUrl, signal: params.signal })

@@ -169,6 +169,12 @@ function isImageGenerationMediaMessage(msg: ChatMessage): boolean {
 }
 
 function formatPhotoDirective(msg: ChatMessage, prefix = ""): string {
+    if (msg.mediaData?.avatarRecommendationForCharacterId) {
+        const status = msg.mediaData.avatarRecommendationStatus;
+        if (status === "accepted") return `${prefix}[头像推荐:你已接受并使用这张头像]`;
+        if (status === "declined") return `${prefix}[头像推荐:你已拒绝这张头像]`;
+        return `${prefix}[头像推荐] 用户向你推荐这张图片作为你的新头像。请根据人设自主决定：愿意采用就在本次回复末尾输出[接受头像推荐]；不采用则输出[拒绝头像推荐]。两个控制标记不会展示给用户。`;
+    }
     const description = msg.mediaData?.label?.trim() || "图片";
     const mode = msg.mediaData?.useReferenceImage === true ? "使用参考图" : "不使用参考图";
     return `${prefix}[照片:${mode}:${description}]`;
@@ -1005,6 +1011,13 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                 } else {
                     body = formatRichMediaForHistory(msg, resolvedUserName, character?.name || "对方");
                 }
+            }
+
+            // 仿真拉黑：被用户拒收的角色消息在提示词历史里显式标注，
+            // 模型每轮都能看到自己消息被拒收的直接证据，持续保持被拉黑的知情状态
+            if (msg.role === "assistant" && msg.status === "rejected") {
+                const rejectedMark = "[系统标注：这条消息已发出，但被对方拒收了]";
+                body = body.trim() ? `${body}\n${rejectedMark}` : rejectedMark;
             }
 
             if (!body.trim() && !imageUrl) return;

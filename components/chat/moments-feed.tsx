@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
 import { getAllPosts, deleteMomentPost, getUnreadMomentsNotifications, saveMomentsLastSeen, addMomentComment } from "@/lib/moments-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
-import { resolveUserIdentity } from "@/lib/settings-storage";
+import { resolveUserIdentity, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
 import { saveChatImageToIndexedDB, getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
 import type { MomentComment, MomentPost } from "@/lib/moments-types";
 import { MomentPostCard } from "./moment-post-card";
@@ -50,13 +50,19 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
     const [coverUrl, setCoverUrl] = useState<string | null>(null);
     const coverInputRef = useRef<HTMLInputElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
-    const userIdentity = resolveUserIdentity(undefined, "chat");
+    const [userIdentity, setUserIdentity] = useState(() => resolveUserIdentity());
     const [signature, setSignature] = useState(() => {
         if (typeof window !== "undefined") {
             return kvGet("moments_signature") || "make every day count (●ˇ∀ˇ●)";
         }
         return "make every day count (●ˇ∀ˇ●)";
     });
+
+    useEffect(() => {
+        const syncIdentity = () => setUserIdentity(resolveUserIdentity());
+        window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+    }, []);
     const [editingSignature, setEditingSignature] = useState(false);
     const sigInputRef = useRef<HTMLInputElement>(null);
     const handleSignatureSubmit = (val: string) => {

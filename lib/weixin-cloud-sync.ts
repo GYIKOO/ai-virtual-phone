@@ -10,6 +10,7 @@ import {
   loadChatContacts,
   loadChatMessages,
   loadChatSessions,
+  resolveVisionImagePromptLimit,
   reindexSessionMessageOrdersByTime,
   upsertImportedChatMessage,
 } from "./chat-storage";
@@ -1081,7 +1082,7 @@ async function buildWeixinCloudPromptContext(params: {
   );
   const promptHistory = applyVisionImagePromptLimit(
     truncatedHistory.map(msg => cloneMessageForCloud(msg)),
-    params.session.visionImagePromptLimit,
+    resolveVisionImagePromptLimit(params.session),
   );
 
   const [memResults, coreResults, musicLocal, musicCloud, customStickerMap, imageGeneration] = await Promise.all([

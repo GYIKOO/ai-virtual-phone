@@ -126,7 +126,7 @@ import { WidgetRenderer } from "@/components/widgets/widget-renderer";
 import type { DIYWidgetTemplate } from "@/lib/widget-types";
 import { DebugPromptPanel } from "@/components/debug-prompt-panel";
 import { QuickActionFloat } from "@/components/quick-action-float";
-import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, CHAT_REQUEST_REPLY_EVENT, findChatSessionById, hydrateChatStorage, loadChatSessions, loadChatMessages, pushChatMessage, type ChatMessage, type ChatSession } from "@/lib/chat-storage";
 import { ensureGlobalBindingDefaults, resolveUserIdentity } from "@/lib/settings-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
@@ -134,6 +134,7 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { requestBackgroundChatReply, scheduleFollowUp } from "@/lib/follow-up-service";
 import { CHAT_MESSAGE_NOTICE_EVENT, CHAT_OPEN_SESSION_EVENT, type ChatMessageNoticeDetail } from "@/lib/chat-notification-events";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
+import { installChatSoundListener, playChatSoundOnce, setMiniChatSoundSessionId, startChatSoundLoop } from "@/lib/chat-sound";
 import { setMascotContext } from "@/lib/mascot-context";
 import { DESKTOP_WIDGETS_CHANGED_EVENT } from "@/lib/mascot-events";
 import { useWeixinBridge } from "@/lib/use-weixin-bridge";
@@ -1091,10 +1092,15 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     sessionId: string; type: "voice" | "video"; charName: string; charAvatar: string | null; isGroup?: boolean;
   } | null>(null);
   // 桌面来电横幅显示期间循环振动（开关在聊天主页"语音/视频来电振动"）
+  // + 循环来电铃声（角色专属提示音优先，其余在"全局聊天信息 → 提示音"）
   useEffect(() => {
     if (!incomingCall) return;
-    return startIncomingCallVibration();
+    const stopRingtone = startChatSoundLoop("incomingCall", findChatSessionById(incomingCall.sessionId));
+    const stopVibration = startIncomingCallVibration();
+    return () => { stopRingtone(); stopVibration(); };
   }, [incomingCall]);
+  // 全局聊天提示音（新消息/发送消息）：监听消息落库事件，按各会话配置播放（角色专属优先于全局）
+  useEffect(() => installChatSoundListener(), []);
   const [chatMessageNotice, setChatMessageNotice] = useState<{
     sessionId: string;
     title: string;
@@ -2415,9 +2421,13 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
   const [showMiniChat, setShowMiniChat] = useState(false);
   const [miniSharePayload, setMiniSharePayload] = useState<ChatSharePayload | null>(null);
   const miniSessionRef = useRef<ChatSession | null>(null);
-  const handleMiniChatClose = useCallback(() => setShowMiniChat(false), []);
+  const handleMiniChatClose = useCallback(() => {
+    setShowMiniChat(false);
+    setMiniChatSoundSessionId(null); // 小窗关闭后该会话不再算"实时聊天"
+  }, []);
   const handleMiniChatSessionChange = useCallback((session: ChatSession | null) => {
     miniSessionRef.current = session;
+    setMiniChatSoundSessionId(session?.id ?? null); // 小窗正打开的会话视为实时聊天
   }, []);
   const handleMiniShareDone = useCallback(() => setMiniSharePayload(null), []);
   const handleMiniChatExpand = useCallback(() => {
@@ -2533,7 +2543,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
 
       const isCurrentMainChat = activeApp === "chat" && activeChatSession?.id === detail.sessionId;
       const isCurrentMiniChat = showMiniChat && miniSessionRef.current?.id === detail.sessionId;
-      if (isCurrentMainChat || isCurrentMiniChat) return;
+      // 测试弹窗（提示音设置里触发）不受“正在实时聊天则不弹横幅”限制
+      if (!detail.isTest && (isCurrentMainChat || isCurrentMiniChat)) return;
 
       const sessions = loadChatSessions();
       const session = sessions.find(s => s.id === detail.sessionId);
@@ -4336,6 +4347,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       onClick={() => {
                         const call = incomingCall;
                         const callLabel = call.type === "voice" ? "语音通话" : "视频通话";
+                        playChatSoundOnce("hangup", findChatSessionById(call.sessionId)); // 拒接也是结束通话：播挂断音
                         pushChatMessage({
                           sessionId: call.sessionId,
                           role: "user",
@@ -4587,9 +4599,11 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                               if (isFolderIconId(iconId)) {
                                 const folder = folders[iconId];
                                 if (!folder) return null;
+                                // 聊天图标不再聚合未读红点：未读提醒只保留在聊天会话列表内
                                 const folderBadge = folder.icons.reduce((sum, memberId) => {
                                   const appId = customAppIdFromIconId(memberId);
-                                  return sum + (appId ? customAppBadges[appId] ?? 0 : 0);
+                                  if (appId) return sum + (customAppBadges[appId] ?? 0);
+                                  return sum;
                                 }, 0);
                                 return (
                                   <button
@@ -4625,6 +4639,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                 : null;
                               const iconImageUrl = iconSkinUrl || customIconUrl;
                               const hasImageIcon = Boolean(iconImageUrl);
+                              // 聊天图标右上角不显示未读红点（用户偏好）：未读只在聊天会话列表内以红点展示
                               const badgeCount = customApp ? customAppBadges[customApp.id] ?? 0 : 0;
                               return (
                                 <button

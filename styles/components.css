@@ -314,6 +314,22 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.binding-global-primary-row[data-count="3"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.binding-global-primary-row[data-count="3"] > :last-child {
+  grid-column: 1 / -1;
+  min-height: 88px;
+}
+
+.binding-priority-note {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: calc(11px * var(--app-text-scale, 1));
+  line-height: 1.5;
+}
+
 .binding-global-compact-row {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
@@ -2911,6 +2927,32 @@
   flex-wrap: wrap;
 }
 
+.data-management-menu .data-image-range-item {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.data-management-menu .data-image-range-item .menu-label-group {
+  flex: none;
+  width: 100%;
+}
+
+.data-management-menu .data-image-range-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+.data-management-menu .data-image-range-button {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 9px 6px;
+  white-space: nowrap;
+}
+
 .data-management-menu .data-danger-alert {
   display: flex;
   align-items: flex-start;
@@ -3785,6 +3827,125 @@
   font-size: calc(10.8px*var(--app-text-scale,1));
   color: var(--c-text);
   line-height: 1.4;
+}
+
+/* ── 全局聊天信息 → 提示音 ── */
+
+/* 每个提示音一行 + 开启后折叠展开的音频来源编辑区 */
+.chat-sound-block .menu-item {
+  cursor: default;
+}
+.chat-sound-block .menu-item::after {
+  display: none;
+}
+.chat-sound-block + .chat-sound-block {
+  border-top: 1px solid color-mix(in srgb, var(--c-card-border) 20%, transparent);
+}
+.chat-sound-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 5px 16px 13px 48px;
+  background: color-mix(in srgb, var(--c-text-title) 3%, transparent);
+}
+.chat-sound-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.chat-sound-file-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.chat-sound-source {
+  flex: 1;
+  min-width: 0;
+  font-size: calc(11.5px*var(--app-text-scale,1));
+  color: var(--c-text);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-sound-editor-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.chat-sound-or {
+  flex-shrink: 0;
+  font-size: calc(11.5px*var(--app-text-scale,1));
+  color: var(--c-text);
+  opacity: 0.55;
+}
+.chat-sound-subtoggles {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 3px;
+  padding-top: 9px;
+  border-top: 1px dashed color-mix(in srgb, var(--c-card-border) 35%, transparent);
+}
+.chat-sound-subtoggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 新消息音效“测试弹窗”行：与子开关分隔，按钮 + 说明 */
+.chat-sound-test-row {
+  margin-top: 8px;
+}
+
+/* ── 私聊聊天信息 → 角色专属提示音 ── */
+
+/* 三档模式切换（跟随全局 / 专属 / 关闭） */
+.chat-sound-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--c-text-title) 7%, transparent);
+}
+.chat-sound-mode button {
+  border: 0;
+  background: transparent;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: calc(11.5px*var(--app-text-scale,1));
+  line-height: 1.5;
+  color: var(--c-text);
+  opacity: 0.7;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-sound-mode button.is-active {
+  background: var(--c-card-bg);
+  color: var(--c-accent, var(--c-text-title));
+  opacity: 1;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.14);
+}
+
+/* 聊天信息页的编辑区左边距对齐 chat-info-icon 圆片（24+36+12） */
+.chat-sound-editor-session {
+  padding: 5px 24px 13px 72px;
+}
+
+/* 子开关“跟随全局”重置链接 */
+.chat-sound-subreset {
+  border: 0;
+  background: transparent;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: calc(11px*var(--app-text-scale,1));
+  color: var(--c-accent, var(--c-text));
+  opacity: 0.85;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 /* ══════════════════════════════════════════
@@ -5070,6 +5231,91 @@
   color: var(--c-text);
 }
 
+.memory-header-actions {
+  display: flex;
+  align-items: center;
+}
+
+.mem-detail .page-header-content {
+  position: relative;
+}
+
+.mem-detail .page-header-right {
+  position: absolute;
+  right: 14px;
+}
+
+.memory-header-filter-btn {
+  position: relative;
+}
+
+.memory-header-filter-badge {
+  position: absolute;
+  top: 3px;
+  right: 2px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-icon-active);
+  color: #fff;
+  font-size: calc(9px*var(--app-text-scale,1));
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.memory-timeline-filter-sheet .modal-header {
+  border-bottom: none;
+}
+
+.memory-timeline-filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-timeline-filter-option {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--c-input);
+  color: var(--c-text-title);
+  font-size: calc(13px*var(--app-text-scale,1));
+  cursor: pointer;
+}
+
+.memory-timeline-filter-option[data-selected] {
+  border-color: color-mix(in srgb, var(--c-icon-active) 35%, transparent);
+  background: color-mix(in srgb, var(--c-icon-active) 10%, var(--c-panel));
+  color: var(--c-icon-active);
+}
+
+.memory-timeline-filter-option-meta {
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  color: inherit;
+  opacity: 0.78;
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-timeline-filter-empty {
+  margin: 18px 0;
+  color: var(--c-text);
+  text-align: center;
+  font-size: calc(12px*var(--app-text-scale,1));
+}
+
 /* ── Memory Timeline ── */
 
 .mem-tl {
@@ -5077,11 +5323,15 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 26px 0 0;
+  padding-top: 6px;
 }
 
 /* Card */
 .mem-tl-card {
+
+  position: relative; /* 修复：卡片内「REPORT」水印绝对定位缺少定位上下文时，
+                          会相对最近的定位祖先 .mem-tl（整份列表）而非各自卡片本身，
+                          导致所有卡片的水印叠在同一位置、遮住顶部的来源标签筛选条 */
   width: 100%;
   min-width: 0;
   cursor: pointer;

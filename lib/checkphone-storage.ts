@@ -13,9 +13,11 @@ export type CheckPhoneProjectionEntry = {
 };
 
 const CHECKPHONE_EVENT_PREFIX = "ai_phone_checkphone_events_";
+const CHECKPHONE_UNREAD_PREFIX = "ai_phone_checkphone_unread_";
 const MAX_CHECKPHONE_EVENTS_PER_CHARACTER = 120;
 
 registerDynamicPrefix(CHECKPHONE_EVENT_PREFIX);
+registerDynamicPrefix(CHECKPHONE_UNREAD_PREFIX);
 
 class CheckPhoneDatabase extends Dexie {
   manifests!: Dexie.Table<CheckPhoneManifestRow, string>;
@@ -40,6 +42,35 @@ let hydrated = false;
 
 function projectionStorageKey(characterId: string): string {
   return `${CHECKPHONE_EVENT_PREFIX}${characterId}`;
+}
+
+function unreadStorageKey(characterId: string): string {
+  return `${CHECKPHONE_UNREAD_PREFIX}${characterId}`;
+}
+
+export function loadCheckPhoneUnreadAppIds(characterId: string): CheckPhoneAppId[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = kvGet(unreadStorageKey(characterId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.filter((appId): appId is CheckPhoneAppId =>
+      typeof appId === "string" && appId in CHECKPHONE_APP_SPECS
+    ))];
+  } catch {
+    return [];
+  }
+}
+
+export function saveCheckPhoneUnreadAppIds(characterId: string, appIds: CheckPhoneAppId[]): void {
+  if (typeof window === "undefined") return;
+  const normalized = [...new Set(appIds.filter((appId) => appId in CHECKPHONE_APP_SPECS))];
+  if (normalized.length === 0) {
+    kvRemove(unreadStorageKey(characterId));
+    return;
+  }
+  kvSet(unreadStorageKey(characterId), JSON.stringify(normalized));
 }
 
 function cleanEventText(value: unknown, maxLength: number): string {

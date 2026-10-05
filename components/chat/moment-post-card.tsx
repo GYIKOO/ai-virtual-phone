@@ -96,9 +96,8 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
     }, [post.id, post.photoUrl, post.photoGenerationStatus, photoRegenerating]);
 
     const chars = loadCharacters();
-    // 角色帖子下，用户名用该角色绑定的用户人设；用户自己的帖子用默认人设
-    const contextCharId = post.authorType === "character" ? post.authorId : undefined;
-    const userIdentity = resolveUserIdentity(contextCharId, "chat");
+    // 朋友圈中的用户头像与主页、消息列表共用同一份用户资料头像。
+    const userIdentity = resolveUserIdentity();
 
     const getCharName = (charId: string): string => {
         return chars.find(c => c.id === charId)?.name ?? "未知";

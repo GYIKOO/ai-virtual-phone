@@ -1,7 +1,8 @@
 import type { DwellingRoom } from "./dwelling-storage";
 import { loadDwellingImageEnabled } from "./dwelling-storage";
-import { loadImageGenerationSettings } from "./settings-storage";
+import { loadBindingConfig, loadImageGenerationSettings, resolveBinding } from "./settings-storage";
 import { generateImageFromConfiguredApi } from "./image-generation-service";
+import { applyImageGenerationBinding } from "./image-generation-binding";
 
 // ── Availability ──────────────────────────────
 
@@ -14,9 +15,14 @@ export type DwellingImageAvailability = {
     available: boolean;
 };
 
-export function getDwellingImageAvailability(): DwellingImageAvailability {
-    const s = loadImageGenerationSettings();
-    const configured = Boolean(s.enabled && s.apiKey.trim() && s.baseUrl.trim() && s.model.trim());
+export function getDwellingImageAvailability(characterId?: string): DwellingImageAvailability {
+    const stored = loadImageGenerationSettings();
+    const binding = resolveBinding(loadBindingConfig(), characterId, "dwelling");
+    const s = applyImageGenerationBinding(stored, binding.imageConfigId);
+    const providerConfigured = s.provider === "novelai"
+        ? Boolean(s.novelai?.apiKey?.trim())
+        : Boolean(s.apiKey.trim() && s.baseUrl.trim() && s.model.trim());
+    const configured = Boolean(s.enabled && providerConfigured);
     const dwellingEnabled = loadDwellingImageEnabled();
     return { configured, dwellingEnabled, available: configured && dwellingEnabled };
 }
@@ -93,10 +99,12 @@ export async function generateDwellingRoomImage(
         inflightControllers.set(key, entry);
         const timer = setTimeout(() => controller.abort(), ROOM_IMAGE_TIMEOUT_MS);
         try {
-            const availability = getDwellingImageAvailability();
+            const availability = getDwellingImageAvailability(characterId);
             if (!availability.available) return { assetId: null, error: "生图未开启" };
             const result = await generateImageFromConfiguredApi({
                 description: buildRoomImagePrompt(room),
+                characterId,
+                appId: "dwelling",
                 signal: controller.signal,
             });
             if (!result) return { assetId: null, error: "生图未配置或已关闭" };

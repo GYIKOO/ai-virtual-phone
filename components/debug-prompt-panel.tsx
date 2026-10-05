@@ -443,6 +443,14 @@ export function DebugPromptPanel() {
             const history = session ? loadStoryMessages(session.id) : [];
             const result = await previewStoryPromptPayload(storyCharacterId, history, {
                 sessionContextExcludedTags: session?.contextExcludedTags,
+                sessionId: session?.id,
+                settings: session?.settings,
+                participantIds: session?.participantIds,
+                storyMemory: {
+                    independent: session?.independentStory,
+                    inheritRecentMemory: session?.inheritRecentMemory ?? true,
+                    startedAt: session?.createdAt,
+                },
             });
             setStoryResult(result);
             setExpandedIdx(new Set()); setBadgesShownIdx(new Set());

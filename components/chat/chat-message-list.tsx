@@ -2,10 +2,10 @@
 
 import React, { useState, useEffect, useSyncExternalStore } from "react";
 import { ChevronLeft } from "lucide-react";
-import { loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview } from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { Character } from "@/lib/character-types";
-import { resolveUserIdentity } from "@/lib/settings-storage";
+import { resolveUserIdentity, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
 import type { UserIdentity } from "@/components/settings/user-identity";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import { clearRequestsForCharacter, dispatchFriendRequestUpdated } from "@/lib/friend-request-storage";
@@ -115,6 +115,9 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
 
     useEffect(() => {
         setIdentity(resolveUserIdentity());
+        const syncIdentity = () => setIdentity(resolveUserIdentity());
+        window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
     }, []);
 
     useEffect(() => {
@@ -136,12 +139,16 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
     }, [activeSession]);
 
     useEffect(() => {
-        const refreshSessions = () => setSessions(loadChatSessions());
+        const refreshSessions = () => setSessions([...loadChatSessions()]);
         window.addEventListener("weixin-messages-updated", refreshSessions);
         window.addEventListener("chat-messages-updated", refreshSessions);
+        window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshSessions);
+        window.addEventListener("characters-updated", refreshSessions);
         return () => {
             window.removeEventListener("weixin-messages-updated", refreshSessions);
             window.removeEventListener("chat-messages-updated", refreshSessions);
+            window.removeEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshSessions);
+            window.removeEventListener("characters-updated", refreshSessions);
         };
     }, []);
 
@@ -809,6 +816,14 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
                     <span className="ts-13 text-[var(--c-text)] opacity-80 truncate font-normal">
                         {preview || getLastNonEmptyPreview(session.id)}
                     </span>
+                    {session.unreadCount > 0 && (
+                        <span
+                            className="min-w-[18px] h-[18px] px-1 rounded-full bg-[#ff3b30] text-white text-[10px] leading-[18px] text-center font-semibold shrink-0"
+                            aria-label={`${session.unreadCount} 条未读消息`}
+                        >
+                            {session.unreadCount > 99 ? "99+" : session.unreadCount}
+                        </span>
+                    )}
                 </div>
             </div>
         </div>

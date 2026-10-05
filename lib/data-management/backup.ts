@@ -32,6 +32,7 @@ function isBackupManifest(value: unknown): value is BackupManifest {
     && SUPPORTED_BACKUP_VERSIONS.has(Number(manifest.version))
     && typeof manifest.createdAt === "string"
     && Number.isFinite(Date.parse(manifest.createdAt))
+    && (manifest.dynamicImageDays === undefined || manifest.dynamicImageDays === 3 || manifest.dynamicImageDays === 7)
     && isFiniteNonNegative(manifest.totalBytes)
     && isFiniteNonNegative(manifest.totalRecords)
     && Array.isArray(manifest.modules)
@@ -152,6 +153,8 @@ export async function inspectData(): Promise<DataSnapshot> {
 export type BackupOptions = {
   /** Strip embedded images/audio/video (keeps text/config/structure + avatars). */
   excludeMedia?: boolean;
+  /** Keep only recent dynamic images; avatars and desktop/theme assets stay complete. */
+  dynamicImageDays?: 3 | 7;
   /**
    * 把云服务连接信息（项目地址 + 密钥 + 专用项目标记）一并写进备份。
    * 只给本地导出的文件用——文件在用户自己手里，恢复时靠它直接连回原来的云项目；
@@ -234,7 +237,10 @@ export async function buildSingleSourcePayload(
   if (!source) throw new Error(`找不到 ${dataModule.label} 的第 ${sourceIndex + 1} 个数据源`);
   const stripping = Boolean(options.excludeMedia) && !MEDIA_KEEP_MODULE_IDS.has(dataModule.id);
   const moduleCollector = stripping ? undefined : collector;
-  let sourcePayload = await exportSource(source, moduleCollector, stripping);
+  const imageCutoffMs = options.dynamicImageDays
+    ? Date.now() - options.dynamicImageDays * 24 * 60 * 60 * 1000
+    : undefined;
+  let sourcePayload = await exportSource(source, moduleCollector, stripping, imageCutoffMs);
   if (stripping) sourcePayload = stripMediaFromSource(sourcePayload);
   const records = countSourceRecords(sourcePayload);
   const payload: ModulePayload = { moduleId: dataModule.id, sources: [sourcePayload] };
@@ -309,6 +315,7 @@ async function buildEnvelope(moduleIds?: DataModuleId[], options: BackupOptions 
     totalBytes: manifestModules.reduce((sum, item) => sum + item.bytes, 0),
     totalRecords: manifestModules.reduce((sum, item) => sum + item.records, 0),
     ...(options.excludeMedia ? { mediaExcluded: true } : {}),
+    ...(!options.excludeMedia && options.dynamicImageDays ? { dynamicImageDays: options.dynamicImageDays } : {}),
   };
 
   return { manifest, modules: modulePayloads };
@@ -403,6 +410,7 @@ export async function createBackupBlob(moduleIds?: DataModuleId[], options: Back
     totalBytes,
     totalRecords,
     ...(options.excludeMedia ? { mediaExcluded: true } : {}),
+    ...(!options.excludeMedia && options.dynamicImageDays ? { dynamicImageDays: options.dynamicImageDays } : {}),
   };
   zip.file("manifest.json", JSON.stringify(manifest, null, 2));
 

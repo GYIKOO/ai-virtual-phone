@@ -1,13 +1,17 @@
 "use client";
 
-import { useState, useEffect, useMemo, type CSSProperties } from "react";
+import { useState, useEffect, useMemo, useRef, type CSSProperties } from "react";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import {
     loadFollowUpConfig,
     saveFollowUpConfig,
     getDefaultFollowUpConfig,
+    loadUserIdentities,
     resolveUserIdentity,
+    saveUserIdentities,
+    USER_IDENTITIES_UPDATED_EVENT,
 } from "@/lib/settings-storage";
+import { fileToUserAvatarDataUrl } from "@/lib/user-avatar-image";
 import { loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
 import type { UserIdentity } from "@/components/settings/user-identity";
 import { getApiLogs, clearApiLogs, type DebugInfo } from "@/lib/chat-engine";
@@ -18,6 +22,7 @@ import { Toggle } from "@/components/ui/form";
 import { StickerManager } from "./sticker-manager";
 import { ChatPluginManager } from "./chat-plugin-manager";
 import { ChatPluginPageBoundary } from "./chat-plugin-page-boundary";
+import { GlobalChatInfoSettings } from "./global-chat-info-settings";
 import { WalletPanel } from "./wallet-panel";
 import { loadMomentsConfig, saveMomentsConfig, DEFAULT_MOMENTS_CONFIG, type MomentsInteractionConfig, getAllPosts } from "@/lib/moments-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
@@ -39,6 +44,7 @@ import { ChatFallbackAvatar } from "./chat-fallback-avatar";
 import {
     Loader2,
     Bell,
+    Camera,
     CloudUpload,
     ChevronRight,
     Clock,
@@ -162,6 +168,8 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     const [notifHint, setNotifHint] = useState<string | null>(null);
     const [notifChecking, setNotifChecking] = useState(false);
     const [showPushSettings, setShowPushSettings] = useState(false);
+    const [showGlobalChatInfo, setShowGlobalChatInfo] = useState(false);
+    const profileAvatarInputRef = useRef<HTMLInputElement>(null);
     const [enterToSendEnabled, setEnterToSendEnabled] = useState(false);
     const [offlineEnterToSendEnabled, setOfflineEnterToSendEnabled] = useState(false);
     const [callVibrationEnabled, setCallVibrationEnabled] = useState(true);
@@ -202,6 +210,31 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
             });
         } catch (e) { }
     }, []);
+
+    useEffect(() => {
+        const syncIdentity = () => setIdentity(resolveUserIdentity());
+        window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+    }, []);
+
+    const handleProfileAvatarChange = async (file?: File) => {
+        if (!file) return;
+        const currentIdentity = resolveUserIdentity();
+        if (!currentIdentity) {
+            window.alert("请先在设置的“用户信息”中创建用户身份");
+            return;
+        }
+        try {
+            const avatarUrl = await fileToUserAvatarDataUrl(file);
+            const identities = loadUserIdentities();
+            saveUserIdentities(identities.map(item => (
+                item.id === currentIdentity.id ? { ...item, avatarUrl } : item
+            )));
+        } catch (error) {
+            console.error("更新用户资料头像失败", error);
+            window.alert("头像读取失败，请换一张图片后重试");
+        }
+    };
 
     useEffect(() => {
         const syncWallet = () => {
@@ -275,6 +308,9 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     if (showPushSettings) {
         return <OfflinePushSettingsPage onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowPushSettings(false); }} />;
     }
+    if (showGlobalChatInfo) {
+        return <GlobalChatInfoSettings onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowGlobalChatInfo(false); }} />;
+    }
     if (showPluginManager) {
         return (
             <ChatPluginPageBoundary page="扩展插件" onClose={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowPluginManager(false); }}>
@@ -344,14 +380,34 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                     <div className="flex items-center gap-5 px-6 pt-2 pb-4">
                         {/* Avatar */}
                         <div className="relative shrink-0">
-                            <div className="w-[84px] h-[84px] rounded-full overflow-hidden bg-[var(--c-card)] border-2 border-white/50 shadow-sm flex items-center justify-center relative"
-                                 style={{ boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}>
+                            <button
+                                type="button"
+                                className="w-[84px] h-[84px] rounded-full overflow-hidden bg-[var(--c-card)] border-2 border-white/50 shadow-sm flex items-center justify-center relative active:scale-[0.97] transition-transform"
+                                style={{ boxShadow: "0 4px 20px rgba(0,0,0,0.06)" }}
+                                onClick={() => profileAvatarInputRef.current?.click()}
+                                aria-label="更换用户资料头像"
+                                title="点击更换用户资料头像"
+                            >
                                 {identity?.avatarUrl ? (
                                     <img src={identity.avatarUrl} alt="User Avatar" className="w-full h-full object-cover" />
                                 ) : (
                                     <User size={38} color="var(--c-icon)" />
                                 )}
-                            </div>
+                                <span className="absolute right-0 bottom-0 w-6 h-6 rounded-full bg-black/65 text-white flex items-center justify-center border-2 border-white/80">
+                                    <Camera size={12} />
+                                </span>
+                            </button>
+                            <input
+                                ref={profileAvatarInputRef}
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={event => {
+                                    const file = event.target.files?.[0];
+                                    event.target.value = "";
+                                    void handleProfileAvatarChange(file);
+                                }}
+                            />
                         </div>
 
                         {/* Info & Stats */}
@@ -439,6 +495,14 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                             <div className="flex flex-col flex-1 text-left gap-0.5">
                                 <span className="ts-14 font-semibold text-[var(--c-text-title)]">离线推送与定时消息</span>
                                 <span className="ts-11 text-[var(--c-text)] opacity-70">关掉后台也能收到推送、安静时段、定时主动消息</span>
+                            </div>
+                            <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
+                        </button>
+                        <button className="flex items-center gap-3 py-3.5 w-full border-t border-[color-mix(in_srgb,var(--c-card-border)_20%,transparent)]" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowGlobalChatInfo(true); }}>
+                            <SlidersHorizontal size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
+                            <div className="flex flex-col flex-1 text-left gap-0.5">
+                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">全局聊天信息</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">私聊默认头像、状态栏、背景、CSS 与最近图片</span>
                             </div>
                             <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
                         </button>

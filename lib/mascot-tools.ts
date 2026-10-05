@@ -1,19 +1,25 @@
 // lib/mascot-tools.ts
-// 小卷工具系统：7 个套件 + 36 个细粒度工具，支持文本协议和原生协议双轨。
+// 小卷工具系统：12 个套件，支持文本协议和原生协议双轨。
 //
 // 套件设计（默认只暴露 loader，按需展开）：
 //   - 角色卡套件 (character_pack)     — 3 个子工具
 //   - 世界书套件 (worldbook_pack)     — 5 个子工具
-//   - 预设套件 (preset_pack)          — 5 个子工具
+//   - 预设套件 (preset_pack)          — 9 个子工具
 //   - 正则套件 (regex_pack)           — 5 个子工具
 //   - CSS套件 (css_pack)              — 3 个子工具
 //   - 图像处理套件 (image_pack)       — 10 个子工具
+//   - 线上聊天状态栏 (status_bar_pack) — 3 个子工具
+//   - 邀请见面卡片 (meeting_invite_pack) — 3 个子工具
+//   - 剧情方案套件 (story_scheme_pack) — 5 个子工具（剧情状态栏/小剧场方案）
+//   - 桌面组件套件 (widget_pack)      — 6 个子工具
+//   - 独家特调套件 (mixology_pack)    — 9 个子工具
 //   - 导航工具 (navigate)             — 1 个独立工具（直接暴露）
 
 import type { LlmToolDefinition } from "./llm-provider-adapter";
 import type { ToolCall, ToolResult } from "./tool-executor";
 import type { MascotPageContext } from "./mascot-context";
 import type { Prompt } from "./settings-types";
+import type { StoryCharacterSettings, StoryTailScheme } from "./story-storage";
 import { CHARACTER_CARD_PROMPT, CHARACTER_WORLD_PROMPT, WORLDBOOK_PROMPT, PRESET_PROMPT, GENERAL_PRESET_PROMPT, REGEX_PROMPT, CSS_PROMPT, WIDGET_PROMPT, MIXOLOGY_PROMPT } from "./mascot-prompts";
 import {
     buildCssAssetNineSliceCss,
@@ -762,6 +768,161 @@ const STATUS_BAR_PROMPT = `线上聊天状态栏 = 让 AI 每轮在 [状态栏].
 · **启用后原生的好感度/占有欲/焦虑值会停止更新**（状态区整块被契约取代了）。
 · 如果该会话之前用正则渲染过状态栏，两套会互相竞争，让用户二选一。`;
 
+// ── 邀请见面卡片（全局私聊）──────────────────────────
+const READ_MEETING_INVITE_SCHEMA = {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+};
+
+const WRITE_MEETING_INVITE_SCHEMA = {
+    type: "object",
+    properties: {
+        contract: { type: "string", description: "邀请触发与字段输出规则。应说明角色按语境自主邀请，并列出希望角色填写的 key=value 字段；系统会自动加不可见的 [邀请见面] 包裹。" },
+        renderHtml: { type: "string", description: "完整 HTML/CSS/JS。用 window.STATUS_RAW 或 {{RAW}} 读取示例数据；同意/拒绝按钮必须分别带 data-meeting-action=\"accept\" 和 data-meeting-action=\"decline\"。" },
+        previewRaw: { type: "string", description: "预览示例数据，字段必须和契约、HTML 一致；建议包含邀请人、标题、说明、同意反应、拒绝反应、状态=pending。" },
+    },
+    required: ["contract", "renderHtml", "previewRaw"],
+    additionalProperties: false,
+};
+
+const PREVIEW_MEETING_INVITE_SCHEMA = {
+    type: "object",
+    properties: {},
+    required: [],
+    additionalProperties: false,
+};
+
+const MEETING_INVITE_PROMPT = `邀请见面卡片是全局私聊功能。小卷可以直接制作并保存一份“触发契约 + HTML 渲染 + 示例数据”。
+
+===== 工作流 =====
+1. 先用「读取邀请见面卡片」查看现有方案；已有自定义内容时，应先确认是覆盖还是在原基础上改。
+2. 用「写邀请见面卡片」一次写入完整契约、完整 HTML/CSS/JS 与示例数据，写入后自动启用自定义卡片。
+3. 用「预览邀请见面卡片」弹出真实沙盒预览。
+
+===== HTML 硬规则 =====
+· renderHtml 是完整 HTML，可包含 <style> 与 <script>，不是只能写 CSS。
+· 数据从 window.STATUS_RAW 读取；{{RAW}} 也可用于安全的纯文本直插。
+· 同意按钮必须有 data-meeting-action="accept"，拒绝按钮必须有 data-meeting-action="decline"，否则页面看起来有按钮但不能执行真实操作。
+· 不要写 100vh/100dvh；卡片高度由外层自动测量。
+· 沙盒不能访问宿主页面或发起网络请求，素材应使用可公开访问的 URL。
+· 示例数据必须与脚本解析的字段完全一致，默认建议：邀请人、标题、说明、同意反应、拒绝反应、状态=pending。
+· 契约只写卡片的触发逻辑和字段格式，不再要求旧的 [线下见面邀请] 单标记；系统会在发给角色时自动加 [邀请见面]...[/邀请见面] 包裹，包裹不会显示给用户。
+
+写完后告诉用户：可在“聊天 → 我的 → 全局聊天信息 → 邀请见面卡片 CSS 样式”继续修改。`;
+
+
+// ── 剧情 APP 尾部方案（状态栏方案 / 小剧场方案）────────
+const STORY_SCHEME_SESSION_DESC = "剧情会话名：填角色名或剧情标题。不传则用当前打开的剧情会话；没打开时返回可选列表。";
+const STORY_SCHEME_KIND_DESC = "方案类别：status=状态栏方案（内容进入下一轮上下文），theater=小剧场方案（默认仅展示、不进上下文）。";
+
+const LIST_STORY_SCHEMES_SCHEMA = {
+    type: "object",
+    properties: {
+        sessionName: { type: "string", description: STORY_SCHEME_SESSION_DESC },
+    },
+    required: [],
+    additionalProperties: false,
+};
+
+const READ_STORY_SCHEME_SCHEMA = {
+    type: "object",
+    properties: {
+        sessionName: { type: "string", description: STORY_SCHEME_SESSION_DESC },
+        kind: { type: "string", enum: ["status", "theater"], description: STORY_SCHEME_KIND_DESC },
+        schemeName: { type: "string", description: "方案名。不传时读取当前启用的方案。" },
+    },
+    required: ["kind"],
+    additionalProperties: false,
+};
+
+const CREATE_STORY_SCHEME_SCHEMA = {
+    type: "object",
+    properties: {
+        sessionName: { type: "string", description: STORY_SCHEME_SESSION_DESC },
+        kind: { type: "string", enum: ["status", "theater"], description: STORY_SCHEME_KIND_DESC },
+        name: { type: "string", description: "方案名（同类别内不能重名）" },
+        prompt: { type: "string", description: "输出契约：写给 AI 的整段要求，必须要求用 <story_status> 或 <story_theater> 标签输出（与 kind 对应）。状态栏写清字段与取值逻辑；小剧场写清出现时机与内容要求。" },
+        renderHtml: { type: "string", description: "输出渲染：完整 HTML（可含 <style>/<script>），沙盒 iframe 执行。数据从 window.STORY_RAW 取（原文字符串），或用 {{RAW}} 直插（已 HTML 转义）。" },
+        preview: { type: "string", description: "示例数据：按契约格式编造的一份样例，供设置页预览。" },
+        activate: { type: "boolean", description: "创建后是否立即启用为当前方案，默认 true" },
+    },
+    required: ["kind", "name", "prompt", "renderHtml", "preview"],
+    additionalProperties: false,
+};
+
+const UPDATE_STORY_SCHEME_SCHEMA = {
+    type: "object",
+    properties: {
+        sessionName: { type: "string", description: STORY_SCHEME_SESSION_DESC },
+        kind: { type: "string", enum: ["status", "theater"], description: STORY_SCHEME_KIND_DESC },
+        schemeName: { type: "string", description: "要修改的方案名。不传时修改当前启用的方案。" },
+        name: { type: "string", description: "可选：方案改名" },
+        prompt: { type: "string", description: "可选：新的输出契约（整体替换，不是 diff）" },
+        renderHtml: { type: "string", description: "可选：新的渲染 HTML（整体替换）" },
+        preview: { type: "string", description: "可选：新的示例数据" },
+        activate: { type: "boolean", description: "可选：true 时把该方案设为当前启用方案" },
+    },
+    required: ["kind"],
+    additionalProperties: false,
+};
+
+const DELETE_STORY_SCHEME_SCHEMA = {
+    type: "object",
+    properties: {
+        sessionName: { type: "string", description: STORY_SCHEME_SESSION_DESC },
+        kind: { type: "string", enum: ["status", "theater"], description: STORY_SCHEME_KIND_DESC },
+        schemeName: { type: "string", description: "要删除的方案名。不传时删除当前启用的方案；每个类别至少保留一个方案，删不掉。" },
+    },
+    required: ["kind"],
+    additionalProperties: false,
+};
+
+const STORY_SCHEME_PROMPT = `剧情尾部方案 = 剧情 APP 每轮生成的"正文之后"内容：
+状态栏方案让 AI 在 <story_status>...</story_status> 里吐结构化数据（时间/地点/关系温度……），
+小剧场方案让 AI 在 <story_theater>...</story_theater> 里写一段不影响主线的加演短文，
+再由一段固定的 HTML 把它们画成卡片。数据每轮变、画法不变。
+
+===== 适用范围（务必先分流）=====
+· 只适用于**剧情 APP**（方案统一存在公用仓库、所有角色共享；每个角色的剧情会话只记录"启用哪一个"）。
+· 线上聊天（单聊/群聊）的状态栏用「线上聊天状态栏套件」；线下/漫卷等场景仍走正则老办法。
+· 剧情设置页（剧情 → 右上角设置 → 剧情尾部）可手动查看和继续修改这些方案。
+
+===== 两条类别的差异 =====
+· status 状态栏：输出默认**进入下一轮上下文**（AI 记得住上一轮的状态），字段要精简、适合长线追踪。
+· theater 小剧场：默认**仅展示、不进上下文**（靠"不进上下文标签"机制剔除），可以放开写，不影响主线。
+
+===== 工作流（5 个工具）=====
+1. 列出剧情方案 —— 看公用仓库里有哪些状态栏/小剧场方案、该角色当前启用哪个。**改之前先看**。
+2. 读取剧情方案 —— 看某方案的完整契约/渲染/示例。已有内容要先问用户是覆盖还是在原基础上改。
+3. 创建剧情方案 —— 新建一套方案（契约 + 渲染 + 示例一次写入）存进公用仓库，默认为该角色立即启用。
+4. 更新剧情方案 —— 改方案的名字/契约/渲染/示例（只传要改的字段），或切换启用方案。方案全角色共享，改动会影响所有启用它的角色。
+5. 删除剧情方案 —— 从公用仓库删掉某方案；每个类别至少保留一个，删不掉；启用它的角色会自动切换。
+
+===== 契约怎么写（硬规则，违反会被工具拒绝）=====
+· **必须出现与 kind 对应的标签**：status 要含 <story_status>，theater 要含 <story_theater>。
+  漏了标签，剧情解析不到块，方案等于没生效——这是最常见的翻车方式。
+· 只让 AI 吐数据/正文，不要让它吐 HTML。状态栏一行一个字段、用 ｜ 或 ：分隔最稳。
+· 状态栏字段别贪多：内容会进上下文，字段多了每轮 token 都在涨。
+· 小剧场契约写清"基于本轮剧情、不影响主线"，篇幅建议两三百字内。
+
+===== 渲染怎么写 =====
+· 一段完整 HTML，可含 <style> 与 <script>，在沙盒 iframe 里跑（allow-scripts，无 same-origin）。
+· 取数据两个口子：window.STORY_RAW（原文字符串，JS 里 split 解析）；{{RAW}}（模板直插，已 HTML 转义）。
+  小剧场额外有 window.THEATER_RAW；可用 window.STORY_TAIL_KIND 区分 "status"/"theater"。
+· **不要用 100vh / 100dvh**：高度由外部自动测量，视口单位会把高度锁死。
+· 深浅色都要能看：用 prefers-color-scheme 或半透明叠色。
+· 解析要容错：字段缺失、顺序变化都要不崩（AI 的输出不会每轮都完美）。
+
+===== 示例数据 =====
+· 创建时必填。按自己写的契约编一份真实感样例，字段和契约完全对得上，
+  用户在设置页点开预览才能立刻看到效果。
+
+===== 写完要告诉用户的 =====
+· 方案已存入公用仓库（所有角色可用），已为哪个角色启用，可在 剧情 → 右上角设置 → 剧情尾部 里看到并继续手改。
+· 新方案默认已启用（activate=false 时只保存不启用）。`;
+
 
 // ── 独家特调工具 ──
 const MIX_KIND_ENUM = ["character", "persona", "preface", "base", "flavor", "glass", "strength", "ticket", "garnish", "encore", "checklist", "filter", "mechanism"];
@@ -1025,6 +1186,30 @@ export const MASCOT_TOOL_PACKAGES: MascotToolPackage[] = [
         usageGuide: STATUS_BAR_PROMPT,
     },
     {
+        id: "meeting_invite_pack",
+        label: "邀请见面卡片套件",
+        description: "让小卷为全局私聊制作邀请见面卡片：支持完整 HTML/CSS/JS、触发契约、示例数据与真实沙盒预览。保存后所有私聊共用，用户仍可在全局聊天信息里继续修改。",
+        subTools: [
+            { name: "读取邀请见面卡片", description: "读取当前全局邀请见面卡片的模式、触发契约、完整 HTML 渲染与示例数据。修改前必读。", parameterSchema: READ_MEETING_INVITE_SCHEMA },
+            { name: "写邀请见面卡片", description: "写入触发契约 + 完整 HTML/CSS/JS + 示例数据并启用。HTML 中必须保留可交互的同意/拒绝 data-meeting-action。", parameterSchema: WRITE_MEETING_INVITE_SCHEMA },
+            { name: "预览邀请见面卡片", description: "在小卷对话中弹窗运行已保存的 HTML 邀请卡片，不离开当前页面。", parameterSchema: PREVIEW_MEETING_INVITE_SCHEMA },
+        ],
+        usageGuide: MEETING_INVITE_PROMPT,
+    },
+    {
+        id: "story_scheme_pack",
+        label: "剧情方案套件",
+        description: "管理**剧情 APP** 的「状态栏方案」与「小剧场方案」：方案保存在公用仓库（所有角色共享），每个角色可单独选择启用哪一套（输出契约 + HTML 渲染 + 示例数据）。状态栏内容进入下一轮上下文，小剧场默认仅展示。只覆盖剧情 APP；线上聊天的状态栏用「线上聊天状态栏套件」。",
+        subTools: [
+            { name: "列出剧情方案", description: "列出公用仓库里的全部状态栏方案与小剧场方案（含方案名、该角色是否启用、契约摘要）。修改前先看。不传会话名时用当前打开的剧情会话。", parameterSchema: LIST_STORY_SCHEMES_SCHEMA },
+            { name: "读取剧情方案", description: "读取某方案的完整契约、渲染与示例数据。不传方案名时读当前启用的方案。", parameterSchema: READ_STORY_SCHEME_SCHEMA },
+            { name: "创建剧情方案", description: "在公用仓库新建一套状态栏或小剧场方案（所有角色可用），默认为该角色立即启用。契约必须含与类别对应的 <story_status>/<story_theater> 标签，否则工具会拒绝。", parameterSchema: CREATE_STORY_SCHEME_SCHEMA },
+            { name: "更新剧情方案", description: "修改公用仓库里某方案的名字/契约/渲染/示例（只传要改的字段；全角色共享，会影响所有启用它的角色），或把它设为该角色当前启用的方案。", parameterSchema: UPDATE_STORY_SCHEME_SCHEMA },
+            { name: "删除剧情方案", description: "从公用仓库删除某套方案；每个类别至少保留一个方案，最后一个不可删；原本启用它的角色会自动切换到剩余首个方案。", parameterSchema: DELETE_STORY_SCHEME_SCHEMA },
+        ],
+        usageGuide: STORY_SCHEME_PROMPT,
+    },
+    {
         id: "widget_pack",
         label: "桌面组件套件",
         description: "创建 / 更新 / 预览 / 摆放 DIY 桌面组件（自包含 HTML，沙箱渲染）。更新后桌面实时热更新，适合小步迭代。",
@@ -1164,6 +1349,14 @@ const MASCOT_NATIVE_TOOL_NAMES: Record<string, string> = {
     "读取线上状态栏": "mascot_read_status_bar",
     "写线上状态栏": "mascot_write_status_bar",
     "预览线上状态栏": "mascot_preview_status_bar",
+    "读取邀请见面卡片": "mascot_read_meeting_invite_card",
+    "写邀请见面卡片": "mascot_write_meeting_invite_card",
+    "预览邀请见面卡片": "mascot_preview_meeting_invite_card",
+    "列出剧情方案": "mascot_list_story_schemes",
+    "读取剧情方案": "mascot_read_story_scheme",
+    "创建剧情方案": "mascot_create_story_scheme",
+    "更新剧情方案": "mascot_update_story_scheme",
+    "删除剧情方案": "mascot_delete_story_scheme",
     "生成图像素材": "mascot_generate_css_asset",
     "列出用户图片": "mascot_list_user_images",
     "导入用户图片为素材": "mascot_import_user_image_asset",
@@ -1231,6 +1424,8 @@ const MASCOT_NATIVE_LOADER_NAMES: Record<string, string> = {
     preset_pack: "mascot_load_preset_pack",
     regex_pack: "mascot_load_regex_pack",
     status_bar_pack: "mascot_load_status_bar_pack",
+    meeting_invite_pack: "mascot_load_meeting_invite_pack",
+    story_scheme_pack: "mascot_load_story_scheme_pack",
     widget_pack: "mascot_load_widget_pack",
     mixology_pack: "mascot_load_mixology_pack",
 };
@@ -1323,6 +1518,17 @@ export async function executeMascotToolCall(call: ToolCall, ctx: MascotToolConte
             case "读取线上状态栏": return await handleReadStatusBar(call.args, ctx);
             case "写线上状态栏": return await handleWriteStatusBar(call.args, ctx);
             case "预览线上状态栏": return await handlePreviewStatusBar(call.args, ctx);
+            // ─── 全局私聊邀请见面卡片 ───
+            case "读取邀请见面卡片": return await handleReadMeetingInviteCard();
+            case "写邀请见面卡片": return await handleWriteMeetingInviteCard(call.args);
+            case "预览邀请见面卡片": return await handlePreviewMeetingInviteCard();
+
+            // ─── 剧情尾部方案（状态栏方案 / 小剧场方案）───
+            case "列出剧情方案": return await handleListStorySchemes(call.args, ctx);
+            case "读取剧情方案": return await handleReadStoryScheme(call.args, ctx);
+            case "创建剧情方案": return await handleCreateStoryScheme(call.args, ctx);
+            case "更新剧情方案": return await handleUpdateStoryScheme(call.args, ctx);
+            case "删除剧情方案": return await handleDeleteStoryScheme(call.args, ctx);
 
             // ─── 图像处理 ───
             case "生成图像素材": return await handleGenerateCssAsset(call.args);
@@ -1858,6 +2064,340 @@ async function handlePreviewStatusBar(args: Record<string, unknown>, ctx: Mascot
     });
     if (!handled) return { name: NAME, success: false, error: "预览弹窗当前不可用（桌宠界面未挂载）" };
     return { name: NAME, success: true, data: `已弹出「${displayName}」的状态栏预览，用户可直接查看效果。` };
+}
+
+
+// ── 全局私聊邀请见面卡片 handlers ────────────────────
+
+async function handleReadMeetingInviteCard(): Promise<ToolResult> {
+    const NAME = "读取邀请见面卡片";
+    const { loadChatAppSettings, resolveMeetingInviteCardConfig } = await import("./chat-storage");
+    const cfg = resolveMeetingInviteCardConfig(loadChatAppSettings());
+    return {
+        name: NAME,
+        success: true,
+        data: [
+            `当前模式：${cfg.mode === "custom" ? "自定义 HTML（已启用）" : "Float 默认卡片"}`,
+            "",
+            "【当前触发契约】",
+            cfg.contract.trim() || "（空）",
+            "",
+            "【当前 HTML 渲染】",
+            cfg.renderHtml.trim() || "（空）",
+            "",
+            "【当前示例数据】",
+            cfg.previewRaw.trim() || "（空）",
+        ].join("\n"),
+    };
+}
+
+async function handleWriteMeetingInviteCard(args: Record<string, unknown>): Promise<ToolResult> {
+    const NAME = "写邀请见面卡片";
+    const contract = typeof args.contract === "string" ? args.contract.trim() : "";
+    const renderHtml = typeof args.renderHtml === "string" ? args.renderHtml.trim() : "";
+    const previewRaw = typeof args.previewRaw === "string" ? args.previewRaw.trim() : "";
+    if (!contract) return { name: NAME, success: false, error: "contract 不能为空" };
+    if (!renderHtml) return { name: NAME, success: false, error: "renderHtml 不能为空；邀请卡片支持并需要完整 HTML/CSS/JS" };
+    if (!previewRaw) return { name: NAME, success: false, error: "previewRaw 不能为空，否则无法确认卡片渲染效果" };
+    if (!/data-meeting-action\s*=\s*["']accept["']/i.test(renderHtml)
+        || !/data-meeting-action\s*=\s*["']decline["']/i.test(renderHtml)) {
+        return { name: NAME, success: false, error: "HTML 必须同时包含 data-meeting-action=\"accept\" 与 data-meeting-action=\"decline\"，否则同意/拒绝按钮无法执行" };
+    }
+    const { loadChatAppSettings, saveChatAppSettings } = await import("./chat-storage");
+    saveChatAppSettings({
+        ...loadChatAppSettings(),
+        meetingInviteCard: { mode: "custom", contract, renderHtml, previewRaw },
+    });
+    return {
+        name: NAME,
+        success: true,
+        data: `已保存并启用全局私聊邀请见面卡片（契约 ${contract.length} 字符、HTML 渲染 ${renderHtml.length} 字符）。可在“聊天 → 我的 → 全局聊天信息 → 邀请见面卡片 CSS 样式”继续修改。`,
+    };
+}
+
+async function handlePreviewMeetingInviteCard(): Promise<ToolResult> {
+    const NAME = "预览邀请见面卡片";
+    const { loadChatAppSettings, resolveMeetingInviteCardConfig } = await import("./chat-storage");
+    const cfg = resolveMeetingInviteCardConfig(loadChatAppSettings());
+    if (!cfg.renderHtml.trim()) return { name: NAME, success: false, error: "当前没有邀请卡片 HTML，请先用 写邀请见面卡片 写入" };
+    const { requestMeetingInvitePreview } = await import("./mascot-events");
+    const handled = requestMeetingInvitePreview({
+        displayName: cfg.mode === "custom" ? "当前自定义方案" : "Float 默认方案",
+        renderHtml: cfg.renderHtml,
+        previewRaw: cfg.previewRaw,
+    });
+    if (!handled) return { name: NAME, success: false, error: "预览弹窗当前不可用（桌宠界面未挂载）" };
+    return { name: NAME, success: true, data: "已弹出邀请见面卡片 HTML 预览，示例按钮仅展示样式，不会创建真实剧情。" };
+}
+
+
+// ── 剧情尾部方案 handlers ──────────────────────────────
+// 剧情 APP 的「状态栏方案」与「小剧场方案」：每角色多套、可切换启用。
+// 状态栏输出进下一轮上下文；小剧场默认仅展示（靠"不进上下文标签"剔除）。
+
+const STORY_SCHEME_TAG: Record<"status" | "theater", string> = {
+    status: "<story_status>",
+    theater: "<story_theater>",
+};
+
+const STORY_SCHEME_KIND_LABEL: Record<"status" | "theater", string> = {
+    status: "状态栏方案",
+    theater: "小剧场方案",
+};
+
+type StorySchemeTarget = {
+    sessionId: string;
+    displayName: string;
+    settings: StoryCharacterSettings;
+    repo: import("./story-storage").StorySchemeRepository;
+    schemes: StoryTailScheme[];
+    activeId: string;
+};
+
+async function storySchemeTarget(
+    args: Record<string, unknown>,
+    ctx: MascotToolContext,
+    toolName: string,
+): Promise<{ err: ToolResult; ok?: undefined } | { ok: StorySchemeTarget; err?: undefined }> {
+    const kind = parseStorySchemeKind(args.kind);
+    if (!kind) return { err: { name: toolName, success: false, error: "kind 必须是 status（状态栏）或 theater（小剧场）" } as ToolResult };
+    const resolved = await resolveStorySession(args.sessionName as string | undefined, ctx);
+    if ("error" in resolved) {
+        const hint = resolved.choices?.length ? `。可选：${resolved.choices.join("、")}` : "";
+        return { err: { name: toolName, success: false, error: resolved.error + hint } as ToolResult };
+    }
+    // 方案定义统一存于公用仓库（所有角色共享）；会话设置里只保留“启用哪一个”
+    const { loadStorySessions, loadStorySchemeRepository, STORY_DEFAULT_STATUS_SCHEME, STORY_DEFAULT_THEATER_SCHEME } = await import("./story-storage");
+    const session = loadStorySessions().find((item) => item.id === resolved.sessionId);
+    if (!session) return { err: { name: toolName, success: false, error: "找不到该剧情会话" } as ToolResult };
+    const settings = session.settings || {};
+    const repo = loadStorySchemeRepository();
+    const schemes = kind === "status" ? repo.statusSchemes : repo.theaterSchemes;
+    const activeId = (kind === "status" ? settings.activeStatusSchemeId : settings.activeTheaterSchemeId)
+        || (kind === "status" ? STORY_DEFAULT_STATUS_SCHEME.id : STORY_DEFAULT_THEATER_SCHEME.id);
+    return { ok: { sessionId: resolved.sessionId, displayName: resolved.displayName, settings, repo, schemes, activeId } };
+}
+
+function parseStorySchemeKind(value: unknown): "status" | "theater" | null {
+    return value === "status" || value === "theater" ? value : null;
+}
+
+/** 内置方案可能没存 renderHtml：读取时如实展示为空（剧情页渲染时对内置 id 会自动回退默认画布）。 */
+function storySchemeRenderHtml(scheme: StoryTailScheme): string {
+    if (scheme.renderHtml?.trim()) return scheme.renderHtml;
+    return "";
+}
+
+/** 保存公用方案仓库；activateId 存在时同时把该角色的启用选择切过去。 */
+async function persistStorySchemeRepo(
+    sessionId: string,
+    repo: import("./story-storage").StorySchemeRepository,
+    kind: "status" | "theater",
+    activateId: string | undefined,
+    settings: StoryCharacterSettings | undefined,
+): Promise<void> {
+    const { saveStorySchemeRepository, updateStorySession } = await import("./story-storage");
+    if (activateId && settings) {
+        updateStorySession(sessionId, {
+            settings: {
+                ...settings,
+                ...(kind === "status" ? { activeStatusSchemeId: activateId } : { activeTheaterSchemeId: activateId }),
+            },
+        });
+    }
+    // 保存仓库会派发 story-scheme-repo-updated；会话设置变化单独广播
+    saveStorySchemeRepository(repo);
+    if (activateId && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("story-session-settings-updated", { detail: { sessionId } }));
+    }
+}
+
+function findStorySchemeByName(schemes: StoryTailScheme[], name: string | undefined, activeId: string): StoryTailScheme | null {
+    if (!name?.trim()) return schemes.find((item) => item.id === activeId) || schemes[0] || null;
+    const trimmed = name.trim();
+    return schemes.find((item) => item.name === trimmed)
+        || schemes.find((item) => item.name.toLowerCase() === trimmed.toLowerCase())
+        || null;
+}
+
+async function handleListStorySchemes(args: Record<string, unknown>, ctx: MascotToolContext): Promise<ToolResult> {
+    const NAME = "列出剧情方案";
+    const resolved = await resolveStorySession(args.sessionName as string | undefined, ctx);
+    if ("error" in resolved) {
+        const hint = resolved.choices?.length ? `。可选：${resolved.choices.join("、")}` : "";
+        return { name: NAME, success: false, error: resolved.error + hint };
+    }
+    const { loadStorySessions, loadStorySchemeRepository, STORY_DEFAULT_STATUS_SCHEME, STORY_DEFAULT_THEATER_SCHEME } = await import("./story-storage");
+    const session = loadStorySessions().find((item) => item.id === resolved.sessionId);
+    if (!session) return { name: NAME, success: false, error: "找不到该剧情会话" };
+    const settings = session.settings || {};
+    const repo = loadStorySchemeRepository();
+    const activeStatusId = settings.activeStatusSchemeId || STORY_DEFAULT_STATUS_SCHEME.id;
+    const activeTheaterId = settings.activeTheaterSchemeId || STORY_DEFAULT_THEATER_SCHEME.id;
+    const fmt = (list: StoryTailScheme[], activeId: string) => list.map((item) => {
+        const mark = item.id === activeId ? "★启用" : "  ";
+        const summary = item.prompt.replace(/\s+/g, " ").trim().slice(0, 50);
+        return `${mark} ${item.name} — ${summary}${item.prompt.replace(/\s+/g, " ").trim().length > 50 ? "…" : ""}`;
+    });
+    const lines = [
+        `剧情会话：${resolved.displayName}`,
+        "",
+        `【状态栏方案】（内容进入下一轮上下文）`,
+        ...fmt(repo.statusSchemes, activeStatusId),
+        "",
+        `【小剧场方案】（默认仅展示、不进上下文）`,
+        ...fmt(repo.theaterSchemes, activeTheaterId),
+        "",
+        "提示：★ 是该角色当前启用的方案；全部方案保存在公用仓库、所有角色共享。看全文用 读取剧情方案；改内容用 更新剧情方案；换启用也用 更新剧情方案（activate=true）。",
+    ];
+    return { name: NAME, success: true, data: lines.join("\n") };
+}
+
+async function handleReadStoryScheme(args: Record<string, unknown>, ctx: MascotToolContext): Promise<ToolResult> {
+    const NAME = "读取剧情方案";
+    const r = await storySchemeTarget(args, ctx, NAME);
+    if (r.err) return r.err;
+    const kind = parseStorySchemeKind(args.kind)!;
+    const scheme = findStorySchemeByName(r.ok.schemes, args.schemeName as string | undefined, r.ok.activeId);
+    if (!scheme) {
+        return { name: NAME, success: false, error: `找不到方案「${args.schemeName}」。可先用 列出剧情方案 查看现有方案名。` };
+    }
+    const lines = [
+        `剧情会话：${r.ok.displayName}`,
+        `类别：${STORY_SCHEME_KIND_LABEL[kind]}${scheme.id === r.ok.activeId ? "（当前启用）" : ""}`,
+        `方案名：${scheme.name}`,
+        "",
+        "【输出契约】",
+        scheme.prompt.trim() || "（空）",
+        "",
+        "【输出渲染】",
+        storySchemeRenderHtml(scheme) || "（空）",
+        "",
+        "【示例数据】",
+        scheme.preview?.trim() || "（空）",
+    ];
+    return { name: NAME, success: true, data: lines.join("\n") };
+}
+
+async function handleCreateStoryScheme(args: Record<string, unknown>, ctx: MascotToolContext): Promise<ToolResult> {
+    const NAME = "创建剧情方案";
+    const kind = parseStorySchemeKind(args.kind);
+    if (!kind) return { name: NAME, success: false, error: "kind 必须是 status（状态栏）或 theater（小剧场）" };
+    const name = typeof args.name === "string" ? args.name.trim() : "";
+    const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+    const renderHtml = typeof args.renderHtml === "string" ? args.renderHtml.trim() : "";
+    const preview = typeof args.preview === "string" ? args.preview.trim() : "";
+    if (!name) return { name: NAME, success: false, error: "name 不能为空" };
+    if (!prompt) return { name: NAME, success: false, error: "prompt 不能为空" };
+    if (!renderHtml) return { name: NAME, success: false, error: "renderHtml 不能为空——契约与渲染缺一，方案画不出卡片" };
+    if (!preview) return { name: NAME, success: false, error: "preview 不能为空——没有示例数据，用户在设置页预览会一片空白" };
+    const tag = STORY_SCHEME_TAG[kind];
+    if (!prompt.includes(tag) || !prompt.includes(tag.replace("<", "</"))) {
+        return { name: NAME, success: false, error: `契约里必须出现成对的 ${tag} 与 ${tag.replace("<", "</")}：既要在契约里画出标签，也要明确要求 AI 把内容用这对标签包裹输出。缺了标签剧情解析不到块，方案等于没生效。` };
+    }
+    const r = await storySchemeTarget(args, ctx, NAME);
+    if (r.err) return r.err;
+    const { repo, schemes } = r.ok;
+    if (schemes.some((item) => item.name.toLowerCase() === name.toLowerCase())) {
+        return { name: NAME, success: false, error: `已存在同名方案「${name}」。想改内容请用 更新剧情方案；想另建一套请换个名字。` };
+    }
+    const id = `${kind === "status" ? "story_status" : "story_theater"}-${Date.now()}`;
+    const scheme: StoryTailScheme = { id, name, prompt, renderHtml, preview };
+    // 方案存入公用仓库（所有角色共享）；activate 只改这一个角色的启用选择
+    if (kind === "status") repo.statusSchemes = [...repo.statusSchemes, scheme];
+    else repo.theaterSchemes = [...repo.theaterSchemes, scheme];
+    const activate = args.activate !== false;
+    await persistStorySchemeRepo(r.ok.sessionId, repo, kind, activate ? id : undefined, r.ok.settings);
+    return {
+        name: NAME,
+        success: true,
+        data: `已在公用仓库创建${STORY_SCHEME_KIND_LABEL[kind]}「${name}」（所有角色可用），并为「${r.ok.displayName}」${activate ? "启用" : "保存（未启用）"}。用户可在 剧情 → 右上角设置 → 剧情尾部 里看到并继续手改。`,
+    };
+}
+
+async function handleUpdateStoryScheme(args: Record<string, unknown>, ctx: MascotToolContext): Promise<ToolResult> {
+    const NAME = "更新剧情方案";
+    const kind = parseStorySchemeKind(args.kind);
+    if (!kind) return { name: NAME, success: false, error: "kind 必须是 status（状态栏）或 theater（小剧场）" };
+    const r = await storySchemeTarget(args, ctx, NAME);
+    if (r.err) return r.err;
+    const { settings, repo, schemes, activeId } = r.ok;
+    const target = findStorySchemeByName(schemes, args.schemeName as string | undefined, activeId);
+    if (!target) {
+        return { name: NAME, success: false, error: `找不到方案「${args.schemeName || ""}」。可先用 列出剧情方案 查看现有方案名。` };
+    }
+    const updates: Partial<StoryTailScheme> = {};
+    const newName = typeof args.name === "string" ? args.name.trim() : "";
+    if (newName && newName !== target.name) {
+        if (schemes.some((item) => item.id !== target.id && item.name.toLowerCase() === newName.toLowerCase())) {
+            return { name: NAME, success: false, error: `已存在同名方案「${newName}」，改名会撞名。` };
+        }
+        updates.name = newName;
+    }
+    if (typeof args.prompt === "string" && args.prompt.trim()) {
+        const tag = STORY_SCHEME_TAG[kind];
+        if (!args.prompt.includes(tag) || !args.prompt.includes(tag.replace("<", "</"))) {
+            return { name: NAME, success: false, error: `新契约里必须出现成对的 ${tag} 与 ${tag.replace("<", "</")}，否则剧情解析不到块。` };
+        }
+        updates.prompt = args.prompt.trim();
+    }
+    if (typeof args.renderHtml === "string" && args.renderHtml.trim()) updates.renderHtml = args.renderHtml.trim();
+    if (typeof args.preview === "string" && args.preview.trim()) updates.preview = args.preview.trim();
+    if (!updates.name && !updates.prompt && !updates.renderHtml && !updates.preview && args.activate === undefined) {
+        return { name: NAME, success: false, error: "没有要改的字段：至少传 name/prompt/renderHtml/preview 之一，或传 activate 切换启用。" };
+    }
+    const nextSchemes = schemes.map((item) => item.id === target.id ? { ...item, ...updates } : item);
+    if (kind === "status") repo.statusSchemes = nextSchemes;
+    else repo.theaterSchemes = nextSchemes;
+    const activate = args.activate === true || (updates.prompt || updates.renderHtml || updates.preview) && target.id === activeId;
+    await persistStorySchemeRepo(r.ok.sessionId, repo, kind, activate ? target.id : undefined, settings);
+    const changed = Object.keys(updates).join("、") || "无字段改动";
+    return {
+        name: NAME,
+        success: true,
+        data: `已更新公用仓库里的${STORY_SCHEME_KIND_LABEL[kind]}「${target.name}」（改动：${changed}${activate ? `；已为「${r.ok.displayName}」设为启用方案` : ""}）。方案为所有角色共享，其他启用该方案的角色会一并生效。`,
+    };
+}
+
+async function handleDeleteStoryScheme(args: Record<string, unknown>, ctx: MascotToolContext): Promise<ToolResult> {
+    const NAME = "删除剧情方案";
+    const kind = parseStorySchemeKind(args.kind);
+    if (!kind) return { name: NAME, success: false, error: "kind 必须是 status（状态栏）或 theater（小剧场）" };
+    const r = await storySchemeTarget(args, ctx, NAME);
+    if (r.err) return r.err;
+    const { repo, schemes, activeId } = r.ok;
+    if (schemes.length <= 1) {
+        return { name: NAME, success: false, error: `公用仓库里每个类别至少要保留一个方案；当前只有 1 个${STORY_SCHEME_KIND_LABEL[kind]}，不能删。` };
+    }
+    const target = findStorySchemeByName(schemes, args.schemeName as string | undefined, activeId);
+    if (!target) {
+        return { name: NAME, success: false, error: `找不到方案「${args.schemeName || ""}」。可先用 列出剧情方案 查看现有方案名。` };
+    }
+    const nextSchemes = schemes.filter((item) => item.id !== target.id);
+    if (kind === "status") repo.statusSchemes = nextSchemes;
+    else repo.theaterSchemes = nextSchemes;
+    const nextActiveId = nextSchemes[0].id;
+    // 公用方案被删后，所有还选着它的角色都回落到剩余首个方案
+    const { loadStorySessions, updateStorySession } = await import("./story-storage");
+    for (const session of loadStorySessions()) {
+        const currentId = kind === "status" ? session.settings?.activeStatusSchemeId : session.settings?.activeTheaterSchemeId;
+        if (currentId !== target.id) continue;
+        updateStorySession(session.id, {
+            settings: {
+                ...session.settings,
+                ...(kind === "status" ? { activeStatusSchemeId: nextActiveId } : { activeTheaterSchemeId: nextActiveId }),
+            },
+        });
+        if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("story-session-settings-updated", { detail: { sessionId: session.id } }));
+        }
+    }
+    await persistStorySchemeRepo(r.ok.sessionId, repo, kind, undefined, undefined);
+    return {
+        name: NAME,
+        success: true,
+        data: `已从公用仓库删除${STORY_SCHEME_KIND_LABEL[kind]}「${target.name}」；所有角色共享该仓库，原本启用它的角色已自动切换为「${nextSchemes[0].name}」。`,
+    };
 }
 
 async function handleOverwriteCss(args: Record<string, unknown>, ctx: MascotToolContext): Promise<ToolResult> {

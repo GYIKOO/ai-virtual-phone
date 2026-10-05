@@ -28,7 +28,8 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
   let captured, contextOptions, saved = [user, director, reply];
   const engine = load('lib/story-engine.ts', {
     './story-instructions': instructions,
-    './character-storage': { loadCharacters: () => [{ id: 'char', name: '角色' }] },
+    './story-constraints': load('lib/story-constraints.ts'),
+    './character-storage': { loadCharacters: () => [{ id: 'char', name: '角色' }, { id: 'other', name: '配角' }] },
     './settings-storage': {
       loadBindingConfig: () => ({ characterBindings: [] }), resolveBinding: () => ({ apiConfigId: 'api', presetId: 'p' }),
       loadApiConfigs: () => [{ id: 'api' }], loadPresets: () => [{ id: 'p' }], loadRegexes: () => [], loadWorldBooks: () => [], resolveUserIdentity: () => ({ name: 'user' }),
@@ -41,7 +42,7 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
     './calendar-storage': { buildCalendarScheduleMarker: () => '', getCurrentCalendarScheduleForPrompt: () => '' },
     './calendar-utils': { getWeekStartIso: () => '' },
     './story-parser': { parseStoryResponse: rawText => ({ rawText, renderedText: '正文', summaryText: '事件' }) },
-    './story-storage': { loadStoryMessages: () => saved },
+    './story-storage': { loadStoryMessages: () => saved, resolveActiveStorySchemes: () => ({}) },
     './macro-engine': { MacroEngine: class {} },
   });
   await engine.generateStoryCompletion('char', [user, director], { retryInstruction: '不要下雨' });
@@ -55,5 +56,24 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
   assert.equal(saved.length, 3, 'building a retry must not delete saved history');
   await engine.generateStoryCompletion('char', [], { sessionId: 's' });
   assert.ok(contextOptions.excludeStoryMessageIds.includes('a'), 'first-reply retry with empty context still excludes old projection');
+  const combined = () => captured.map(m => m.content).join('\n');
+  await engine.generateStoryCompletion('char', saved, { participantIds: ['char', 'other'], settings: {} });
+  assert.match(combined(), /配角/);
+  assert.ok(!combined().includes('不要代替用户'));
+  assert.ok(!combined().includes('语音清单'));
+  await engine.generateStoryCompletion('char', saved, { settings: { preventUserControl: true, enforceVoiceFormat: true } });
+  assert.match(combined(), /不要代替用户/);
+  assert.match(combined(), /语音清单/);
+  await engine.generateStoryCompletion('char', saved, { settings: { preventUserControl: true, userAgencyPrompt: '自定义用户边界', enforceVoiceFormat: true, voiceFormatPrompt: '自定义语音格式', usePresetNarration: true } });
+  assert.match(combined(), /自定义用户边界/);
+  assert.match(combined(), /自定义语音格式/);
+  assert.ok(!combined().includes('不要代替用户'));
+  assert.ok(!combined().includes('正文长度以'));
+  await engine.generateStoryCompletion('char', saved, { settings: { preventUserControl: false, userAgencyPrompt: '不应发送的边界', enforceVoiceFormat: false, voiceFormatPrompt: '不应发送的格式' } });
+  assert.ok(!combined().includes('不应发送'));
+  await engine.generateStoryCompletion('char', [user, director], { participantIds: ['char', 'other'], settings: { enforceVoiceFormat: true }, storyMemory: { independent: true }, retryInstruction: '临时重试优先' });
+  assert.match(captured.at(-2).content, /镜头转向窗外/);
+  assert.match(captured.at(-1).content, /临时重试优先/);
+  console.log('PASS: multiplayer roster, default-off/editable constraints, preset narration and independent-branch director/retry');
   console.log('PASS: director lifetime, roleplay distinction, retry slicing, escaping, request-only guidance, projection exclusion and no destructive preparation');
 })().catch(error => { console.error(error); process.exitCode = 1; });

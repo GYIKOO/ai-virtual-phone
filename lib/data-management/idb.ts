@@ -221,10 +221,72 @@ function getStoreNames(db: IDBDatabase, source: IndexedDbSource): string[] {
   return source.stores?.filter((store) => all.includes(store)) ?? all;
 }
 
+function recordTimeMs(value: Record<string, unknown>): number | null {
+  const raw = value.createdAt;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw !== "string") return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+type ImageRangeResult = { skip: boolean; value: unknown };
+
+/**
+ * Build a backup-only copy with old dynamic images removed.
+ * Text, messages, posts and comments remain intact; the live IndexedDB record is never mutated.
+ * Avatars and desktop/theme assets live in other sources and deliberately bypass this filter.
+ */
+function filterOldDynamicImages(
+  dbName: string,
+  storeName: string,
+  value: unknown,
+  imageCutoffMs?: number,
+): ImageRangeResult {
+  if (!imageCutoffMs || !isRecord(value)) return { skip: false, value };
+  const createdAt = recordTimeMs(value);
+  if (createdAt === null || createdAt >= imageCutoffMs) return { skip: false, value };
+
+  if (dbName === "AiPhoneMediaCacheDB" && storeName === "entries") {
+    return value.mediaCategory === "image"
+      ? { skip: true, value }
+      : { skip: false, value };
+  }
+
+  if (dbName === "AiPhoneMomentsDB" && storeName === "posts" && typeof value.photoUrl === "string") {
+    const next = { ...value };
+    delete next.photoUrl;
+    return { skip: false, value: next };
+  }
+
+  if (dbName === "AiPhoneChatDB" && storeName === "messages") {
+    const mediaType = value.mediaType;
+    const mediaData = isRecord(value.mediaData) ? value.mediaData : null;
+    const isImageMessage = mediaType === "image"
+      || (mediaType === "media_file" && mediaData?.fileType === "image")
+      || (typeof value.mediaUrl === "string" && value.mediaUrl.startsWith("data:image/"));
+    const isImageShare = mediaType === "xiaohongshu_note_share"
+      && typeof mediaData?.xiaohongshuImageAssetId === "string";
+    if (!isImageMessage && !isImageShare) return { skip: false, value };
+
+    const next = { ...value };
+    const nextMediaData = mediaData ? { ...mediaData } : null;
+    if (isImageMessage) {
+      delete next.mediaUrl;
+      if (nextMediaData) delete nextMediaData.imageGenerationMediaRef;
+    }
+    if (isImageShare && nextMediaData) delete nextMediaData.xiaohongshuImageAssetId;
+    if (nextMediaData) next.mediaData = nextMediaData;
+    return { skip: false, value: next };
+  }
+
+  return { skip: false, value };
+}
+
 async function exportIndexedDbSource(
   source: IndexedDbSource,
   collector?: MediaCollector,
   excludeMedia = false,
+  imageCutoffMs?: number,
 ): Promise<IndexedDbSourceBackup> {
   const db = await openDb(source.dbName);
   if (!db) {
@@ -275,9 +337,11 @@ async function exportIndexedDbSource(
       for (let index = 0; index < rawRecords.length; index += 1) {
         const record = rawRecords[index];
         rawRecords[index] = undefined as unknown as StoreRecordBackup;
+        const filtered = filterOldDynamicImages(source.dbName, storeName, record.value, imageCutoffMs);
+        if (filtered.skip) continue;
         records.push({
           key: await serializeValue(record.key),
-          value: await serializeValue(record.value, collector, { excludeMedia }),
+          value: await serializeValue(filtered.value, collector, { excludeMedia }),
         });
       }
 
@@ -357,8 +421,13 @@ async function exportLocalStorageSource(source: LocalStorageSource, collector?: 
   return { type: "localStorage", records };
 }
 
-export async function exportSource(source: DataSource, collector?: MediaCollector, excludeMedia = false): Promise<SourceBackup> {
-  if (source.type === "indexeddb") return exportIndexedDbSource(source, collector, excludeMedia);
+export async function exportSource(
+  source: DataSource,
+  collector?: MediaCollector,
+  excludeMedia = false,
+  imageCutoffMs?: number,
+): Promise<SourceBackup> {
+  if (source.type === "indexeddb") return exportIndexedDbSource(source, collector, excludeMedia, imageCutoffMs);
   if (source.type === "kv") return exportKvSource(source, collector);
   return exportLocalStorageSource(source, collector);
 }

@@ -7,6 +7,8 @@ export type ChatMessageNoticeDetail = {
   senderName?: string;
   avatar?: string | null;
   isGroup?: boolean;
+  /** 提示音设置的“测试弹窗”：即使正在查看该会话也照样弹出横幅 */
+  isTest?: boolean;
 };
 
 export function dispatchChatMessageNotice(detail: ChatMessageNoticeDetail): void {
