@@ -11,6 +11,7 @@ import { saveStatusRegionConfig } from "./chat-status-region";
 import { setSessionKeyboardAutoSendDebounce, setSessionKeyboardAutoSendEnabled } from "./keyboard-auto-send-config";
 import { PENDING_REPLY_PREFIX } from "./friend-request-engine";
 import { kvRemove } from "./kv-db";
+import { removeProactive } from "./proactive-storage";
 
 // 与 chat-room.tsx 里的同名常量保持一致（备份模块 data-management/modules.ts 也在用同样的字面量）
 const GENERATING_PREFIX = "chat-generating:";
@@ -21,6 +22,7 @@ export function removeChatSessionCompletely(sessionId: string): void {
     // 先掐掉可能还在往会话里写消息的后台任务
     cancelBackgroundGeneration(sessionId);
     cancelFollowUp(sessionId);
+    removeProactive(sessionId);
     clearTimedWakeSchedule(sessionId);
 
     // 会话本体 + 线上消息 + 线下记录

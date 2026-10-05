@@ -30,6 +30,8 @@ import {
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
 import { loadFollowUpConfig } from "./settings-storage";
+import { loadProactive, PROACTIVE_UPDATED } from "./proactive-storage";
+import { cancelLegacyAmbient, cancelNewProactive, isNewProactiveGenerating, pollNewProactive, resetProactiveOnUserMessage, schedulePersonalityFollowUp } from "./proactive-service";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status-region";
@@ -85,6 +87,7 @@ function resolveTimedWakeElapsedMinutes(sched: TimedWakeSchedule, history: ChatM
 
 // ── Module state ───────────────────────────────────────────
 let stopInterval: (() => void) | null = null;
+let proactiveUpdateHandler: ((event: Event) => void) | null = null;
 let periodCareUpdateHandler: (() => void) | null = null;
 const firingSet = new Set<string>(); // sessions currently mid-API-call
 const cancelledWhileFiring = new Set<string>(); // cancelled during in-flight API call
@@ -98,10 +101,11 @@ const cancelledBackgroundSessions = new Set<string>();
 
 /** 该会话是否正有后台回复在生成（聊天室中途挂载时用来恢复输入中状态）。 */
 export function isBackgroundReplyGenerating(sessionId: string): boolean {
-    return backgroundGeneratingSessions.has(sessionId);
+    return backgroundGeneratingSessions.has(sessionId) || isNewProactiveGenerating(sessionId);
 }
 
 export function cancelBackgroundGeneration(sessionId: string): void {
+    cancelNewProactive(sessionId);
     if (!backgroundGeneratingSessions.has(sessionId) && !firingSet.has(sessionId)) return;
     cancelledBackgroundSessions.add(sessionId);
     if (firingSet.has(sessionId)) cancelledWhileFiring.add(sessionId);
@@ -129,6 +133,13 @@ export function startFollowUpService() {
     extendScheduledOutboxGrace();
     stopInterval = bgSetInterval(pollSchedules, POLL_INTERVAL_MS);
     if (typeof window !== "undefined") {
+        for (const session of loadChatSessions()) if (loadProactive(session.id)) cancelLegacyAmbient(session.id);
+        proactiveUpdateHandler = (event: Event) => {
+            const sessionId = (event as CustomEvent<{ sessionId: string }>).detail.sessionId;
+            cancelLegacyAmbient(sessionId);
+            if (firingSet.has(sessionId)) cancelledWhileFiring.add(sessionId);
+        };
+        window.addEventListener(PROACTIVE_UPDATED, proactiveUpdateHandler);
         periodCareUpdateHandler = () => {
             lastPeriodCarePollAt = 0;
             pollMenstrualPeriodCare(Date.now());
@@ -147,6 +158,9 @@ export function startFollowUpService() {
 
 export function stopFollowUpService() {
     if (stopInterval) { stopInterval(); stopInterval = null; }
+    if (typeof window !== "undefined" && proactiveUpdateHandler) window.removeEventListener(PROACTIVE_UPDATED, proactiveUpdateHandler);
+    proactiveUpdateHandler = null;
+    for (const session of loadChatSessions()) cancelNewProactive(session.id);
     if (typeof window !== "undefined" && periodCareUpdateHandler) {
         window.removeEventListener("menstrual-period-care-updated", periodCareUpdateHandler);
         periodCareUpdateHandler = null;
@@ -170,6 +184,14 @@ export function stopFollowUpService() {
 /** Schedule a follow-up for a session (called by ChatRoom after AI replies).
  *  Purely anxiety-driven: no anxiety field or below threshold → no follow-up. */
 export function scheduleFollowUp(sessionId: string, count: number, stateValues?: StateValue[]) {
+    if (loadProactive(sessionId)) {
+        clearFollowUpSchedule(sessionId);
+        cancelFollowUpBailout(sessionId);
+        // New follow-up counters are maintained by the new scheduler; legacy batch
+        // counts (including outbox reply batches) are not proactive attempt counts.
+        schedulePersonalityFollowUp(sessionId);
+        return;
+    }
     const config = loadFollowUpConfig();
 
     // 会话级主动消息开关：关闭的会话不再排任何追发（在创建侧掐断，不留幽灵调用）
@@ -257,6 +279,7 @@ export async function requestBackgroundChatReply(sessionId: string): Promise<{ o
 
 /** Cancel any pending follow-up for a session (called when user sends a message). */
 export function cancelFollowUp(sessionId: string) {
+    resetProactiveOnUserMessage(sessionId);
     clearFollowUpSchedule(sessionId);
     cancelFollowUpBailout(sessionId);
     // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约
@@ -275,6 +298,7 @@ export function cancelFollowUp(sessionId: string) {
  * 覆盖追发、定时唤醒、冷场重连三条主动源；经期关怀只在开火时 gate，无需预约撤销。
  */
 export function cancelProactiveForSession(sessionId: string): void {
+    cancelNewProactive(sessionId);
     clearFollowUpSchedule(sessionId);
     cancelFollowUpBailout(sessionId);
     for (const sched of loadTimedWakeSchedules().filter(s => s.sessionId === sessionId)) {
@@ -395,6 +419,7 @@ function pollSchedules() {
         pollTimedWakeSchedules(now);
         pollMenstrualPeriodCare(now);
         pollIdleReconnect(now);
+        if (now >= scheduledOutboxGraceUntil) pollNewProactive(now, sessionId => backgroundGeneratingSessions.has(sessionId) || firingSet.has(sessionId));
     } catch (e) {
         console.error("[FollowUp] pollSchedules error:", e);
     }
@@ -460,7 +485,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
     try {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === sched.sessionId);
-        if (!session) return;
+        if (!session || session.proactiveDisabled || loadProactive(session.id)) return;
 
         const latestMessages = loadChatMessages(session.id);
 
@@ -571,6 +596,7 @@ function pollIdleReconnect(now: number) {
     lastIdleReconnectPollAt = now;
 
     for (const rule of loadIdleReconnectRules()) {
+        if (loadProactive(rule.sessionId)) continue;
         if (idleReconnectFiringSet.has(rule.id)) continue;
         if (firingSet.has(rule.sessionId)) continue;
         // 追问链正在管这个会话时不叠加打扰
@@ -608,7 +634,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         // 本地接手当前这次生成，先撤销服务端同规则排队任务；生成成功后才记连发次数。
         void cancelBailoutPrefix(`idle:${rule.id}:`);
         // 会话级主动消息开关：服务端兜底已撤销，本地这一轮也静默丢弃
-        if (session.proactiveDisabled) return;
+        if (session.proactiveDisabled || loadProactive(session.id)) return;
 
         const latestMessages = loadChatMessages(session.id);
         const elapsedMinutes = Math.max(1, Math.round((Date.now() - lastUserAt) / 60000));
@@ -625,7 +651,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             },
         );
 
-        if (isBackgroundGenerationCancelled(session.id)) {
+        if (isBackgroundGenerationCancelled(session.id) || loadProactive(session.id)) {
             const intervalMs = Math.max(1, rule.intervalMinutes) * 60_000;
             const suppressed = suppressIdleReconnectUntil(rule.id, Date.now() + intervalMs);
             if (suppressed) void armIdleReconnectBailout(suppressed);

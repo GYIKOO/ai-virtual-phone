@@ -37,7 +37,6 @@ import {
     type GroupAdminAction,
 } from "@/lib/group-admin";
 import { clearChatOfflineTurns } from "@/lib/chat-offline-storage";
-import { cancelProactiveForSession } from "@/lib/follow-up-service";
 import { removeChatSessionCompletely } from "@/lib/chat-session-remove";
 import { triggerDeleteFriendReaction } from "@/lib/friend-request-engine";
 import { loadCharacters, saveCharacters } from "@/lib/character-storage";
@@ -52,7 +51,7 @@ import { getSchemes, saveScheme, deleteScheme, type CSSScheme } from "@/lib/css-
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { KeyboardAutoSendDebounceItem } from "@/components/chat/keyboard-auto-send-debounce-item";
 import { SessionChatSoundsSection } from "@/components/chat/session-chat-sounds";
-import { BellOff, ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, Ban, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, Camera, RefreshCw, type LucideIcon } from "lucide-react";
+import { ChevronRight, Image as ImageIcon, Video, Mic, UserMinus, UserPlus, Users, Pin, Ban, MessageSquare, Search, AlertCircle, Code, Laptop, Trash2, Smile, Sparkles, X, Play, Upload, Download, Save, FolderOpen, Camera, RefreshCw, type LucideIcon } from "lucide-react";
 import { BINDING_ACCENTS, CONTENT_APP_ACCENTS } from "@/lib/ui-accent-colors";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
 import { ConfirmDialog } from "@/components/ui/modal";
@@ -332,7 +331,6 @@ export function ChatSettingsPanel({
     const [videoBackground, setVideoBackground] = useState<string>(session.videoBackground || "");
     const [voiceBackground, setVoiceBackground] = useState<string>(session.voiceBackground || "");
     const [isPinned, setIsPinned] = useState(session.isPinned || false);
-    const [proactiveAllowed, setProactiveAllowed] = useState(session.proactiveDisabled !== true);
     // 仿真拉黑：拉黑期间用户发出的消息会被对方拒收（仿微信红色感叹号）
     const [isBlacklisted, setIsBlacklisted] = useState(session.isBlacklisted || false);
     // 自定义状态栏（状态区）
@@ -1308,23 +1306,6 @@ export function ChatSettingsPanel({
                             </div>
                         </div>
                     )}
-                    <div className="menu-item">
-                        <ChatInfoIcon icon={BellOff} color={BINDING_ACCENTS.preset} />
-                        <div className="menu-label-group">
-                            <span className="menu-label">允许主动消息</span>
-                            <span className="menu-desc">关闭后此会话不再触发追发与定时主动联系</span>
-                        </div>
-                        <div className="menu-right">
-                            <Toggle checked={proactiveAllowed} onChange={c => {
-                                setProactiveAllowed(c);
-                                updateSession({ proactiveDisabled: c ? undefined : true });
-                                if (!c) {
-                                    // 关闭时同步清掉本地排队计划与服务端兜底预约，立即生效
-                                    cancelProactiveForSession(session.id);
-                                }
-                            }} />
-                        </div>
-                    </div>
                     <div className="menu-item">
                         <ChatInfoIcon icon={ImageIcon} color={BINDING_ACCENTS.api} />
                         <div className="menu-label-group">

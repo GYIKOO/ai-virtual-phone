@@ -61,7 +61,7 @@ function buildStorySettingsPrompt(settings: StoryCharacterSettings | undefined, 
   const minChars = Math.max(50, Math.min(10000, settings.minChars ?? 800));
   const maxChars = Math.max(minChars, Math.min(10000, settings.maxChars ?? 1500));
   const perspective = settings.userPerspective === "third"
-    ? "使用第三人称“TA”称呼用户"
+    ? "使用第三人称称呼用户（TA/他/她，按用户设定选用）"
     : settings.userPerspective === "username"
       ? `使用用户名“${userName}”称呼用户`
       : "使用第二人称“你”称呼用户";

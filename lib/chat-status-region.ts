@@ -3,7 +3,7 @@
 //
 // 机制：默认预设的「内心想法」章节改为宏 {{statusRegionSection}}（主动消息示例行
 // 对应 {{statusRegionExampleLine}}），按本模块的会话配置解析：
-//   native（默认）→ 原章节文本，字节级等于历史版本，所有存量用户无感；
+//   native（默认）→ 内置默认章节；新版单聊使用「跟进意愿」；
 //   off           → 空，整节从提示词消失，AI 自然不再输出 [内心]；
 //   custom        → 「## 状态栏」+ 契约整段正文（契约自带【逻辑】【格式】与包裹要求）。
 // 只有包含宏的预设（默认预设天生包含；社区预设作者可自愿声明）支持自定义——
@@ -49,13 +49,14 @@ export const STATUS_REGION_EXAMPLE_MACRO = "{{statusRegionExampleLine}}";
 export const STATUS_REGION_COMPOSITION_MACRO = "{{statusRegionComposition}}";
 export const STATUS_REGION_FULL_EXAMPLE_MACRO = "{{statusRegionFullExample}}";
 
-/** 原「## 状态数值」+「## 内心想法」章节原文——native 挡解析值，必须与历史版本逐字一致。
+/** 「## 状态数值」+「## 内心想法」默认章节——只影响 native 宏，不改写用户的 custom 契约。
  *  状态数值也归入状态区：关闭原生后 [好感度:X] 等标签一并从提示词移除（好感度等会话状态随之停更）。 */
 export const NATIVE_STATUS_REGION_SECTION = [
     "## 状态数值",
     "【逻辑】基于当前状态 {{state}}，根据本轮对话的情绪起伏进行实时增减（范围 0-100）。",
-    "【格式】[好感度:X][占有欲:X][焦虑值:X]",
-    "【示例】[好感度:85][占有欲:60][焦虑值:45]",
+    "跟进意愿按本轮交流评估（0-100）：角色针对当前话题，继续补充、确认或推动交流的意愿。结合角色的性格、自身目标、话题内容、事情的时效性，以及与对方已有的关系和相处习惯判断。关系影响哪些事值得再次开口：亲近的人之间，日常琐事、玩笑和期待分享的反应也可能成为跟进理由；较疏远或以事务往来为主的关系，跟进可能更侧重具体事项。具体分寸随人设与双方的相处方式而变化。每轮根据仍想交流的内容重新给出数值；事情已解决、告别或暂时各忙各的时可以归零，有想补充、确认或继续分享的内容时相应提高。",
+    "【格式】[好感度:X][占有欲:X][跟进意愿:X]",
+    "【示例】[好感度:85][占有欲:60][跟进意愿:45]",
     "",
     "## 内心想法",
     "【逻辑】反映角色在回复前的真实心理活动、潜台词或情绪波动。",
@@ -82,7 +83,7 @@ export const NATIVE_STATUS_REGION_SECTION_GROUP = [
 /** 主动消息类条目里的静默输出格式原文（静默行+状态值行+内心行整块归宏） */
 export const NATIVE_STATUS_REGION_EXAMPLE_LINE = [
     "如果决定静默，按照以下格式输出：",
-    "[好感度:X][占有欲:X][焦虑值:X]",
+    "[好感度:X][占有欲:X][跟进意愿:X]",
     "[内心]你的所有内心想法写在这里。[/内心]",
 ].join("\n");
 
@@ -92,8 +93,8 @@ export const NATIVE_STATUS_REGION_COMPOSITION =
 
 /** 「## 完整示例」里的状态值+内心两行原文 */
 export const NATIVE_STATUS_REGION_FULL_EXAMPLE = [
-    "[好感度:72][占有欲:25][焦虑值:15]",
-    "[内心]等了{{user}}一整晚，回复这么冷淡，心里有点堵得慌。[/内心]",
+    "[好感度:72][占有欲:25][跟进意愿:15]",
+    "[内心]这件事聊得差不多了，接下来先去忙自己的安排。[/内心]",
 ].join("\n");
 
 export const DEFAULT_STATUS_REGION_CONFIG: StatusRegionConfig = {

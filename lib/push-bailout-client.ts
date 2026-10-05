@@ -259,6 +259,7 @@ export async function armFollowUpBailout(
     delaySec: number,
     fireAt: number,
 ): Promise<void> {
+    if ((await import("./proactive-storage")).loadProactive(sessionId)) return;
     if (!bailoutEnabled()) return;
     try {
         if (!(await hasAccountPushSubscription())) return;
@@ -288,6 +289,7 @@ export async function armFollowUpBailout(
         // 组装耗时不短——上传前复核排期还在且没被改过（用户可能已回复触发了取消）
         const latestSchedule = loadFollowUpSchedule(sessionId);
         if (!latestSchedule || latestSchedule.count !== prevCount || Math.abs(latestSchedule.fireAt - fireAt) > 1000) return;
+        if ((await import("./proactive-storage")).loadProactive(sessionId)) return;
 
         await pushJobsFetch({
             method: "POST",
@@ -396,6 +398,7 @@ function buildQuietWindowMeta(): { startMin: number; endMin: number; tzOffsetMin
 /** 冷场重连兜底：按「用户最后一条消息 + 间隔」预约服务端触发；
  *  服务端触发一次后会自动排下一发（连发上限内），用户回复后客户端重挂新周期。 */
 export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<BailoutArmResult> {
+    if ((await import("./proactive-storage")).loadProactive(rule.sessionId)) return { ok: false, reason: "该会话已切换到新版主动消息" };
     if (!bailoutEnabled()) return { ok: false, reason: "当前环境不支持服务端离线预约" };
     try {
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
@@ -446,6 +449,7 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         //（旧连发序号、服务端续排的 "+" 后缀键）。之前是先清后挂，切后台/杀进程
         // 发生在清理和重挂之间会把预约整个删空——服务端从此无单可执行。
         const triggerKey = `idle:${rule.id}:${effectiveConsecutive}`;
+        if ((await import("./proactive-storage")).loadProactive(rule.sessionId)) return { ok: false, reason: "主动消息设置已变更" };
         const posted = await postBailoutJob({
             triggerKey,
             kind: "timed_task",
@@ -468,6 +472,10 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
             },
         });
         if (!posted) return { ok: false, reason: "服务端预约接口没有确认成功" };
+        if ((await import("./proactive-storage")).loadProactive(rule.sessionId)) {
+            await cancelBailoutPrefix(`idle:${rule.id}:`);
+            return { ok: false, reason: "主动消息设置已变更，旧预约已撤销" };
+        }
         // 清理不阻塞结果：新单已挂稳；旧键偶尔清不掉，下次任一重挂时机会再清
         void cancelBailoutPrefix(`idle:${rule.id}:`, triggerKey);
         // 服务端是"生成完才插入下一轮续排任务"——上面的清理可能赶在插入前跑完，

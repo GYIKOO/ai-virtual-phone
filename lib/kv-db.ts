@@ -188,6 +188,13 @@ export function kvGet(key: string): string | null {
     return null;
 }
 
+/** Refresh one key after acquiring a cross-tab lock; ordinary reads stay synchronous. */
+export async function kvRefresh(key: string): Promise<void> {
+    const row = await kvDb.entries.get(key);
+    if (row) _cache.set(key, row.value);
+    else _cache.delete(key);
+}
+
 // ── Write: update cache + fire-and-forget to IDB ──
 export function kvSet(key: string, value: string): void {
     _cache.set(key, value);

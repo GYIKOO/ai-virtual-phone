@@ -1119,6 +1119,8 @@ type LegacyOverride = {
 // --- Follow-up Config ──────────────────────────────────────────
 
 export type FollowUpConfig = {
+    followUpFieldName: string;  // New scheduler: independent of legacy anxiety state.
+    maxConsecutive: number;
     prompt: string;              // 追发提示词，支持 {{count}} {{delay}} 占位符
     anxietyThreshold: number;    // 触发阈值（默认 50，0-100）
     anxietyFieldName: string;    // 状态值字段名（默认 "焦虑值"）
@@ -1140,6 +1142,8 @@ export function getDefaultFollowUpConfig(): FollowUpConfig {
         prompt: DEFAULT_FOLLOW_UP_PROMPT,
         anxietyThreshold: 50,
         anxietyFieldName: "焦虑值",
+        followUpFieldName: "跟进意愿",
+        maxConsecutive: 3,
         anxietyMinDelay: 15,
         anxietyMaxDelay: 180,
     };
@@ -1162,6 +1166,8 @@ export function loadFollowUpConfig(): FollowUpConfig {
             prompt: typeof parsed.prompt === "string" && parsed.prompt.trim() ? parsed.prompt : defaults.prompt,
             anxietyThreshold: typeof parsed.anxietyThreshold === "number" ? Math.max(0, Math.min(100, parsed.anxietyThreshold)) : defaults.anxietyThreshold,
             anxietyFieldName: typeof parsed.anxietyFieldName === "string" && parsed.anxietyFieldName.trim() ? parsed.anxietyFieldName : defaults.anxietyFieldName,
+            followUpFieldName: typeof parsed.followUpFieldName === "string" && parsed.followUpFieldName.trim() ? parsed.followUpFieldName.trim() : defaults.followUpFieldName,
+            maxConsecutive: typeof parsed.maxConsecutive === "number" && Number.isFinite(parsed.maxConsecutive) ? Math.round(Math.max(0, Math.min(10, parsed.maxConsecutive))) : defaults.maxConsecutive,
             anxietyMinDelay: typeof parsed.anxietyMinDelay === "number" ? Math.max(5, Math.min(300, parsed.anxietyMinDelay)) : defaults.anxietyMinDelay,
             anxietyMaxDelay: typeof parsed.anxietyMaxDelay === "number" ? Math.max(15, Math.min(600, parsed.anxietyMaxDelay)) : defaults.anxietyMaxDelay,
         };

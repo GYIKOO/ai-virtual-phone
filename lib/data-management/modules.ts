@@ -105,6 +105,7 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
           "weixin_cloud_sync_config_v1",
           "ai_phone_agent_computer_cfg_v1",
           "ai_phone_idle_reconnect_rules_v1",
+          "ai_phone_proactive_v1",
           "ai_phone_qa_feedback_v1",
           "ai_phone_qa_github_v1",
           "ai_phone_media_maintenance_config_v1",

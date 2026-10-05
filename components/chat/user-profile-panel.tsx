@@ -23,6 +23,7 @@ import { StickerManager } from "./sticker-manager";
 import { ChatPluginManager } from "./chat-plugin-manager";
 import { ChatPluginPageBoundary } from "./chat-plugin-page-boundary";
 import { GlobalChatInfoSettings } from "./global-chat-info-settings";
+import { ProactiveManager } from "./proactive-manager";
 import { WalletPanel } from "./wallet-panel";
 import { loadMomentsConfig, saveMomentsConfig, DEFAULT_MOMENTS_CONFIG, type MomentsInteractionConfig, getAllPosts } from "@/lib/moments-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
@@ -157,6 +158,7 @@ function isBrowserNotificationGranted(): boolean {
    ══════════════════════════════════════════ */
 export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) {
     const [showFollowUpEditor, setShowFollowUpEditor] = useState(false);
+    const [showProactiveManager, setShowProactiveManager] = useState(false);
     const [showApiLog, setShowApiLog] = useState(false);
     const [showStickerManager, setShowStickerManager] = useState(false);
     const [showPluginManager, setShowPluginManager] = useState(false);
@@ -303,7 +305,10 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     };
 
     if (showFollowUpEditor) {
-        return <FollowUpSettingsEditor onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowFollowUpEditor(false); }} />;
+        return <FollowUpSettingsEditor onBack={() => { setShowFollowUpEditor(false); setShowProactiveManager(true); }} />;
+    }
+    if (showProactiveManager) {
+        return <ProactiveManager onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowProactiveManager(false); }} onLegacy={() => { setShowProactiveManager(false); setShowFollowUpEditor(true); }} />;
     }
     if (showPushSettings) {
         return <OfflinePushSettingsPage onBack={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: false })); setShowPushSettings(false); }} />;
@@ -482,11 +487,11 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                     {/* 主动消息 */}
                     <div className="mx-4 mb-4 bg-[var(--c-card)] rounded-2xl px-4 py-1 flex flex-col"
                          style={{ boxShadow: "0 8px 24px rgba(0,0,0,0.025)" }}>
-                        <button className="flex items-center gap-3 py-3.5 w-full" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowFollowUpEditor(true); }}>
+                        <button className="flex items-center gap-3 py-3.5 w-full" onClick={() => { window.dispatchEvent(new CustomEvent("chat-hide-tabbar", { detail: true })); setShowProactiveManager(true); }}>
                             <Send size={18} className="text-[var(--c-icon)] opacity-70" strokeWidth={1.25}/>
                             <div className="flex flex-col flex-1 text-left gap-0.5">
-                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">追发规则与延迟控制</span>
-                                <span className="ts-11 text-[var(--c-text)] opacity-70">设定角色的主动回复频率与时间间隔</span>
+                                <span className="ts-14 font-semibold text-[var(--c-text-title)]">主动消息</span>
+                                <span className="ts-11 text-[var(--c-text)] opacity-70">集中管理角色与群聊的开关、频率和追发倾向</span>
                             </div>
                             <ChevronRight size={16} className="text-[var(--c-icon)] opacity-50" />
                         </button>
@@ -642,22 +647,23 @@ function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
     };
 
     return (
-        <PageShell title="追发设置" onBack={onBack} className="absolute inset-0 z-[100]">
+        <PageShell title="追发规则" onBack={onBack} className="absolute inset-0 z-[100]">
             <div className="page-menu profile-settings-menu">
+                <p className="menu-group-desc mx-2">角色的人设倾向与本轮跟进意愿共同决定是否追发。这里只调整全局边界，不改变角色的人设。次数上限为0时关闭新版追发。</p>
                 <p className="menu-group-desc mx-2">
-                    延迟计算：焦虑值={config.anxietyThreshold} → {config.anxietyMaxDelay}秒，焦虑值=100 → {config.anxietyMinDelay}秒，中间线性插值。焦虑值&lt;{config.anxietyThreshold}时不追发。
+                    跟进意愿越高，等待通常越短；克制的角色门槛更高、等待更久。实际等待保持在设置的范围内，免打扰可能使发送顺延。没有本轮明确输出的数值时不追发。
                 </p>
                 <div className="menu-group">
                     <div className="menu-item">
                         <ProfileSettingsIcon icon={SlidersHorizontal} color={BINDING_ACCENTS.preset} />
                         <div className="menu-label-group">
                             <span className="menu-label">状态值字段名</span>
-                            <span className="menu-desc">用于读取角色状态中的焦虑值</span>
+                            <span className="menu-desc">新版读取本轮明确输出的字段；自定义预设需使用相同名称</span>
                         </div>
                         <div className="menu-right">
                             <input
-                                value={config.anxietyFieldName}
-                                onChange={e => updateConfig({ anxietyFieldName: e.target.value })}
+                                value={config.followUpFieldName}
+                                onChange={e => updateConfig({ followUpFieldName: e.target.value })}
                                 className="w-[100px] text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent"
                             />
                         </div>
@@ -665,7 +671,7 @@ function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
                     <ProfileSettingsSliderItem
                         icon={Heart}
                         color={CONTENT_APP_ACCENTS.moments}
-                        label="焦虑阈值"
+                        label="跟进门槛"
                         desc={`低于 ${config.anxietyThreshold} 时不触发追发`}
                         value={config.anxietyThreshold}
                         valueLabel={`${config.anxietyThreshold}%`}
@@ -678,7 +684,7 @@ function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
                         icon={Clock}
                         color={CONTENT_APP_ACCENTS.calendar}
                         label="最短等待"
-                        desc="焦虑=100时使用"
+                        desc="意愿很强时的等待下限"
                         value={config.anxietyMinDelay}
                         valueLabel={`${config.anxietyMinDelay}秒`}
                         min={5}
@@ -690,7 +696,7 @@ function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
                         icon={Clock}
                         color={BINDING_ACCENTS.voice}
                         label="最长等待"
-                        desc="焦虑=阈值时使用"
+                        desc="接近触发门槛时的等待上限"
                         value={config.anxietyMaxDelay}
                         valueLabel={`${config.anxietyMaxDelay}秒`}
                         min={15}
@@ -700,6 +706,16 @@ function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
                     />
                 </div>
 
+                <div className="menu-group">
+                    <ProfileSettingsSliderItem icon={SlidersHorizontal} color={BINDING_ACCENTS.preset}
+                        label="连续追发上限" desc="用户回复前最多追发几轮；人设可能允许更少。0为关闭。"
+                        value={config.maxConsecutive} valueLabel={`${config.maxConsecutive}次`} min={0} max={10} step={1}
+                        onChange={v => updateConfig({ maxConsecutive: v })} />
+                </div>
+                <details className="mx-2"><summary className="menu-desc">旧机制兼容设置</summary>
+                    <p className="menu-desc">尚未切换新版的会话仍读取下方字段，门槛与等待范围共用。旧数值不会自动当作新版跟进意愿。</p>
+                    <input aria-label="旧机制状态字段" className="ui-input" value={config.anxietyFieldName} onChange={e => updateConfig({ anxietyFieldName: e.target.value })} />
+                </details>
                 {/* Reset button */}
                 <div className="menu-group">
                     <button className="menu-item" onClick={handleResetDefaults}>

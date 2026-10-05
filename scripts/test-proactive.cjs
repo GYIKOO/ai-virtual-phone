@@ -1,0 +1,137 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const ts = require('typescript');
+function load(file, dependencies = {}, globals = {}) {
+  const exports = {};
+  const compiled = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
+  vm.runInNewContext(compiled.outputText, { exports, require: key => {
+    if (!(key in dependencies)) throw new Error(`Missing mock: ${key}`);
+    return dependencies[key];
+  }, console, AbortController, ...globals });
+  return exports;
+}
+const p = load('lib/proactive-policy.ts');
+const clock = load('lib/proactive-clock.ts', { './proactive-policy': p });
+const followup = load('lib/proactive-followup.ts');
+const rules = { followUpFieldName: '跟进意愿', maxConsecutive: 3, anxietyThreshold: 50, anxietyMinDelay: 15, anxietyMaxDelay: 180 };
+assert.equal(followup.followUpDelay(4, undefined, 0, rules), null);
+assert.equal(followup.followUpDelay(0, 100, 0, rules), null);
+assert.equal(followup.followUpDelay(1, 60, 0, rules), null);
+assert.notEqual(followup.followUpDelay(4, 60, 0, rules), null);
+assert.equal(followup.followUpDelay(4, 100, 3, rules), null);
+assert.equal(followup.followUpDelay(4, 100, 0, { ...rules, maxConsecutive: 0 }), null);
+for (let tier = 1; tier <= 4; tier++) for (let value = 0; value <= 100; value++) {
+  const delay = followup.followUpDelay(tier, value, 0, rules);
+  assert.ok(delay === null || (delay >= 15 && delay <= 180));
+}
+const config = { ...p.defaultProactiveConfig(), enabled: true, personalityEnabled: true };
+const oldDefault = "这是一次自主交流机会，不是用户发来的新消息。根据角色设定、已有关系、当前生活和对话情境，决定是否有想说的内容。关系不默认是恋爱或亲密关系；未收到回复本身不代表冷落或需要催促。可以分享、讨论、告知或延续有意义的话题，也可以保持沉默。群聊成员可以彼此交流，不必围绕用户或等待用户回复；本次只进行一小轮交流。";
+assert.equal(p.normalizeProactiveConfig({ instruction: oldDefault }).instruction, p.DEFAULT_PROACTIVE_INSTRUCTION);
+assert.equal(p.normalizeProactiveConfig({ instruction: '我的自定义提示词' }).instruction, '我的自定义提示词');
+assert.equal(p.normalizeProactiveConfig({ instruction: '' }).instruction, '');
+assert.ok(p.proactiveInstruction(config, 'fixed').includes('<proactive-skip/>'), 'silent output protocol preserved');
+assert.equal(p.intervalMs(config, 'fixed'), 8 * 3600000);
+assert.equal(p.nextProactiveAt(config, 'fixed', 100, () => 0), 100 + 8 * 3600000 * .8);
+assert.equal(p.nextProactiveAt(config, 'fixed', 100, () => 1), 100 + 8 * 3600000 * 1.2);
+assert.equal(p.intervalMs({ ...config, adjustment: 40 }, 'personality'), (9 / 1.4) * 3600000);
+assert.equal(p.intervalMs({ ...config, adjustment: -40 }, 'personality'), (9 / (1 / 1.4)) * 3600000);
+assert.equal(p.maxFollowUps(config), 0);
+assert.deepEqual(Array.from({ length: 5 }, (_, followUpTier) => p.maxFollowUps({ ...config, followUpTier })), [0, 1, 1, 2, 3]);
+assert.equal(p.planProactive(config, 1, 1, true).personalityAt, undefined);
+assert.equal(p.planProactive({ ...config, enabled: false }, 1, 1).fixedAt, undefined);
+const planned = p.planProactive(config, 100, 1, false, () => .5);
+assert.equal(p.dueProactive(planned, 101), null);
+assert.ok(p.dueProactive(planned, planned.fixedAt));
+const consumed = p.consumeProactive(config, planned, 10 ** 12, false);
+assert.ok(consumed.fixedAt > 10 ** 12 && consumed.personalityAt > 10 ** 12, 'missed cycles are not replayed');
+assert.equal(p.normalizeProactiveConfig({ intervalMinutes: NaN, initiativeTier: 100, followUpTier: -1 }).initiativeTier, 4);
+assert.equal(p.normalizeProactiveConfig({ intervalMinutes: NaN }).intervalMinutes, 480);
+
+const cache = new Map();
+const storage = load('lib/proactive-storage.ts', {
+  './kv-db': { kvGet: k => cache.get(k), kvSet: (k, v) => cache.set(k, v), registerKvMigration: () => {} },
+  './proactive-policy': p,
+}, { window: { dispatchEvent() {} }, CustomEvent: class {} });
+const a = storage.saveProactiveConfig('a', config, false);
+storage.saveProactiveConfig('a', { ...config, enabled: false }, false);
+assert.equal(storage.saveProactiveState('a', a.state), false, 'stale response cannot restore old settings');
+storage.saveProactiveConfig('b', config, true);
+assert.equal(storage.loadProactive('b').config.personalityEnabled, false);
+storage.removeProactive('a');
+assert.ok(storage.loadProactive('b'), 'deleting one session preserves others');
+
+async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0 } = {}) {
+  let now = 100000000;
+  const session = { id: 's', contactId: 'c', isGroup: group };
+  const createdAt = new Date(now - 3600000).toISOString();
+  const history = [{ id: 'u', role: 'user', createdAt }];
+  let record = { config: { ...config, followUpTier: 2 }, state: { revision: 1, [`${source}At`]: now - 1, followupCount: used, followupRules: JSON.stringify(rules),
+    anchor: `u:${createdAt}`, anchorAt: now - 3600000, clockVersion: 2, quietSetting: '' } };
+  const calls = [], saved = [], events = [];
+  const store = {
+    loadProactive: () => structuredClone(record),
+    saveProactiveState: (_s, state) => { if (state.revision !== record.state.revision) return false; record.state = structuredClone(state); return true; },
+    refreshProactive: async () => {}, flushProactive: async () => {},
+  };
+  const prompt = { llmMessages: [], config: {}, preset: null, regexes: [], character: { name: 'C' }, ...(group ? { nameToId: new Map([['C', 'c']]) } : {}) };
+  const service = load('lib/proactive-service.ts', {
+    './chat-storage': { loadChatSessions: () => [session], loadChatMessages: () => history, clearFollowUpSchedule() {} },
+    './chat-engine': {
+      buildChatPromptMessages: async () => prompt, stripPresetTexts: x => x,
+      sendLLMRequest: async (...args) => { calls.push(args); if (mutate) mutate({ session, record, history, service }); if (failure) throw new Error('mock failure'); return output; },
+    },
+    './group-chat-engine': { buildGroupChatPromptMessages: async () => prompt, parseGroupChatResponse: text => [{ characterId: 'c', characterName: 'C', responseText: text }] },
+    './push-bailout-client': { cancelFollowUpBailout() {}, cancelBailoutPrefix() {} },
+    './idle-reconnect-storage': { loadIdleReconnectRules: () => [] },
+    './push-client': { isWithinPushQuietHours: () => quiet, loadPushQuietHours: () => '' },
+    './kv-db': { kvGet: () => foreground ? JSON.stringify({ startedAt: now }) : null },
+    './proactive-storage': store, './proactive-policy': p, './proactive-clock': clock,
+    './settings-storage': { loadFollowUpConfig: () => rules }, './proactive-followup': followup,
+    './follow-up-service': { parseAndSaveResponse: async (...args) => { saved.push(args); history.push({ id: 'a', role: 'assistant', createdAt: new Date(now).toISOString(), stateValues: [{ name: '跟进意愿', value: 90 }], freshStateValues: fresh ? [{ name: '跟进意愿', value: 90 }] : [] }); return { hasVisible: true }; } },
+    './memory-storage': { incrementEventCounter() {} }, './memory-summarizer': { maybeRunSummarization: async () => {} },
+    './character-storage': { loadCharacters: () => [{ id: 'c', name: 'C' }] },
+  }, {
+    Date: class extends Date { static now() { return now; } },
+    window: { dispatchEvent: e => events.push(e) }, CustomEvent: class { constructor(name, data) { this.name = name; this.detail = data.detail; } },
+  });
+  service.pollNewProactive(now, () => false);
+  await new Promise(resolve => setImmediate(resolve));
+  service.pollNewProactive(now, () => false);
+  await new Promise(resolve => setImmediate(resolve));
+  return { calls, saved, events, record, service };
+}
+(async () => {
+  const normal = await scenario();
+  assert.equal(normal.calls.length, 1);
+  assert.equal(normal.saved.length, 1);
+  assert.ok(normal.record.state.followupAt, 'human reply schedule independent of anxiety status');
+  assert.equal((await scenario({ fresh: false })).record.state.followupAt, undefined, 'inherited status is not fresh intent');
+  const followed = await scenario({ source: 'followup' });
+  assert.equal(followed.record.state.followupCount, 1);
+  assert.equal(followed.record.state.followupAt, undefined, 'tier cap stops next follow-up');
+  assert.equal((await scenario({ used: 1 })).record.state.followupAt, undefined, 'ambient contact does not reset unanswered follow-up count');
+  const silentFollow = await scenario({ source: 'followup', output: '<proactive-skip/>' });
+  assert.equal(silentFollow.record.state.followupAt, undefined);
+  assert.ok(normal.calls[0][2].at(-1).content.includes('自主交流机会'));
+  assert.equal(normal.calls[0][2].at(-1).role, 'system');
+  const silent = await scenario({ output: '<proactive-skip/>' });
+  assert.equal(silent.saved.length, 0);
+  assert.equal(silent.record.state.fixedAt, undefined, 'silence ends this opportunity instead of retrying');
+  assert.equal((await scenario({ quiet: true })).calls.length, 0);
+  assert.equal((await scenario({ foreground: true })).calls.length, 0);
+  assert.equal((await scenario({ mutate: ({ session }) => { session.proactiveDisabled = true; } })).saved.length, 0);
+  assert.equal((await scenario({ mutate: ({ record }) => { record.state.revision++; } })).saved.length, 0);
+  assert.equal((await scenario({ mutate: ({ history }) => history.push({ id: 'new', role: 'user' }) })).saved.length, 0);
+  assert.equal((await scenario({ mutate: ({ service }) => service.cancelNewProactive('s') })).saved.length, 0);
+  const failed = await scenario({ failure: true });
+  assert.equal(failed.calls.length, 1, 'failed calls are not retried every poll');
+  assert.ok(failed.record.state.lastError);
+  assert.equal(failed.record.state.fixedAt, 100000000 - 1, 'failure preserves original due time');
+  assert.equal(failed.record.state.anchorAt, 100000000 - 3600000, 'failure never invents interaction');
+  const group = await scenario({ group: true });
+  assert.equal(group.calls[0][5].appId, 'group_chat');
+  assert.equal(group.saved[0][5].senderCharacterId, 'c');
+  assert.equal(group.record.state.followupAt, undefined, 'groups do not follow up based on absent user');
+  console.log('Proactive policy, storage and runtime regression tests passed.');
+})().catch(error => { console.error(error); process.exitCode = 1; });

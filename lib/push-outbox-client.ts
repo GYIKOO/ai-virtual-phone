@@ -170,6 +170,12 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                     }
                     const sessionId = meta.sessionId || entry.session_id || "";
                     const session = sessionId ? loadChatSessions().find(s => s.id === sessionId) : undefined;
+                    // Do not import legacy ambient output after opting into the new scheduler.
+                    if (session && (entry.trigger_key?.startsWith("followup:") || entry.trigger_key?.startsWith("idle:"))
+                        && (session.proactiveDisabled || (await import("./proactive-storage")).loadProactive(sessionId))) {
+                        consumedIds.push(entry.id);
+                        continue;
+                    }
                     if (!session) {
                         console.warn("[PushOutbox] session not found, keep entry pending:", entry.id, sessionId);
                         continue;

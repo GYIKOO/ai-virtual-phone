@@ -251,6 +251,15 @@ export function MainApp() {
       }
       setKvHydrateFailed(false);
 
+      if (process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_LOCAL_TEST_FIXTURES === "true") {
+        try {
+          const { prepareLocalTestFixtures } = await import("@/lib/local-test-fixtures");
+          await prepareLocalTestFixtures();
+        } catch (error) {
+          console.error("[LocalTest] 测试数据准备失败", error);
+        }
+      }
+
       let nextPreparedTheme: PreparedDesktopTheme | null = null;
       try {
         nextPreparedTheme = await prepareDesktopThemeForFirstPaint();

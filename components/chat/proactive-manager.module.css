@@ -1,0 +1,57 @@
+.panel {
+  padding-bottom: 28px;
+  gap: 16px;
+  font-family: inherit;
+  font-size: calc(12.6px * var(--app-text-scale, 1));
+  color: var(--c-text-title);
+  line-height: 1.5;
+}
+
+.panel :global(.menu-desc) {
+  font-size: calc(10.8px * var(--app-text-scale, 1));
+  line-height: 1.6;
+  font-weight: 400;
+}
+
+.panel :global(.ui-input),
+.panel :global(.ui-textarea),
+.panel :global(.ui-btn) {
+  font-family: inherit;
+  font-size: calc(12px * var(--app-text-scale, 1));
+}
+
+.toolbar { display: grid; gap: 12px; }
+.tabs {
+  display: flex;
+  padding: 3px;
+  border-radius: var(--ui-radius-panel);
+  background: var(--c-panel);
+  gap: 4px;
+}
+.tabs button {
+  flex: 1;
+  padding: 8px 4px;
+  border-radius: var(--ui-radius-panel);
+  color: var(--c-text);
+  font-size: calc(12px * var(--app-text-scale, 1));
+}
+.tabs button[aria-pressed="true"] {
+  background: var(--c-card);
+  color: var(--c-text-title);
+  font-weight: 600;
+}
+.expanded {
+  padding: 0 24px 20px;
+  border-top: 1px solid color-mix(in srgb, var(--c-card-border) 20%, transparent);
+}
+.expanded label,
+.expanded :global(.proactive-setting-heading) {
+  font-size: calc(12.6px * var(--app-text-scale, 1));
+  font-weight: 500;
+  align-items: center;
+}
+.expanded select { min-width: 0; max-width: 62%; font-weight: 400; }
+.expanded input[type="range"] { width: 42%; accent-color: var(--c-icon); }
+.expanded textarea { line-height: 1.8; min-height: 200px; resize: vertical; }
+.expanded summary { font-weight: 500; cursor: pointer; padding: 4px 0; }
+.compatibility { padding: 0 4px; }
