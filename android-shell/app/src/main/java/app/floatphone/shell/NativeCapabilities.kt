@@ -72,6 +72,21 @@ class NativeCapabilities(private val activity: AppCompatActivity) {
             val target = data.optString("id") to proxy
             try {
                 when (data.getString("op")) {
+                    "personalPushStatus" -> {
+                        val state = PersonalPushConnection.read(activity)
+                        val config = state.optJSONObject("config")
+                        reply(target, JSONObject()
+                            .put("deviceId", PersonalPushConnection.identity(activity))
+                            .put("url", config?.optString("url") ?: state.optString("lastUrl"))
+                            .put("configured", config != null)
+                            .put("connected", PushService.personalConnected)
+                            .put("permission", notificationsEnabled()))
+                    }
+                    "configurePersonalPush" -> {
+                        PersonalPushConnection.configure(activity, data.optJSONObject("config"))
+                        PushService.reload(activity)
+                        reply(target, true)
+                    }
                     "permission" -> reply(target, notificationsEnabled())
                     "requestPermission" -> {
                         if (notificationsEnabled()) reply(target, true)

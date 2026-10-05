@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.provider.OpenableColumns
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
@@ -43,15 +44,34 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private val nativeCapabilities = NativeCapabilities(this)
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var pluginFileSelection = false
 
     private val fileChooserLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         val callback = filePathCallback ?: return@registerForActivityResult
         filePathCallback = null
-        val data = result.data?.data
-        callback.onReceiveValue(if (data != null) arrayOf(data) else emptyArray())
+        val checkPluginNames = pluginFileSelection
+        pluginFileSelection = false
+        val uris = WebChromeClient.FileChooserParams.parseResult(result.resultCode, result.data)
+            ?: emptyArray()
+        if (checkPluginNames && uris.any { !isPluginFile(it) }) {
+            Toast.makeText(this, "请选择 .js 或 .mjs 插件文件；无法读取文件名时请先保存到本机再选择", Toast.LENGTH_LONG).show()
+            callback.onReceiveValue(emptyArray())
+        } else {
+            callback.onReceiveValue(uris)
+        }
     }
+
+    // Use provider metadata, never guess an extension from an opaque content URI or MIME type.
+    // This checks the name only; the webpage still asks for trust confirmation and validates the module.
+    private fun isPluginFile(uri: Uri): Boolean = runCatching {
+        if (uri.scheme != "content") return@runCatching false
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            column >= 0 && cursor.moveToFirst() && PluginFilePolicy.isAllowedName(cursor.getString(column))
+        } ?: false
+    }.getOrDefault(false)
 
     private val notifPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -153,10 +173,21 @@ class MainActivity : AppCompatActivity() {
             ): Boolean {
                 filePathCallback?.onReceiveValue(emptyArray())
                 filePathCallback = callback
+                pluginFileSelection = PluginFilePolicy.isJavaScriptOnly(params.acceptTypes)
                 return runCatching {
-                    fileChooserLauncher.launch(params.createIntent()); true
+                    val intent = params.createIntent()
+                    if (pluginFileSelection) {
+                        // Android providers disagree on JS MIME types. Select broadly, then
+                        // validate the display name before handing any URI back to the webpage.
+                        intent.type = "*/*"
+                        intent.removeExtra(Intent.EXTRA_MIME_TYPES)
+                        intent.addCategory(Intent.CATEGORY_OPENABLE)
+                    }
+                    fileChooserLauncher.launch(intent); true
                 }.getOrElse {
-                    filePathCallback = null; false
+                    filePathCallback = null
+                    pluginFileSelection = false
+                    false
                 }
             }
         }

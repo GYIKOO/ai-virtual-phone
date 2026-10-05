@@ -264,6 +264,12 @@ async function decryptPayload(payload: EncryptedPayload, serviceKey: string): Pr
 // ── 主流程 ──
 type JobRow = { id: string; user_id: string; trigger_key: string; kind: string; payload: EncryptedPayload };
 type SubscriptionRow = { endpoint: string; p256dh: string; auth: string };
+
+function shellPushChannels(subscriptions: SubscriptionRow[], userId: string): string[] {
+  return [...new Set(subscriptions.filter(sub => sub.endpoint.startsWith("shell:")).map(sub =>
+    /^shell:device:[a-f0-9-]{72}$/.test(sub.endpoint) ? sub.endpoint.slice(6) : userId
+  ))];
+}
 type JobPayload = {
   request: { url: string; headers: Record<string, string>; body: Record<string, unknown>; providerKind: ProviderKind };
   shortcut?: {
@@ -1128,8 +1134,8 @@ Deno.serve(async (req: Request) => {
             method: "POST",
             headers: restHeaders,
             body: JSON.stringify({
-              messages: [{
-                topic: `shellpush:${job.user_id}`,
+              messages: shellPushChannels(subs, job.user_id).map(channelId => ({
+                topic: `shellpush:${channelId}`,
                 event: "notify",
                 payload: {
                   title: deliverAsCall ? `📞 ${title}` : title,
@@ -1138,7 +1144,7 @@ Deno.serve(async (req: Request) => {
                   // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容
                   ...(deliverAsCall ? { kind: "call", characterName: title, sessionId: callSessionId, callTs: Date.now() } : {}),
                 },
-              }],
+              })),
             }),
           });
           await response.text().catch(() => undefined);

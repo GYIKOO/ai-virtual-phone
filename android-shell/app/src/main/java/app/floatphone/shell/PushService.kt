@@ -39,6 +39,15 @@ class PushService : Service() {
         private const val CH_CALLS = "shell_calls"
         private const val NOTIF_FG_ID = 1
         private var running = false
+        @Volatile var personalConnected = false
+            private set
+        private const val RELOAD = "personal-push-reload"
+
+        fun reload(context: Context) {
+            val intent = Intent(context, PushService::class.java).setAction(RELOAD)
+            if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+            else context.startService(intent)
+        }
 
         fun start(context: Context) {
             if (running) return
@@ -54,7 +63,8 @@ class PushService : Service() {
         .build()
 
     private var socket: WebSocket? = null
-    private var stopped = false
+    @Volatile private var stopped = false
+    @Volatile private var revision = 0
     private var msgSeq = 2
     private var notifId = 100
     private var shellSubRegistered = false
@@ -69,10 +79,19 @@ class PushService : Service() {
         thread(name = "shell-push-loop") { connectionLoop() }
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == RELOAD) {
+            revision++
+            personalConnected = false
+            shellSubRegistered = false
+            socket?.cancel()
+        }
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         stopped = true
+        personalConnected = false
         running = false
         socket?.cancel()
         super.onDestroy()
@@ -82,14 +101,18 @@ class PushService : Service() {
     private fun connectionLoop() {
         var backoffSec = 5L
         while (!stopped) {
+            val currentRevision = revision
             val config = fetchConfig()
             if (config == null) {
-                updateKeepAlive("未登录或站点不可达，稍后重试")
+                updateKeepAlive(if (PersonalPushConnection.read(this).optBoolean("managed")) "个人云推送未开启，请在离线推送设置中连接" else "未登录或站点不可达，稍后重试")
                 sleepSec(60); continue
             }
+            if (currentRevision != revision) continue
             updateKeepAlive("正在连接消息通道…")
-            val closedNormally = runSocket(config)
+            val closedNormally = runSocket(config, currentRevision)
+            personalConnected = false
             if (stopped) break
+            if (currentRevision != revision) continue
             updateKeepAlive("连接断开，重连中…")
             sleepSec(if (closedNormally) 3 else backoffSec)
             backoffSec = (backoffSec * 2).coerceAtMost(120)
@@ -97,10 +120,15 @@ class PushService : Service() {
         }
     }
 
-    private data class PushConfig(val supabaseUrl: String, val anonKey: String, val userId: String)
+    private data class PushConfig(val supabaseUrl: String, val anonKey: String, val userId: String, val personal: Boolean = false)
 
     /** 借 WebView 的登录 Cookie 调站点接口获取连接参数。 */
     private fun fetchConfig(): PushConfig? = runCatching {
+        val personal = PersonalPushConnection.read(this)
+        if (personal.optBoolean("managed")) {
+            val config = personal.optJSONObject("config") ?: return null
+            return PushConfig(config.getString("url"), config.getString("anonKey"), config.getString("channelId"), true)
+        }
         val cookie = CookieManager.getInstance().getCookie(MainActivity.SITE_URL) ?: return null
 
         fun getJson(path: String): JSONObject? {
@@ -155,7 +183,7 @@ class PushService : Service() {
     }
 
     /** 跑一条 WebSocket 直到断开；返回是否属于正常关闭。 */
-    private fun runSocket(config: PushConfig): Boolean {
+    private fun runSocket(config: PushConfig, currentRevision: Int): Boolean {
         val wsUrl = config.supabaseUrl.replaceFirst("http", "ws") +
             "/realtime/v1/websocket?apikey=${config.anonKey}&vsn=1.0.0"
         val topic = "realtime:shellpush:${config.userId}"
@@ -199,11 +227,13 @@ class PushService : Service() {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (stopped || currentRevision != revision) return
                 runCatching {
                     val msg = JSONObject(text)
                     if (msg.optString("event") == "phx_reply" && msg.optString("ref") == "1") {
                         if (msg.optJSONObject("payload")?.optString("status") == "ok") {
-                            updateKeepAlive(if (shellSubRegistered) "已连接，等待角色消息" else "消息通道已连接，但推送注册失败")
+                            personalConnected = config.personal && currentRevision == revision
+                            updateKeepAlive(if (config.personal) "个人云已连接，等待角色消息" else if (shellSubRegistered) "已连接，等待角色消息" else "消息通道已连接，但推送注册失败")
                         } else {
                             updateKeepAlive("消息频道订阅失败，正在重试")
                             webSocket.close(1000, "subscription failed")
@@ -246,8 +276,9 @@ class PushService : Service() {
             listener,
         )
         synchronized(lock) {
-            while (!done && !stopped) runCatching { lock.wait(30_000) }
+            while (!done && !stopped && currentRevision == revision) runCatching { lock.wait(1000) }
         }
+        done = true
         socket?.cancel()
         socket = null
         return normal
@@ -370,6 +401,10 @@ class PushService : Service() {
     }
 
     private fun sleepSec(sec: Long) {
-        runCatching { Thread.sleep(sec * 1000) }
+        val currentRevision = revision
+        repeat(sec.toInt()) {
+            if (stopped || currentRevision != revision) return
+            runCatching { Thread.sleep(1000) }
+        }
     }
 }

@@ -2,6 +2,7 @@
 // 前提：主屏幕 PWA（iOS 16.4+）或支持 Push API 的浏览器，且已登录账号。
 
 import { requestNotificationPermission } from "./browser-notification";
+import { connectShellPersonalPush, disconnectShellPersonalPush, reconcileShellPersonalPush, shellPushStatus } from "./shell-personal-push";
 import { kvGet, kvRemove, kvSet } from "./kv-db";
 import {
     isPersonalPushCloudActive,
@@ -185,6 +186,15 @@ async function subscribeRegistration(
 
 /** 给个人 Supabase 建立独立 SW 订阅；主 PWA 订阅保留给现实桥/快捷指令，互不覆盖。 */
 export async function ensurePersonalPushSubscription(): Promise<{ ok: boolean; error?: string }> {
+    if (isShellEnvironment()) {
+        try {
+            await connectShellPersonalPush();
+            markAccountPushSubscribed(true);
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : "APK 推送注册失败。" };
+        }
+    }
     if (!isPersonalPushCloudActive()) return { ok: false, error: "个人离线推送尚未启用。" };
     const registration = await getPersonalPushRegistration(true);
     if (!registration) return { ok: false, error: "个人推送 Service Worker 注册失败。" };
@@ -210,6 +220,7 @@ export async function ensurePersonalPushSubscription(): Promise<{ ok: boolean; e
 }
 
 export async function getOfflinePushState(): Promise<OfflinePushState> {
+    if (isShellEnvironment()) return await reconcileShellPersonalPush().catch(() => false) ? "on" : "off";
     if (!isPushSupported()) return "unsupported";
     if (isPersonalPushCloudActive()) {
         const personalRegistration = await getPersonalPushRegistration(false);
@@ -229,7 +240,7 @@ export async function getOfflinePushState(): Promise<OfflinePushState> {
 
 export async function enableOfflinePush(): Promise<{ ok: boolean; error?: string }> {
     if (isShellEnvironment()) {
-        return { ok: false, error: "App 版自带推送通道，无需在此开启；保持系统通知权限开启即可收到离线消息。" };
+        return ensurePersonalPushSubscription();
     }
     if (!isPushSupported()) {
         return { ok: false, error: "当前环境不支持系统推送。iOS 请先「添加到主屏幕」，再从主屏幕图标打开开启。" };
@@ -299,6 +310,14 @@ export async function enableOfflinePush(): Promise<{ ok: boolean; error?: string
 }
 
 export async function disableOfflinePush(): Promise<{ ok: boolean; error?: string }> {
+    if (isShellEnvironment()) {
+        try {
+            await disconnectShellPersonalPush();
+            return { ok: true };
+        } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : "APK 推送退订失败。" };
+        } finally { markAccountPushSubscribed(null); }
+    }
     const registration = await getReadyRegistration(2000);
     const subscription = registration ? await registration.pushManager.getSubscription().catch(() => null) : null;
     if (subscription) {
@@ -328,6 +347,14 @@ export async function disableOfflinePush(): Promise<{ ok: boolean; error?: strin
 }
 
 export async function sendTestOfflinePush(): Promise<{ ok: boolean; error?: string }> {
+    if (isShellEnvironment()) {
+        try {
+            if (!await reconcileShellPersonalPush()) throw new Error("请先开启本设备的个人云离线推送。");
+            if (!(await shellPushStatus()).connected) throw new Error("APK 消息通道尚未连接，请稍等后重试；如持续失败，请检查后台连接通知。");
+        } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : "APK 推送尚未就绪。" };
+        }
+    }
     const response = await (isPersonalPushCloudActive()
         ? personalPushFetch("test", { method: "POST" })
         : fetch("/api/push/test", { method: "POST", credentials: "include"}))

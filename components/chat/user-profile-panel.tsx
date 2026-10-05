@@ -1328,9 +1328,9 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                     setOfflinePushHint(result.error || "开启失败。");
                 }
             } else {
-                await disableOfflinePush();
+                const result = await disableOfflinePush();
                 setOfflinePushState("off");
-                setOfflinePushHint("已关闭，本设备不再接收离线推送。");
+                setOfflinePushHint(result.ok ? "已关闭，本设备不再接收离线推送。" : result.error || "关闭失败，请重试。");
             }
         } finally {
             setOfflinePushBusy(false);
@@ -1498,15 +1498,15 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                                 <ProfileSettingsIcon icon={Satellite} color={BINDING_ACCENTS.api} />
                                 <div className="menu-label-group">
                                     <span className="menu-label">离线推送</span>
-                                    <span className="menu-desc">关掉后台后仍由系统推送通知（本设备）</span>
+                                    <span className="menu-desc">{isShellApp ? "通过个人云接收通知，需要允许通知并保持后台服务运行" : "关掉后台后仍由系统推送通知（本设备）"}</span>
                                 </div>
                                 <div className="menu-right flex items-center gap-2">
-                                    {(offlinePushState === "on" || isShellApp) && (
+                                    {offlinePushState === "on" && (
                                         <button className="ui-btn ui-btn-outline py-1 px-2 ts-11" style={{ whiteSpace: "nowrap" }} onClick={() => void handleOfflinePushTest()} disabled={offlinePushBusy}>测试</button>
                                     )}
                                     <Toggle
-                                        checked={offlinePushState === "on" || isShellApp}
-                                        disabled={offlinePushBusy || isShellApp || offlinePushState === "unsupported"}
+                                        checked={offlinePushState === "on"}
+                                        disabled={offlinePushBusy || offlinePushState === "unsupported"}
                                         onChange={enabled => void handleOfflinePushToggle(enabled)}
                                     />
                                 </div>
@@ -1547,7 +1547,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                         </div>
                         <p className="menu-group-desc mx-2">
                             {offlinePushHint || (isShellApp
-                                ? "App 版自带推送通道，已自动接管离线推送；保持系统通知权限开启即可，可点「测试」验证。"
+                                ? "App 需要先部署个人云，再开启本设备推送。开关表示已配置，实际连接请用「测试」验证；系统强制停止 App 后不能保证送达。"
                                 : offlinePushState === "unsupported" ? "当前环境不支持。iOS 请先添加到主屏幕，从主屏幕打开后再开启。" : "")}
                         </p>
                     </>

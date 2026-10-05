@@ -195,6 +195,22 @@ async function sendWebPushRaw(
   vapid: { publicKey: string; privateKey: string; subject: string },
   ttlSeconds = 3600,
 ): Promise<number> {
+  if (subscription.endpoint.startsWith("shell:")) {
+    if (!/^shell:device:[a-f0-9-]{72}$/.test(subscription.endpoint)) return 400;
+    const url = (Deno.env.get("SUPABASE_URL") || "").replace(/\/$/, "");
+    const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+    const message = JSON.parse(payload);
+    const response = await fetch(`${url}/realtime/v1/api/broadcast`, {
+      method: "POST",
+      headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: [{
+        topic: `shellpush:${subscription.endpoint.slice(6)}`, event: "notify",
+        payload: { ...message, ...(message.type === "incoming_call" ? { kind: "call" } : {}) },
+      }] }),
+    });
+    await response.text().catch(() => "");
+    return response.status;
+  }
   const body = await encryptWebPushPayload(subscription.p256dh, subscription.auth, payload);
   const authorization = await buildVapidAuth(
     subscription.endpoint,
@@ -564,13 +580,35 @@ Deno.serve(async (request: Request) => {
         service: "ai-phone-personal-push",
         version: 2,
         schemaVersion,
-        capabilities: schemaVersion >= 3 ? ["screen-chat-continuous"] : [],
+        capabilities: ["shell-personal-push", ...(schemaVersion >= 3 ? ["screen-chat-continuous"] : [])],
       });
     }
 
     if (action === "public-key" && request.method === "GET") {
       const config = await loadConfig();
       return json({ ok: true, publicKey: config.vapid_public_key });
+    }
+
+    // Admin-authenticated registration. The APK receives only the public connection key
+    // and its high-entropy device topic, never the user's service_role key.
+    if (action === "shell-subscribe" && request.method === "POST") {
+      const body = await request.json().catch(() => ({})) as { deviceId?: unknown };
+      const deviceId = cleanText(body.deviceId, 100);
+      if (!/^[a-f0-9-]{72}$/.test(deviceId)) return json({ ok: false, error: "设备标识无效" }, 400);
+      const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
+      if (!anonKey) return json({ ok: false, error: "个人云缺少公开连接密钥，请重新部署" }, 503);
+      await loadConfig();
+      const channelId = `device:${deviceId}`;
+      await readJson(await rest("push_subscriptions?on_conflict=endpoint", {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+        body: JSON.stringify([{
+          endpoint: `shell:${channelId}`, user_id: OWNER_ID,
+          p256dh: "shell", auth: "shell", fail_count: 0,
+          user_agent: cleanText(request.headers.get("user-agent"), 300) || null,
+        }]),
+      }));
+      return json({ ok: true, config: { url: supabaseUrl, anonKey, channelId } });
     }
 
     if (action === "status" && request.method === "GET") {

@@ -70,6 +70,7 @@ export function saveCloudBackupConfig(config: CloudBackupConfig): void {
     keepCount: clampKeepCount(config.keepCount),
     excludeMedia: config.excludeMedia !== false,
   }));
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("float-personal-cloud-changed"));
 }
 
 export function isCloudBackupConfigured(config: CloudBackupConfig): boolean {
