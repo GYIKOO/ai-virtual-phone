@@ -11,6 +11,8 @@ import {
 } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
+import { memoryEventRange } from "./memory-time";
+import { formatLongTermMemories } from "./memory-injector";
 
 const coreBuildingSet = new Set<string>();
 
@@ -20,6 +22,7 @@ type CoreTimelineItem = {
     content: string;
     sourceApp: MemoryEntry["sourceApp"];
     sourceSessionIds: string[];
+    eventRange?: ReturnType<typeof memoryEventRange>;
 };
 
 function formatCoreTimelineForSummarization(
@@ -27,7 +30,7 @@ function formatCoreTimelineForSummarization(
 ): { eventsText: string; earliest: string; latest: string; count: number } | null {
     if (entries.length === 0) return null;
     return {
-        eventsText: entries.map(entry => `- ${entry.content}`).join("\n"),
+        eventsText: entries.map(entry => entry.content).join("\n"),
         earliest: entries[0].timestamp,
         latest: entries[entries.length - 1].timestamp,
         count: entries.length,
@@ -57,7 +60,8 @@ export async function runCoreMemoryPipeline(
         .map(entry => ({
             id: entry.id,
             timestamp: entry.createdAt,
-            content: entry.content,
+            content: formatLongTermMemories([entry]),
+            eventRange: memoryEventRange(entry),
             sourceApp: entry.sourceApp,
             sourceSessionIds: Array.isArray(entry.metadata?.sourceSessionIds)
                 ? entry.metadata.sourceSessionIds.map(String)
@@ -74,11 +78,14 @@ export async function runCoreMemoryPipeline(
     if (!formatted) return { success: false, error: "格式化核心记忆数据失败" };
 
     const { eventsText, earliest, latest } = formatted;
+    const eventRange = entries.every(entry => entry.eventRange)
+        ? { start: Math.min(...entries.map(entry => entry.eventRange!.start)), end: Math.max(...entries.map(entry => entry.eventRange!.end)) }
+        : undefined;
     const promptTemplate = config.coreMemoryPrompt?.trim() || DEFAULT_CORE_MEMORY_PROMPT;
     const prompt = promptTemplate
         .replace(/\{\{char\}\}/gi, characterName)
-        .replace(/\{\{earliest\}\}/gi, earliest)
-        .replace(/\{\{latest\}\}/gi, latest)
+        .replace(/\{\{earliest\}\}/gi, eventRange ? new Date(eventRange.start).toISOString() : "起点未知（各条目有独立时间说明）")
+        .replace(/\{\{latest\}\}/gi, eventRange ? new Date(eventRange.end).toISOString() : "终点未知（各条目有独立时间说明）")
         .replace(/\{\{events\}\}/gi, eventsText)
         .replace(/\{\{longTermMemories\}\}/gi, eventsText);
 
@@ -114,6 +121,8 @@ export async function runCoreMemoryPipeline(
         }
     }
     const sourceSessionIds = Array.from(new Set(entries.flatMap(entry => entry.sourceSessionIds)));
+    // Preserve the creation-time watermark for incremental processing; keep
+    // event time separate. Missing source dates must not become invented dates.
 
     const coreEntry: MemoryEntry = {
         id: `mem_core_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -127,6 +136,7 @@ export async function runCoreMemoryPipeline(
         metadata: {
             summarizedLongTermEntries: entries.length,
             timeSpan: `${earliest} ~ ${latest}`,
+            ...(eventRange ? { eventStartAt: new Date(eventRange.start).toISOString(), eventEndAt: new Date(eventRange.end).toISOString() } : {}),
             sourceSessionIds,
         },
     };

@@ -31,6 +31,7 @@ import {
 } from "./idle-reconnect-storage";
 import { loadFollowUpConfig } from "./settings-storage";
 import { loadProactive, PROACTIVE_UPDATED } from "./proactive-storage";
+import { updateProactivePresence } from "./proactive-presence";
 import { cancelLegacyAmbient, cancelNewProactive, isNewProactiveGenerating, pollNewProactive, resetProactiveOnUserMessage, schedulePersonalityFollowUp } from "./proactive-service";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
@@ -120,6 +121,7 @@ let scheduledOutboxGraceUntil = 0;
 let scheduledOutboxVisibilityHandler: (() => void) | null = null;
 let scheduledOutboxFocusHandler: (() => void) | null = null;
 let scheduledOutboxPageShowHandler: (() => void) | null = null;
+let proactivePageHideHandler: (() => void) | null = null;
 
 function extendScheduledOutboxGrace(): void {
     scheduledOutboxGraceUntil = Math.max(scheduledOutboxGraceUntil, Date.now() + SCHEDULED_OUTBOX_GRACE_MS);
@@ -133,6 +135,7 @@ export function startFollowUpService() {
     extendScheduledOutboxGrace();
     stopInterval = bgSetInterval(pollSchedules, POLL_INTERVAL_MS);
     if (typeof window !== "undefined") {
+        updateProactivePresence(!document.hidden, Date.now(), true);
         for (const session of loadChatSessions()) if (loadProactive(session.id)) cancelLegacyAmbient(session.id);
         proactiveUpdateHandler = (event: Event) => {
             const sessionId = (event as CustomEvent<{ sessionId: string }>).detail.sessionId;
@@ -146,10 +149,16 @@ export function startFollowUpService() {
         };
         window.addEventListener("menstrual-period-care-updated", periodCareUpdateHandler);
         scheduledOutboxVisibilityHandler = () => {
+            updateProactivePresence(!document.hidden, Date.now(), true);
             if (!document.hidden) extendScheduledOutboxGrace();
         };
         scheduledOutboxFocusHandler = extendScheduledOutboxGrace;
-        scheduledOutboxPageShowHandler = extendScheduledOutboxGrace;
+        scheduledOutboxPageShowHandler = () => {
+            updateProactivePresence(!document.hidden, Date.now(), true);
+            extendScheduledOutboxGrace();
+        };
+        proactivePageHideHandler = () => updateProactivePresence(false, Date.now(), true);
+        window.addEventListener("pagehide", proactivePageHideHandler);
         document.addEventListener("visibilitychange", scheduledOutboxVisibilityHandler);
         window.addEventListener("focus", scheduledOutboxFocusHandler);
         window.addEventListener("pageshow", scheduledOutboxPageShowHandler);
@@ -166,6 +175,10 @@ export function stopFollowUpService() {
         periodCareUpdateHandler = null;
     }
     if (typeof window !== "undefined") {
+        if (proactivePageHideHandler) {
+            window.removeEventListener("pagehide", proactivePageHideHandler);
+            proactivePageHideHandler = null;
+        }
         if (scheduledOutboxVisibilityHandler) {
             document.removeEventListener("visibilitychange", scheduledOutboxVisibilityHandler);
             scheduledOutboxVisibilityHandler = null;
@@ -406,6 +419,7 @@ function pollSchedules() {
     try {
         const schedules = loadAllFollowUpSchedules();
         const now = Date.now();
+        if (typeof document !== "undefined") updateProactivePresence(!document.hidden, now);
         for (const sched of schedules) {
             if (sched.fireAt > now) {
                 const remainSec = Math.round((sched.fireAt - now) / 1000);

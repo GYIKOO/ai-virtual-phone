@@ -1895,8 +1895,8 @@ export async function buildChatPromptMessages(
         options?.historicalAt === undefined ? buildMusicCloudMacro() : "",
     ]);
 
-    const longTermMemories = memResults ? formatLongTermMemories(memResults) : "";
-    const coreMemories = coreResults ? formatCoreMemories(coreResults) : "";
+    const longTermMemories = memResults ? formatLongTermMemories(memResults, now.getTime()) : "";
+    const coreMemories = coreResults ? formatCoreMemories(coreResults, now.getTime()) : "";
     const scheduleSummary = options?.historicalAt === undefined ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now)) : "";
     const currentSchedule = options?.historicalAt === undefined ? getCurrentCalendarScheduleForPrompt("character", character.id, now) : "";
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";

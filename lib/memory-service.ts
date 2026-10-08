@@ -7,6 +7,7 @@ import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity } from "./memory-embedding";
 import { estimateTokens } from "./token-counter";
 import { knownAt } from "./proactive-replay";
+import { formatMemoryEntry, memoryEventRange } from "./memory-time";
 
 /**
  * Retrieve relevant long-term memories for prompt injection.
@@ -26,11 +27,12 @@ export async function retrieveMemoriesForPrompt(
     if (longTermEntries.length === 0 || !currentContext.trim()) return [];
 
     const budget = config.longTermTokenBudget;
+    const referenceAt = asOf ?? Date.now();
 
     // Calculate total tokens for all entries
     let totalTokens = 0;
     for (const entry of longTermEntries) {
-        totalTokens += estimateTokens(entry.content) + 4;
+        totalTokens += estimateTokens(formatMemoryEntry(entry, referenceAt)) + 4;
     }
 
     // Strategy 1: all fit within budget → return all
@@ -50,16 +52,16 @@ export async function retrieveMemoriesForPrompt(
                     score: cosineSimilarity(queryEmbedding, entry.embedding!),
                 }));
                 scored.sort((a, b) => b.score - a.score);
-                return fillByBudget(scored.map(s => s.entry), budget);
+                return fillByBudget(scored.map(s => s.entry), budget, referenceAt);
             }
         }
     }
 
     // Strategy 3: no embedding support → newest first, fill by budget
     const sorted = [...longTermEntries].sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+        (a, b) => (memoryEventRange(b)?.end ?? Date.parse(b.createdAt)) - (memoryEventRange(a)?.end ?? Date.parse(a.createdAt))
     );
-    return fillByBudget(sorted, budget);
+    return fillByBudget(sorted, budget, referenceAt);
 }
 
 export async function retrieveCoreMemoriesForPrompt(
@@ -74,20 +76,20 @@ export async function retrieveCoreMemoriesForPrompt(
         const aActive = a.metadata?.active ? 1 : 0;
         const bActive = b.metadata?.active ? 1 : 0;
         if (aActive !== bActive) return bActive - aActive;
-        const aDate = String(a.metadata?.eventDate ?? a.updatedAt ?? a.createdAt);
-        const bDate = String(b.metadata?.eventDate ?? b.updatedAt ?? b.createdAt);
-        return bDate.localeCompare(aDate);
+        const aDate = memoryEventRange(a)?.end ?? Date.parse(String(a.metadata?.eventDate ?? a.updatedAt ?? a.createdAt));
+        const bDate = memoryEventRange(b)?.end ?? Date.parse(String(b.metadata?.eventDate ?? b.updatedAt ?? b.createdAt));
+        return bDate - aDate;
     });
 
-    return fillByBudget(sorted, config.coreMemoryTokenBudget);
+    return fillByBudget(sorted, config.coreMemoryTokenBudget, asOf ?? Date.now());
 }
 
 /** Pick entries in order until token budget is exhausted. */
-function fillByBudget(entries: MemoryEntry[], budget: number): MemoryEntry[] {
+function fillByBudget(entries: MemoryEntry[], budget: number, referenceAt: number): MemoryEntry[] {
     const result: MemoryEntry[] = [];
     let used = 0;
     for (const entry of entries) {
-        const tokens = estimateTokens(entry.content) + 4;
+        const tokens = estimateTokens(formatMemoryEntry(entry, referenceAt)) + 4;
         if (used + tokens > budget) break;
         result.push(entry);
         used += tokens;

@@ -17,6 +17,8 @@ export type ProactiveConfig = {
 };
 export type ProactiveState = {
     revision: number;
+    /** A settings change starts a new scheduling cycle, not a past interaction. */
+    configuredAt?: number;
     fixedAt?: number;
     personalityAt?: number;
     followupAt?: number;

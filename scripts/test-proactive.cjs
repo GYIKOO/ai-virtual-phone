@@ -15,7 +15,8 @@ const p = load('lib/proactive-policy.ts');
 const clock = load('lib/proactive-clock.ts', { './proactive-policy': p });
 const followup = load('lib/proactive-followup.ts');
 const replay = load('lib/proactive-replay.ts');
-assert.equal(replay.replayTime({ fixedAt: 1000 }, 'fixed', 100000), 1000);
+assert.equal(replay.replayTime({ fixedAt: 1000 }, 'fixed', 100000, { leftAt: 0, returnedAt: 99000 }), 1000);
+assert.equal(replay.replayTime({ fixedAt: 1000 }, 'fixed', 100000), undefined);
 assert.equal(replay.replayTime({ fixedAt: 1000, deferred: { fixed: true } }, 'fixed', 100000), undefined);
 assert.equal(replay.knownAt('2026-10-05T08:00:00Z', Date.parse('2026-10-05T09:00:00Z'), '2026-10-05T10:00:00Z'), false);
 const rules = { followUpFieldName: '跟进意愿', maxConsecutive: 3, anxietyThreshold: 50, anxietyMinDelay: 15, anxietyMaxDelay: 180 };
@@ -58,6 +59,7 @@ const storage = load('lib/proactive-storage.ts', {
   './proactive-policy': p,
 }, { window: { dispatchEvent() {} }, CustomEvent: class {} });
 const a = storage.saveProactiveConfig('a', config, false);
+assert.ok(a.state.configuredAt > 0, 'settings persist a new cycle floor');
 storage.saveProactiveConfig('a', { ...config, enabled: false }, false);
 assert.equal(storage.saveProactiveState('a', a.state), false, 'stale response cannot restore old settings');
 storage.saveProactiveConfig('b', config, true);
@@ -65,13 +67,15 @@ assert.equal(storage.loadProactive('b').config.personalityEnabled, false);
 storage.removeProactive('a');
 assert.ok(storage.loadProactive('b'), 'deleting one session preserves others');
 
-async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0, overdue = 1, deferred = false } = {}) {
+async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0, overdue = 1, deferred = false, absence = { leftAt: 99000000, returnedAt: 100000000 }, changedConfig = false, unversioned = false, changedAnchor = false, enabled = true } = {}) {
   let now = 100000000;
   const session = { id: 's', contactId: 'c', isGroup: group };
   const createdAt = new Date(now - 3600000).toISOString();
   const history = [{ id: 'u', role: 'user', createdAt }];
-  let record = { config: { ...config, followUpTier: 2 }, state: { revision: 1, [`${source}At`]: now - overdue, deferred: { [source]: deferred }, quietReleased: { [source]: true }, followupCount: used, followupRules: JSON.stringify(rules),
+  let record = { config: { ...config, enabled, followUpTier: 2 }, state: { revision: 1, [`${source}At`]: now - overdue, deferred: { [source]: deferred }, quietReleased: { [source]: true }, followupCount: used, followupRules: JSON.stringify(rules),
     anchor: `u:${createdAt}`, anchorAt: now - 3600000, clockVersion: 2, quietSetting: '' } };
+  if (changedConfig || unversioned) record.state = { ...p.planProactive(record.config, now, 2, group), ...(changedConfig ? { configuredAt: now } : {}) };
+  if (changedAnchor) { record.state.configuredAt = now - 1800000; history.push({ id: 'new', role: 'user', createdAt: new Date(now).toISOString() }); }
   const calls = [], saved = [], events = [], builds = [];
   const store = {
     loadProactive: () => structuredClone(record),
@@ -93,6 +97,7 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
     './proactive-storage': store, './proactive-policy': p, './proactive-clock': clock,
     './settings-storage': { loadFollowUpConfig: () => rules }, './proactive-followup': followup,
     './proactive-replay': replay,
+    './proactive-presence': { getProactiveAbsence: () => absence },
     './follow-up-service': { parseAndSaveResponse: async (...args) => { saved.push(args); history.push({ id: 'a', role: 'assistant', createdAt: args[5]?.createdAt ?? new Date(now).toISOString(), proactiveTiming: args[5]?.proactiveTiming, stateValues: [{ name: '跟进意愿', value: 90 }], freshStateValues: fresh ? [{ name: '跟进意愿', value: 90 }] : [] }); return { hasVisible: true }; } },
     './memory-storage': { incrementEventCounter() {} }, './memory-summarizer': { maybeRunSummarization: async () => {} },
     './character-storage': { loadCharacters: () => [{ id: 'c', name: 'C' }] },
@@ -108,6 +113,17 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
 }
 (async () => {
   const normal = await scenario();
+  for (const flags of [{ changedConfig: true }, { unversioned: true }, { changedAnchor: true }]) {
+    const reset = await scenario(flags);
+    assert.equal(reset.calls.length, 0, 'settings/migration/new interaction do not replay old chat');
+    assert.equal(reset.record.state.anchorAt, 100000000);
+    assert.ok(reset.record.state.fixedAt > 100000000);
+  }
+  assert.equal((await scenario({ enabled: false })).calls.length, 0, 'disabled new scheduler never calls API');
+  assert.equal((await scenario({ overdue: 120000, absence: null })).builds[0][2].historicalAt, undefined);
+  assert.equal((await scenario({ overdue: 4 * 86400000 })).builds[0][2].historicalAt, undefined, 'four-day-old task cannot be replayed into latest absence');
+  const oldWindow = { leftAt: 99000000, returnedAt: 100000000 };
+  assert.equal((await scenario({ overdue: 120000, absence: oldWindow, mutate: () => { oldWindow.leftAt = 99999999; } })).saved.length, 0, 'a new absence invalidates an in-flight historical result');
   for (const group of [false, true]) {
     const backfill = await scenario({ overdue: 120000, group });
     assert.equal(backfill.builds[0][2].historicalAt, 100000000 - 120000);

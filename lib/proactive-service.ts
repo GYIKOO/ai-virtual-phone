@@ -9,6 +9,7 @@ import { kvGet } from "./kv-db";
 import { loadFollowUpConfig } from "./settings-storage";
 import { followUpDelay } from "./proactive-followup";
 import { replayTime } from "./proactive-replay";
+import { getProactiveAbsence } from "./proactive-presence";
 import { loadProactive, saveProactiveState, refreshProactive, flushProactive, type ProactiveRecord } from "./proactive-storage";
 import { dueProactive, maxFollowUps, nextProactiveAt, proactiveInstruction, type ProactiveSource } from "./proactive-policy";
 
@@ -24,8 +25,10 @@ function synchronize(session: ChatSession, record: ProactiveRecord, now: number)
     let state = record.state;
     if (state.clockVersion !== 2 || state.anchor !== anchor) {
         const parsed = Date.parse(latest?.proactiveTiming?.generatedAt ?? latest?.createdAt ?? session.updatedAt);
-        const at = Number.isFinite(parsed) ? Math.min(now, parsed) : now;
-        state = anchorPlan(record.config, state.revision, !!session.isGroup, anchor, at, setting, now);
+        // Unversioned legacy plans have no reliable start: migrate from now.
+        const floor = state.configuredAt ?? (state.clockVersion !== 2 ? now : 0);
+        const at = Math.min(now, Math.max(floor, Number.isFinite(parsed) ? parsed : now));
+        state = { ...anchorPlan(record.config, state.revision, !!session.isGroup, anchor, at, setting, now), configuredAt: floor };
         if (latest?.role === "assistant") state.followupCount = record.state.followupCount;
     } else {
         state = releaseQuiet(changeQuiet(state, setting, now), now, setting);
@@ -59,6 +62,7 @@ export function schedulePersonalityFollowUp(sessionId: string, count?: number): 
     const history = loadChatMessages(sessionId);
     const latest = history.at(-1);
     if (!latest || latest.role !== "assistant") return;
+    if (Date.parse(latest.proactiveTiming?.generatedAt ?? latest.createdAt) < (state.configuredAt ?? 0)) return;
     // Only this reply's explicitly emitted value counts, never an inherited old status.
     const batch = latest.responseBatchId ? history.filter(m => m.responseBatchId === latest.responseBatchId && m.role === "assistant") : [latest];
     const value = batch.flatMap(m => m.freshStateValues ?? []).find(v => v.name === rules.followUpFieldName)?.value;
@@ -120,7 +124,7 @@ export function pollNewProactive(now: number, legacyBusy: (sessionId: string) =>
 async function fire(session: ChatSession, record: ProactiveRecord, source: ProactiveSource): Promise<void> {
     const controller = new AbortController();
     const { config } = record;
-    const historicalAt = replayTime(record.state, source, Date.now());
+    const historicalAt = replayTime(record.state, source, Date.now(), getProactiveAbsence());
     const state = { ...record.state, lastAttemptAt: Date.now(), retryAt: Date.now() + 30 * 60000, lastError: undefined };
     // Persist a retry lease, not a fictional new conversation, before calling the API.
     if (!saveProactiveState(session.id, state)) return;
@@ -129,6 +133,7 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
     const anchor = lastMessage(session.id);
     window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
     const valid = () => !controller.signal.aborted && loadProactive(session.id)?.state.revision === state.revision
+        && (historicalAt === undefined || replayTime(record.state, source, Date.now(), getProactiveAbsence()) === historicalAt)
         && !isWithinPushQuietHours(Date.now())
         && loadChatSessions().some(s => s.id === session.id && !s.proactiveDisabled && !s.isBlacklisted);
     try {

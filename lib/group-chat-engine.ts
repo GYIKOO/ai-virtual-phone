@@ -359,8 +359,8 @@ export async function buildGroupChatPromptMessages(
                 retrieveCoreMemoriesForPrompt(charId, memConfig, options?.historicalAt),
                 retrieveMemoriesForPrompt(charId, wbActivationContext, memConfig, options?.historicalAt),
             ]);
-            coreMemories = formatCoreMemories(coreResults);
-            longTermMemories = formatLongTermMemories(results);
+            coreMemories = formatCoreMemories(coreResults, now.getTime());
+            longTermMemories = formatLongTermMemories(results, now.getTime());
         } catch { /* ignore */ }
         return {
             character,

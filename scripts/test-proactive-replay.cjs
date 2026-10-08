@@ -11,7 +11,12 @@ function load(file, deps = {}) {
 const replay = load('lib/proactive-replay.ts');
 const time = h => Date.parse(`2026-10-05T${h}:00:00Z`);
 const iso = h => new Date(time(h)).toISOString();
-assert.equal(replay.replayTime({ personalityAt: time('08') }, 'personality', time('10')), time('08'));
+const absence = { leftAt: time('07'), returnedAt: time('10') };
+assert.equal(replay.replayTime({ personalityAt: time('08') }, 'personality', time('10'), absence), time('08'));
+assert.equal(replay.replayTime({ personalityAt: time('06') }, 'personality', time('10'), absence), undefined);
+assert.equal(replay.replayTime({ personalityAt: time('08'), configuredAt: time('09') }, 'personality', time('10'), absence), undefined);
+assert.equal(replay.replayTime({ personalityAt: time('09') }, 'personality', time('10'), { leftAt: time('07'), returnedAt: time('08') }), undefined);
+assert.equal(replay.replayTime({ personalityAt: time('08') }, 'personality', time('12'), absence), undefined, 'failed recovery cannot keep backdating hours after return');
 assert.equal(replay.replayTime({ personalityAt: time('08'), deferred: { personality: true } }, 'personality', time('10')), undefined);
 assert.equal(replay.replayTime({ personalityAt: time('11') }, 'personality', time('10')), undefined);
 assert.equal(replay.knownAt('invalid', time('09')), false);
@@ -21,6 +26,7 @@ const memories = [
   { id: 'edited', createdAt: iso('07'), updatedAt: iso('10'), content: 'later edit' },
 ];
 const service = load('lib/memory-service.ts', {
+  './memory-time': load('lib/memory-time.ts'),
   './proactive-replay': replay,
   './memory-storage': { loadMemoryEntriesByType: async () => memories },
   './settings-storage': { resolveAuxiliaryApiConfig: () => null },

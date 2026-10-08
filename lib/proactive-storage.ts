@@ -19,7 +19,8 @@ export function saveProactiveConfig(sessionId: string, config: ProactiveConfig, 
     const data = load();
     const normalized = normalizeProactiveConfig(config);
     if (isGroup) { normalized.personalityEnabled = false; normalized.followUpTier = 0; }
-    const record = { config: normalized, state: planProactive(normalized, Date.now(), (data[sessionId]?.state.revision ?? 0) + 1, isGroup) };
+    const now = Date.now();
+    const record = { config: normalized, state: { ...planProactive(normalized, now, (data[sessionId]?.state.revision ?? 0) + 1, isGroup), configuredAt: now } };
     data[sessionId] = record;
     kvSet(KEY, JSON.stringify(data));
     window.dispatchEvent(new CustomEvent(PROACTIVE_UPDATED, { detail: { sessionId } }));

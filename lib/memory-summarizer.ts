@@ -161,6 +161,8 @@ export async function runSummarizationPipeline(
         metadata: {
             summarizedEvents: allEntries.length,
             timeSpan: `${earliest} ~ ${latest}`,
+            eventStartAt: earliest,
+            eventEndAt: latest,
             sourceSessionIds,
         },
     };
