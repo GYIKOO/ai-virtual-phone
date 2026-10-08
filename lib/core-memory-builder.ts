@@ -13,6 +13,7 @@ import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { simpleLLMCall } from "./api-helpers";
 import { memoryEventRange } from "./memory-time";
 import { formatLongTermMemories } from "./memory-injector";
+import { assertNoMemoryRebuild, withMemoryWriterLock } from "./memory-writer-lock";
 
 const coreBuildingSet = new Set<string>();
 
@@ -42,6 +43,15 @@ export async function runCoreMemoryPipeline(
     characterName: string,
     options?: { force?: boolean },
 ): Promise<{ success: boolean; error?: string; rebuiltCount?: number }> {
+    try {
+        return await withMemoryWriterLock(characterId, async () => {
+            await assertNoMemoryRebuild(characterId);
+            return runCoreMemoryUnlocked(characterId, characterName, options);
+        });
+    } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+}
+
+async function runCoreMemoryUnlocked(characterId: string, characterName: string, options?: { force?: boolean }): Promise<{ success: boolean; error?: string; rebuiltCount?: number }> {
     const config = loadMemoryConfig();
     const allLongTermEntries = await loadMemoryEntriesByType(characterId, "long_term");
 

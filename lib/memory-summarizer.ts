@@ -20,6 +20,7 @@ import { loadNativeTimeline, formatTimelineForSummarization, filterTimelineByAll
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
+import { assertNoMemoryRebuild, withMemoryWriterLock } from "./memory-writer-lock";
 
 /** Per-character lock to prevent concurrent summarization. */
 const summarizingSet = new Set<string>();
@@ -63,6 +64,17 @@ export async function runSummarizationPipeline(
         sinceTimestamp?: string;
     }
 ): Promise<{ success: boolean; error?: string }> {
+    try {
+        const result = await withMemoryWriterLock(characterId, async () => {
+            await assertNoMemoryRebuild(characterId);
+            return runSummarizationUnlocked(characterId, characterName, options);
+        });
+        if (result.success) await maybeRunCoreMemoryPipeline(characterId, characterName);
+        return result;
+    } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; }
+}
+
+async function runSummarizationUnlocked(characterId: string, characterName: string, options?: { force?: boolean; sinceTimestamp?: string }): Promise<{ success: boolean; error?: string }> {
     const config = loadMemoryConfig();
 
     // Resolve API from auxiliary binding
@@ -180,7 +192,6 @@ export async function runSummarizationPipeline(
     }
 
     incrementCoreMemoryCounter(characterId);
-    await maybeRunCoreMemoryPipeline(characterId, characterName);
 
     console.log(`[MemorySummarizer] Summarized ${allEntries.length} entries → 1 long-term memory`);
     return { success: true };

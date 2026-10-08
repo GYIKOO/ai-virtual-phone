@@ -3,14 +3,16 @@
 
 import type { MemoryEntry, MemoryConfig } from "./memory-types";
 import { DEFAULT_MEMORY_CONFIG } from "./memory-types";
-import { kvGet, kvSet, registerKvMigration, registerDynamicPrefix } from "./kv-db";
+import { kvGet, kvSet, kvSetAsync, registerKvMigration, registerDynamicPrefix } from "./kv-db";
 import { openIndexedDbAtLeast } from "./idb-open";
 
 // ── Long-term memory DB (unchanged from v1) ──
 
 const DB_NAME = "ai_phone_memory_db_v1";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NAME = "memories";
+export const MEMORY_REBUILD_JOBS = "rebuild_jobs";
+export const MEMORY_REBUILD_BATCHES = "rebuild_batches";
 
 const CONFIG_KEY = "ai_phone_memory_config_v1";
 
@@ -34,7 +36,7 @@ async function openDb(): Promise<IDBDatabase | null> {
     if (!hasBrowserApi()) return null;
     // Open at >= DB_VERSION: a backup restore may have bumped the stored version
     // higher, and opening at a fixed lower version would throw a VersionError.
-    return openIndexedDbAtLeast(DB_NAME, DB_VERSION, (db, _oldVersion, tx) => {
+    const upgrade = (db: IDBDatabase, _oldVersion: number, tx: IDBTransaction | null) => {
         let store: IDBObjectStore;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
             store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
@@ -42,7 +44,32 @@ async function openDb(): Promise<IDBDatabase | null> {
             store = tx!.objectStore(STORE_NAME);
         }
         ensureMemoryIndexes(store);
-    }).catch(() => null);
+        if (!db.objectStoreNames.contains(MEMORY_REBUILD_JOBS)) db.createObjectStore(MEMORY_REBUILD_JOBS, { keyPath: "characterId" });
+        if (!db.objectStoreNames.contains(MEMORY_REBUILD_BATCHES)) {
+            db.createObjectStore(MEMORY_REBUILD_BATCHES, { keyPath: "id" }).createIndex("by_job", "jobId");
+        }
+    };
+    try {
+        let db = await openIndexedDbAtLeast(DB_NAME, DB_VERSION, upgrade);
+        // Backups can restore an older schema at a higher database version.
+        if (!db.objectStoreNames.contains(MEMORY_REBUILD_JOBS) || !db.objectStoreNames.contains(MEMORY_REBUILD_BATCHES)) {
+            const version = db.version + 1;
+            db.close();
+            db = await openIndexedDbAtLeast(DB_NAME, version, upgrade);
+        }
+        db.onversionchange = () => db.close();
+        return db;
+    } catch { return null; }
+}
+
+/** Rebuild operations must fail closed rather than silently succeeding without storage. */
+export async function openMemoryRebuildDb(): Promise<IDBDatabase> {
+    const db = await openDb();
+    if (!db || !db.objectStoreNames.contains(MEMORY_REBUILD_JOBS) || !db.objectStoreNames.contains(MEMORY_REBUILD_BATCHES)) {
+        db?.close();
+        throw new Error("记忆数据库不可用，未修改现有记忆。请检查浏览器存储权限和剩余空间。");
+    }
+    return db;
 }
 
 function runRequest<T>(req: IDBRequest<T>): Promise<T> {
@@ -230,6 +257,13 @@ export function getLastSummarizedTimestamp(characterId: string): string | null {
 export function setLastSummarizedTimestamp(characterId: string, ts: string): void {
     if (typeof window === "undefined") return;
     kvSet(LAST_SUMMARY_TS_PREFIX + characterId, ts);
+}
+
+export async function restoreMemoryWatermarks(characterId: string, longTerm: string | null, core: string | null): Promise<void> {
+    await Promise.all([
+        kvSetAsync(LAST_SUMMARY_TS_PREFIX + characterId, longTerm || ""),
+        kvSetAsync(LAST_CORE_SUMMARY_TS_PREFIX + characterId, core || ""),
+    ]);
 }
 
 export function getCoreMemoryCounter(characterId: string): number {

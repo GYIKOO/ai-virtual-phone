@@ -28,6 +28,7 @@ import { runCoreMemoryPipeline } from "@/lib/core-memory-builder";
 import { resolveAuxiliaryApiConfig, resolveUserIdentity } from "@/lib/settings-storage";
 import { generateEmbedding, resolveEmbeddingModel } from "@/lib/memory-embedding";
 import { BINDING_ACCENTS } from "@/lib/ui-accent-colors";
+import { MemoryRebuildPanel } from "./memory-rebuild-panel";
 
 type MemoryView = "list" | "detail" | "settings";
 type MemoryTab = "short" | "shared" | "core" | "long";
@@ -962,6 +963,9 @@ export function MemoryBankPage({
                                 </div>
                             </div>
                         </div>
+
+                        <MemoryRebuildPanel key={selectedCharId} characterId={selectedCharId} characterName={selectedChar?.name ?? "当前角色"}
+                            onChanged={() => { void loadDetailData(selectedCharId); void loadCharacterList(); }} />
 
                         {summarizeRangeOpen ? (
                             <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onClick={() => setSummarizeRangeOpen(false)}>

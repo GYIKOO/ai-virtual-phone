@@ -40,6 +40,7 @@ assert.equal(injector.formatLongTermMemories([entry], now), `- ${entry.content}`
   assert.equal(result[0].id, 'recent', 'event recency wins over late summary creation');
   let stored, watermark, prompt;
   const builder = load('lib/core-memory-builder.ts', {
+    './memory-writer-lock': { withMemoryWriterLock: (_id, work) => work(), assertNoMemoryRebuild: async () => {} },
     './memory-time': t, './memory-injector': { formatLongTermMemories: entries => entries.map(e => t.formatMemoryEntry(e, now)).join('\n') },
     './memory-types': { DEFAULT_CORE_MEMORY_PROMPT: '{{earliest}} / {{latest}} / {{events}}' },
     './memory-storage': {
