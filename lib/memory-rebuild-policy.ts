@@ -8,14 +8,26 @@ export type RebuildJob = {
     characterId: string; characterName: string; id: string; version: 1;
     status: "paused" | "running" | "failed" | "ready" | "applied" | "rolled_back";
     createdAt: string; cutoff: string; batchSize: number; inputTokens: number; includeCore: boolean; coreBatchSize: number;
+    // Optional for compatibility with tasks created before tail deferral was introduced.
+    summarizedThrough?: string; deferredCount?: number; autoSummaryInterval?: number; appliedCounterDelta?: number;
     sourceCount: number; sourceHash: string; allowedSources: import("./memory-types").MemoryConfig["shortTermAllowedSources"];
     prompt: string; corePrompt: string; api: Pick<ApiConfig, "id" | "provider" | "baseUrl" | "defaultModel">;
     embeddingApi?: Pick<ApiConfig, "id" | "provider" | "baseUrl" | "defaultModel">;
     baseline: MemoryEntry[]; beforeProgress: { longTerm: string | null; core: string | null };
     longBatches: number; totalBatches: number; completed: number; corePlanned: boolean;
     error?: string; warning?: string;
-    progressPending?: { longTerm: string | null; core: string | null };
+    progressPending?: { longTerm: string | null; core: string | null; counterAdjustment?: { id: string; delta: number } };
 };
+/** Choose whole records BEFORE token splitting; a technical chunk is not a new event. */
+export function selectRebuildSources(sources: RebuildSource[], batchSize: number, autoInterval: number): { selected: RebuildSource[]; deferred: RebuildSource[] } {
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1000 || !Number.isInteger(autoInterval) || autoInterval < 1) throw new Error("重建批量或自动总结阈值无效。");
+    const remainder = sources.length % batchSize;
+    let count = remainder > 0 && remainder < autoInterval ? sources.length - remainder : sources.length;
+    // The existing incremental reader uses timestamp > watermark. Never split
+    // a same-timestamp group across that boundary, or its tail would be skipped.
+    while (count > 0 && count < sources.length && sources[count - 1].timestamp === sources[count].timestamp) count--;
+    return { selected: sources.slice(0, count), deferred: sources.slice(count) };
+}
 export function protectedMemory(entry: MemoryEntry): boolean {
     return entry.metadata?.origin === "user_manual" || entry.metadata?.origin === "user_edited" || entry.metadata?.editedByUser === true || entry.id.includes("_manual_");
 }

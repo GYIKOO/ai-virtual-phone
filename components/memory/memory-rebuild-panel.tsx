@@ -46,7 +46,7 @@ export function MemoryRebuildPanel({ characterId, characterName, onChanged }: { 
     };
     const options = { batchSize, inputTokens, includeCore };
     const messages: Record<Confirm, string> = {
-        start: `将仅为「${characterName}」分批重读历史，预计 ${preview?.batchCount ?? 0} 次长期总结调用${includeCore ? "，另有核心总结调用" : ""}${job?.embeddingApi ? "和向量调用" : "；若已配置向量 API，还会生成向量"}，可能产生费用。不会删除聊天记录，也不影响其他角色。旧记忆继续使用，完成后还需你确认启用。`,
+        start: `将仅为「${characterName}」分批重读历史，预计 ${preview?.batchCount ?? 0} 次长期总结调用${includeCore ? "，另有核心总结调用" : ""}${job?.embeddingApi ? "和向量调用" : "；若已配置向量 API，还会生成向量"}，可能产生费用。${preview?.deferredCount ? `末尾 ${preview.deferredCount} 条不总结，留待日常累积。` : ""}不会删除聊天记录，也不影响其他角色。旧记忆继续使用，完成后还需你确认启用。`,
         apply: `确认启用「${characterName}」的新记忆？将替换该角色的旧自动长期总结${job?.includeCore ? "和旧自动核心总结" : "，核心记忆保持原样"}。手动新增、编辑过的记忆保留。旧版保留一份回退副本；若启用后又有记忆变更，安全回退会被拦截，以保护新数据。`,
         discard: job?.status === "applied" ? `删除「${characterName}」的重建任务和旧版回退副本？删除后无法通过此入口回退。当前已启用的记忆、聊天和其他角色不变。`
             : `取消并清理「${characterName}」的重建任务？已生成的暂存结果和进度将被删除，无法继续此任务。正在使用的记忆和聊天记录不变。`,
@@ -81,6 +81,7 @@ export function MemoryRebuildPanel({ characterId, characterName, onChanged }: { 
                     <label className="menu-label flex flex-col gap-2">每批最多处理的记录数
                         <input className="ui-input w-full" type="number" min={1} max={1000} value={batchSize} onChange={e => { setBatchSize(Number(e.target.value)); setPreview(undefined); }} />
                         <span className="menu-desc">默认沿用当前自动总结间隔；仅调整本次重建，不改变日常设置。</span>
+                        <span className="menu-desc">最后不足一批的记录，达到日常自动总结阈值才总结，否则留着继续累积。同一时间戳的记录不会拆在已总结与未总结两侧。</span>
                     </label>
                     <label className="menu-label flex flex-col gap-2">每次请求输入预算（估算 tokens）
                         <input className="ui-input w-full" type="number" min={1024} max={64000} step={1024} value={inputTokens} onChange={e => { setInputTokens(Number(e.target.value)); setPreview(undefined); }} />
@@ -90,17 +91,21 @@ export function MemoryRebuildPanel({ characterId, characterName, onChanged }: { 
                     <p className="menu-desc">按当前记忆来源设置读取全部可用历史。剧情、线下沿用已有摘要；已删除记录无法恢复，独立剧情仍遵守原有隔离规则。</p>
                     <button className="ui-btn ui-btn-outline" disabled={busy} onClick={() => void act(async () => { setPreview(await previewMemoryRebuild(characterId, options)); })}>预览重建范围（不调用 API）</button>
                     {preview && <div className="menu-group p-3 flex flex-col gap-2">
-                        <p className="menu-label">{preview.sourceCount} 条来源记录 → {preview.batchCount} 批长期总结</p>
+                        <p className="menu-label">共 {preview.sourceCount} 条 · 重建 {preview.summarizedCount} 条 → {preview.batchCount} 批长期总结</p>
                         <p className="menu-desc break-all">UTC：{preview.first} 至 {preview.last}</p>
+                        <p className="menu-desc">末尾 {preview.deferredCount} 条保留为未总结记录，继续累积；日常自动总结阈值：{preview.autoSummaryInterval}。{preview.summarizedCount === 0 ? "本次无需重建，旧记忆不会变动。" : ""}</p>
+                        {preview.summarizedThrough && <p className="menu-desc break-all">实际总结至 UTC {preview.summarizedThrough}</p>}
                         <p className="menu-desc">来源：{preview.sources.join("、")} · 模型：{preview.model}</p>
                         <p className="menu-desc">保留 {preview.protectedCount} 条手动新增或编辑的记忆。{includeCore ? "核心总结将在长期总结完成后另外分批。" : "核心记忆不会随本次重建更新。"}</p>
-                        <button className="ui-btn ui-btn-primary" disabled={busy} onClick={() => setConfirm("start")}>开始重建…</button>
+                        <button className="ui-btn ui-btn-primary" disabled={busy || preview.summarizedCount === 0} onClick={() => setConfirm("start")}>开始重建…</button>
                     </div>}
                 </> : <>
                     <p className="menu-label">{LABELS[job.status]}</p>
                     <progress className="w-full" aria-label="重建进度" value={job.completed} max={job.totalBatches} />
                     <p className="menu-desc">已保存 {job.completed} / {job.totalBatches} 批 · {job.sourceCount} 条来源记录{job.includeCore && !job.corePlanned ? " · 核心批次稍后计算" : ""}</p>
                     <p className="menu-desc break-all">本次历史截止 UTC {job.cutoff} · {job.api.defaultModel}</p>
+                    {job.summarizedThrough && <p className="menu-desc break-all">实际总结至 UTC {job.summarizedThrough} · 留下 {job.deferredCount ?? 0} 条继续累积</p>}
+                    {!job.summarizedThrough && <p className="menu-desc">这是旧规则创建的任务，仍会总结全部选定历史。如需保留不足阈值的尾部记录，请取消后重新预览创建；已生成批次不会自动重算。</p>}
                     {job.error && <p role="alert" className="ts-12 text-red-600 whitespace-pre-wrap">{job.error}</p>}
                     {!["applied", "rolled_back"].includes(job.status) && <p className="menu-desc">旧记忆仍在使用。此角色的自动／手动总结暂缓，聊天照常保存；取消或启用后恢复。关闭页面后可能中断，再次进入点击继续即可。未保存的在途请求可能需要重新调用。</p>}
                     <div className="flex flex-wrap gap-2">

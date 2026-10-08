@@ -1,4 +1,4 @@
-import { openMemoryRebuildDb, MEMORY_REBUILD_JOBS as JOBS, MEMORY_REBUILD_BATCHES as BATCHES, restoreMemoryWatermarks } from "./memory-storage";
+import { openMemoryRebuildDb, MEMORY_REBUILD_JOBS as JOBS, MEMORY_REBUILD_BATCHES as BATCHES, restoreMemoryWatermarks, adjustMemoryEventCounter } from "./memory-storage";
 import { memorySnapshot, protectedMemory, type RebuildJob, type RebuildBatch } from "./memory-rebuild-policy";
 import type { MemoryEntry } from "./memory-types";
 
@@ -33,12 +33,13 @@ export async function reconcileRebuildProgress(characterId: string): Promise<Reb
     const job = await readRebuildJob(characterId);
     if (job?.progressPending) {
         await restoreMemoryWatermarks(characterId, job.progressPending.longTerm, job.progressPending.core);
+        if (job.progressPending.counterAdjustment) await adjustMemoryEventCounter(characterId, job.progressPending.counterAdjustment);
         delete job.progressPending;
         await writeRebuildJob(job);
     }
     return job;
 }
-export async function swapRebuild(jobId: string, characterId: string, rollback: boolean, maxEntries: number): Promise<void> {
+export async function swapRebuild(jobId: string, characterId: string, rollback: boolean, maxEntries: number, counterDelta?: number): Promise<void> {
     const db = await openMemoryRebuildDb();
     try {
         const tx = db.transaction([JOBS, BATCHES, "memories"], "readwrite");
@@ -67,9 +68,14 @@ export async function swapRebuild(jobId: string, characterId: string, rollback: 
                     for (const entry of current.filter(relevant)) tx.objectStore("memories").delete(entry.id);
                     for (const entry of replacement) tx.objectStore("memories").put(entry);
                     job.status = rollback ? "rolled_back" : "applied";
-                    job.progressPending = rollback ? job.beforeProgress : {
-                        longTerm: job.cutoff,
+                    if (!rollback && counterDelta !== undefined) job.appliedCounterDelta = counterDelta;
+                    job.progressPending = rollback ? { ...job.beforeProgress } : {
+                        longTerm: job.summarizedThrough ?? job.cutoff,
                         core: generated.filter(e => e.type === "long_term").map(e => e.createdAt).sort().at(-1) ?? job.beforeProgress.core,
+                    };
+                    if (job.appliedCounterDelta !== undefined) job.progressPending.counterAdjustment = {
+                        id: `${job.id}:${rollback ? "rollback" : "apply"}`,
+                        delta: rollback ? -job.appliedCounterDelta : job.appliedCounterDelta,
                     };
                     tx.objectStore(JOBS).put(job);
                 };

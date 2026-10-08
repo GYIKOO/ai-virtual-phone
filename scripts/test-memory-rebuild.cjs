@@ -15,8 +15,10 @@ const mocks = {
   './character-storage': { loadCharacters: () => characters },
   './settings-storage': { loadApiConfigs: () => [api], resolveAuxiliaryApiConfig: () => api },
   './short-term-assembler': {
-    loadNativeTimeline: () => timeline.map(e => ({ ...e })), filterTimelineByAllowedSources: rows => rows,
+    loadNativeTimeline: (_characterId, options) => timeline.filter(e => !options?.afterTimestamp || e.timestamp > options.afterTimestamp).map(e => ({ ...e })), filterTimelineByAllowedSources: rows => rows,
+    formatTimelineForSummarization: rows => ({ eventsText: rows.map(e => e.content).join('\n'), earliest: rows[0].timestamp, latest: rows.at(-1).timestamp }),
   },
+  './core-memory-builder': { maybeRunCoreMemoryPipeline: async () => {} },
   './api-helpers': { simpleLLMCall: async () => { apiCalls++; onCall?.(); return failApi ? { content: null, error: 'fixture failure' } : { content: `summary ${apiCalls}`, wasTruncated: truncated }; } },
   './memory-embedding': { resolveEmbeddingModel: () => 'fixture', generateEmbedding: async () => { embeddingCalls++; return failEmbedding ? null : [1, 2, 3]; } },
 };
@@ -62,7 +64,7 @@ async function discard() { const job = await store.readRebuildJob('a'); if (job)
   assert.equal(policy.planRebuildBatches(sources.map(e => ({ ...e, timestamp: sources[0].timestamp })), 3, 1024, '{{events}}', 'A').flat().length, 7);
   assert.ok(policy.rebuildPrompt('{{char}} {{events}}', '$&', sources).startsWith('$&'));
   assert.equal(policy.protectedMemory({ ...auto, id: 'mem_lt_manual_legacy' }), true, 'legacy manual IDs remain protected without metadata');
-  storage.saveMemoryConfig({ ...load('./memory-types').DEFAULT_MEMORY_CONFIG, vectorRecallEnabled: false, summarizationEventInterval: 80, coreSummarizationInterval: 2 });
+  storage.saveMemoryConfig({ ...load('./memory-types').DEFAULT_MEMORY_CONFIG, vectorRecallEnabled: false, summarizationEventInterval: 1, coreSummarizationInterval: 2 });
   for (const row of [auto, manual, core, other]) await storage.saveMemoryEntry(row);
   storage.setLastSummarizedTimestamp('a', '2026-01-02T00:00:00Z');
   storage.setLastCoreSummarizedTimestamp('a', '2026-01-01T00:00:00Z');
@@ -73,7 +75,7 @@ async function discard() { const job = await store.readRebuildJob('a'); if (job)
   const original = policy.memorySnapshot(await storage.loadMemoryEntries('a'));
   let job = await start();
   assert.equal(apiCalls, 0, 'creation and preview never call paid API');
-  assert.equal(storage.loadMemoryConfig().summarizationEventInterval, 80, 'batch size never alters daily interval');
+  assert.equal(storage.loadMemoryConfig().summarizationEventInterval, 1, 'batch size never alters daily interval');
   assert.equal(policy.memorySnapshot(await storage.loadMemoryEntries('a')), original);
   await assert.rejects(() => load('./memory-writer-lock').assertNoMemoryRebuild('a'), /重建/);
   await load('./memory-writer-lock').assertNoMemoryRebuild('b');
@@ -172,6 +174,89 @@ async function discard() { const job = await store.readRebuildJob('a'); if (job)
   heldLocks.add('float-memory-writer:a');
   await assert.rejects(() => service.runMemoryRebuild('a'), /正在运行/);
   heldLocks.clear();
+  // Tail selection is based on logical records, never on token-generated chunks.
+  const history = Array.from({ length: 120 }, (_, i) => ({ ...sources[0], id: `h${i}`, key: `h${i}`, timestamp: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(), content: `history ${i}` }));
+  let selection = policy.selectRebuildSources(history, 100, 80);
+  assert.equal(selection.selected.length, 100);
+  assert.equal(selection.deferred.length, 20);
+  assert.equal(policy.selectRebuildSources(history.slice(0, 80), 100, 80).selected.length, 80, 'tail equal to threshold is summarized');
+  assert.equal(policy.selectRebuildSources(history.slice(0, 79), 100, 80).selected.length, 0);
+  assert.equal(policy.selectRebuildSources(history.slice(0, 100), 100, 80).selected.length, 100, 'exact batches have no tail');
+  assert.equal(policy.selectRebuildSources(history.slice(0, 90), 100, 80).selected.length, 90, 'tail between daily threshold and rebuild size is summarized');
+  const tied = history.map(e => ({ ...e })); tied[100].timestamp = tied[99].timestamp;
+  assert.equal(policy.selectRebuildSources(tied, 100, 80).selected.length, 99, 'same-timestamp tail is not skipped by watermark');
+  const hugeSelected = [...selection.selected]; hugeSelected[99] = { ...hugeSelected[99], content: huge.content };
+  assert.equal(policy.planRebuildBatches(hugeSelected, 100, 1024, '{{events}}', 'A').flat().filter(e => e.key === 'h99').map(e => e.content).join(''), huge.content, 'selected long record remains complete despite many technical chunks');
+
+  storage.saveMemoryConfig({ ...storage.loadMemoryConfig(), vectorRecallEnabled: false, summarizationEventInterval: 80 });
+  timeline = history.slice(0, 20);
+  const tailOptions = { batchSize: 100, inputTokens: 64000, includeCore: false };
+  let preview = await service.previewMemoryRebuild('a', tailOptions);
+  const beforeEmpty = policy.memorySnapshot(await storage.loadMemoryEntries('a'));
+  const beforeEmptyCalls = apiCalls;
+  assert.equal(preview.batchCount, 0);
+  await assert.rejects(() => service.createMemoryRebuild('a', tailOptions, preview.hash), /本次没有需要重建/);
+  assert.equal(apiCalls, beforeEmptyCalls);
+  assert.equal(policy.memorySnapshot(await storage.loadMemoryEntries('a')), beforeEmpty, 'zero-batch task must not clear old memories');
+  timeline = history;
+  preview = await service.previewMemoryRebuild('a', tailOptions);
+  assert.equal(preview.summarizedCount, 100); assert.equal(preview.deferredCount, 20); assert.equal(preview.batchCount, 1);
+  storage.saveMemoryConfig({ ...storage.loadMemoryConfig(), summarizationEventInterval: 81 });
+  await assert.rejects(() => service.createMemoryRebuild('a', tailOptions, preview.hash), /设置已改变/);
+  storage.saveMemoryConfig({ ...storage.loadMemoryConfig(), summarizationEventInterval: 80 });
+  kv.set('ai_phone_mem_evt_count_a', '120');
+  job = await start(tailOptions); await service.runMemoryRebuild('a');
+  assert.equal((await store.readRebuildBatches(job.id)).length, 1);
+  const appendEvent = () => {
+    const i = timeline.length;
+    timeline.push({ ...history[0], id: `later${i}`, key: `later${i}`, timestamp: new Date(Date.UTC(2026, 1, 1, 0, i)).toISOString(), content: `later ${i}` });
+    storage.incrementEventCounter('a');
+  };
+  appendEvent();
+  const swap = store.swapRebuild;
+  store.swapRebuild = async (...args) => { appendEvent(); return swap(...args); };
+  await service.applyMemoryRebuild('a', job.id);
+  store.swapRebuild = swap;
+  assert.equal(storage.getLastSummarizedTimestamp('a'), history[99].timestamp);
+  assert.equal(storage.getEventCounter('a'), 22, '20 deferred plus two arrivals, including during activation');
+  job = await store.readRebuildJob('a');
+  // Simulate crash after counter write but before its durable job marker was cleared.
+  job.progressPending = { longTerm: job.summarizedThrough, core: storage.getLastCoreSummarizedTimestamp('a'), counterAdjustment: { id: `${job.id}:apply`, delta: job.appliedCounterDelta } };
+  await store.writeRebuildJob(job); appendEvent();
+  await store.reconcileRebuildProgress('a');
+  assert.equal(storage.getEventCounter('a'), 23, 'counter correction is idempotent even after new arrivals');
+  await service.rollbackMemoryRebuild('a', job.id);
+  assert.equal(storage.getEventCounter('a'), 123, 'rollback restores old accounting without losing later arrivals');
+  await discard();
+  job = await start(tailOptions); await service.runMemoryRebuild('a'); await service.applyMemoryRebuild('a', job.id);
+  assert.equal(storage.getEventCounter('a'), 23);
+  const summary = load('./memory-summarizer');
+  for (let i = 0; i < 56; i++) appendEvent();
+  const beforeAutomatic = apiCalls;
+  await summary.maybeRunSummarization('a', 'A');
+  assert.equal(apiCalls, beforeAutomatic, '79 pending records do not trigger the daily threshold of 80');
+  appendEvent(); await summary.maybeRunSummarization('a', 'A');
+  assert.equal(apiCalls, beforeAutomatic + 1);
+  const lastMemory = (await storage.loadMemoryEntries('a')).find(e => e.metadata?.summarizedEvents === 80);
+  assert.ok(lastMemory, 'ordinary incremental summary picks up all 80 pending records');
+  assert.equal(lastMemory.metadata.eventStartAt, history[100].timestamp, 'deferred history begins the next ordinary summary');
+  assert.equal(storage.getEventCounter('a'), 0);
+  await discard();
+  for (let i = 0; i < 4; i++) appendEvent();
+  const beforeManual = apiCalls;
+  assert.equal((await summary.runSummarizationPipeline('a', 'A')).success, true);
+  assert.equal(apiCalls, beforeManual + 1, 'manual incremental summary still works below the automatic threshold');
+  // Old persisted tasks keep their frozen all-history scope and counter behavior.
+  storage.saveMemoryConfig({ ...storage.loadMemoryConfig(), summarizationEventInterval: 1 });
+  timeline = makeTimeline();
+  job = await start();
+  delete job.summarizedThrough; delete job.deferredCount; delete job.autoSummaryInterval;
+  await store.writeRebuildJob(job); await service.runMemoryRebuild('a');
+  const legacyCount = storage.getEventCounter('a');
+  await service.applyMemoryRebuild('a', job.id);
+  assert.equal(storage.getLastSummarizedTimestamp('a'), job.cutoff);
+  assert.equal(storage.getEventCounter('a'), legacyCount);
+  await discard();
   // Restoring an older schema at a higher version still upgrades the new stores.
   await new Promise((resolve, reject) => { const req = indexedDB.deleteDatabase('ai_phone_memory_db_v1'); req.onsuccess = resolve; req.onerror = reject; });
   await new Promise((resolve, reject) => {

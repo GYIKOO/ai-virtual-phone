@@ -239,14 +239,33 @@ export function getEventCounter(characterId: string): number {
 export function incrementEventCounter(characterId: string): number {
     const next = getEventCounter(characterId) + 1;
     if (typeof window !== "undefined") {
-        kvSet(EVENT_COUNTER_PREFIX + characterId, String(next));
+        kvSet(EVENT_COUNTER_PREFIX + characterId, counterWithReceipt(characterId, next));
     }
     return next;
 }
 
 export function resetEventCounter(characterId: string): void {
     if (typeof window === "undefined") return;
-    kvSet(EVENT_COUNTER_PREFIX + characterId, "0");
+    kvSet(EVENT_COUNTER_PREFIX + characterId, counterWithReceipt(characterId, 0));
+}
+
+// Keep the leading integer compatible with existing counters/backups. The suffix
+// is an idempotency receipt, retained by ordinary increments and resets.
+function counterWithReceipt(characterId: string, count: number): string {
+    const raw = kvGet(EVENT_COUNTER_PREFIX + characterId) || "";
+    const separator = raw.indexOf("|");
+    return String(count) + (separator >= 0 ? raw.slice(separator) : "");
+}
+
+export async function adjustMemoryEventCounter(characterId: string, adjustment: { id: string; delta: number }): Promise<void> {
+    const key = EVENT_COUNTER_PREFIX + characterId;
+    const raw = kvGet(key) || "0";
+    const receipt = raw.includes("|") ? raw.slice(raw.indexOf("|") + 1) : "";
+    const count = getEventCounter(characterId);
+    const value = receipt === adjustment.id ? raw : `${Math.max(0, count + adjustment.delta)}|${adjustment.id}`;
+    // Even on a retry, flush the cached receipt: an earlier durable write may
+    // have failed after kvSetAsync updated its synchronous cache.
+    await kvSetAsync(key, value);
 }
 
 export function getLastSummarizedTimestamp(characterId: string): string | null {
