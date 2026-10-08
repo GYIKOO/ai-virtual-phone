@@ -37,3 +37,19 @@ export function saveProactiveState(sessionId: string, state: ProactiveState): bo
 export function removeProactive(sessionId: string): void {
     const data = load(); delete data[sessionId]; kvSet(KEY, JSON.stringify(data));
 }
+
+/** Deleting a delivered opportunity dismisses the whole round, including follow-ups. */
+export function dismissDeletedProactive(sessionId: string, deletedIds: string[], isGroup: boolean, now = Date.now()): boolean {
+    const record = loadProactive(sessionId);
+    if (!record) return false;
+    const ids = new Set(deletedIds);
+    const relevant = record.state.handledMessageIds?.some(id => ids.has(id))
+        || deletedIds.some(id => record.state.anchor?.startsWith(`${id}:`));
+    if (!relevant) return false;
+    const state: ProactiveState = { ...planProactive(record.config, now, record.state.revision + 1, isGroup),
+        configuredAt: record.state.configuredAt, cycleFloorAt: now, dismissedAt: now, handledAt: now };
+    const data = load();
+    data[sessionId] = { config: record.config, state };
+    kvSet(KEY, JSON.stringify(data));
+    return true;
+}

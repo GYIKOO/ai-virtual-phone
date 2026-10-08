@@ -66,8 +66,34 @@ storage.saveProactiveConfig('b', config, true);
 assert.equal(storage.loadProactive('b').config.personalityEnabled, false);
 storage.removeProactive('a');
 assert.ok(storage.loadProactive('b'), 'deleting one session preserves others');
+const receipt = storage.saveProactiveConfig('del', config, false);
+storage.saveProactiveState('del', { ...receipt.state, anchor: 'bubble2:time', handledMessageIds: ['bubble1', 'bubble2'], followupAt: 1 });
+assert.equal(storage.dismissDeletedProactive('del', ['unrelated'], false, 100000000), false);
+assert.equal(storage.dismissDeletedProactive('del', ['bubble1'], false, 100000000), true, 'deleting any bubble dismisses its entire opportunity');
+const dismissed = storage.loadProactive('del');
+assert.equal(dismissed.state.revision, receipt.state.revision + 1);
+assert.equal(dismissed.state.followupAt, undefined);
+assert.equal(dismissed.state.cycleFloorAt, 100000000);
+assert.ok(dismissed.state.fixedAt > 100000000);
+assert.equal(storage.saveProactiveState('del', receipt.state), false, 'delete invalidates an in-flight generation');
+assert.ok(storage.loadProactive('b'), 'dismissal leaves other conversations intact');
+const temporalContext = load('lib/proactive-context.ts', {
+  './character-storage': { loadCharacters: () => [{ id: 'c', name: 'A', timeZone: 'Asia/Shanghai' }] },
+  './memory-storage': { loadMemoryConfig: () => ({}) },
+  './short-term-assembler': { loadNativeTimeline: () => [], filterTimelineByAllowedSources: x => x },
+  './character-time': load('lib/character-time.ts'),
+});
+const lateNight = temporalContext.prepareProactiveSituation({ id: 's', contactId: 'c' }, [
+  { id: 'goodnight', role: 'assistant', createdAt: '2026-10-09T17:00:00.000Z', content: '晚安' },
+], undefined, Date.parse('2026-10-10T16:00:00.000Z'));
+assert.ok(lateNight.context.includes('距本轮 23小时') && lateNight.context.includes('发言者：角色'));
+assert.ok(lateNight.context.includes('2026-10-10T16:00:00.000Z'));
+for (const file of ['lib/chat-engine.ts', 'lib/group-chat-engine.ts']) {
+  assert.ok(fs.readFileSync(file, 'utf8').includes('if (!options?.appTags?.includes("proactive")) appendEmptyGenerateGuardMessage'), 'manual continuation guard is excluded from proactive generation');
+}
+assert.ok(fs.readFileSync('lib/chat-storage.ts', 'utf8').includes('if (session) dismissDeletedProactive(sessionId,'), 'all message deletion paths reach scoped dismissal');
 
-async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0, overdue = 1, deferred = false, absence = { leftAt: 99000000, returnedAt: 100000000 }, changedConfig = false, unversioned = false, changedAnchor = false, enabled = true } = {}) {
+async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0, overdue = 1, deferred = false, absence = { leftAt: 99000000, returnedAt: 100000000 }, changedConfig = false, unversioned = false, changedAnchor = false, enabled = true, crossEvents = [] } = {}) {
   let now = 100000000;
   const session = { id: 's', contactId: 'c', isGroup: group };
   const createdAt = new Date(now - 3600000).toISOString();
@@ -83,6 +109,12 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
     refreshProactive: async () => {}, flushProactive: async () => {},
   };
   const prompt = { llmMessages: [], config: {}, preset: null, regexes: [], character: { name: 'C' }, ...(group ? { nameToId: new Map([['C', 'c']]) } : {}) };
+  const context = load('lib/proactive-context.ts', {
+    './character-storage': { loadCharacters: () => [{ id: 'c', name: 'C', timeZone: 'UTC' }] },
+    './memory-storage': { loadMemoryConfig: () => ({}) },
+    './short-term-assembler': { loadNativeTimeline: () => crossEvents, filterTimelineByAllowedSources: x => x },
+    './character-time': load('lib/character-time.ts'),
+  });
   const service = load('lib/proactive-service.ts', {
     './chat-storage': { loadChatSessions: () => [session], loadChatMessages: () => history, clearFollowUpSchedule() {} },
     './chat-engine': {
@@ -97,6 +129,7 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
     './proactive-storage': store, './proactive-policy': p, './proactive-clock': clock,
     './settings-storage': { loadFollowUpConfig: () => rules }, './proactive-followup': followup,
     './proactive-replay': replay,
+    './proactive-context': context,
     './proactive-presence': { getProactiveAbsence: () => absence },
     './follow-up-service': { parseAndSaveResponse: async (...args) => { saved.push(args); history.push({ id: 'a', role: 'assistant', createdAt: args[5]?.createdAt ?? new Date(now).toISOString(), proactiveTiming: args[5]?.proactiveTiming, stateValues: [{ name: '跟进意愿', value: 90 }], freshStateValues: fresh ? [{ name: '跟进意愿', value: 90 }] : [] }); return { hasVisible: true }; } },
     './memory-storage': { incrementEventCounter() {} }, './memory-summarizer': { maybeRunSummarization: async () => {} },
@@ -109,7 +142,7 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
   await new Promise(resolve => setImmediate(resolve));
   service.pollNewProactive(now, () => false);
   await new Promise(resolve => setImmediate(resolve));
-  return { calls, saved, events, record, service, builds };
+  return { calls, saved, events, record, service, builds, history, async advance(ms) { now += ms; service.pollNewProactive(now, () => false); await new Promise(resolve => setImmediate(resolve)); } };
 }
 (async () => {
   const normal = await scenario();
@@ -149,7 +182,25 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
   assert.equal(normal.calls[0][2].at(-1).role, 'system');
   const silent = await scenario({ output: '<proactive-skip/>' });
   assert.equal(silent.saved.length, 0);
-  assert.equal(silent.record.state.fixedAt, undefined, 'silence ends this opportunity instead of retrying');
+  assert.ok(silent.record.state.fixedAt > 100000000 && silent.record.state.personalityAt > 100000000, 'silence consumes both clocks and plans a future opportunity');
+  await silent.advance(60001);
+  assert.equal(silent.calls.length, 1, 'silence is not immediately retried by the other clock');
+  assert.ok(normal.record.state.handledMessageIds.includes('a'), 'receipt remembers delivered message IDs');
+  normal.history.pop();
+  await normal.advance(60001);
+  assert.equal(normal.calls.length, 1, 'deleting visible reply cannot rewind to the old overdue anchor');
+  assert.equal(normal.record.state.followupAt, undefined, 'old reply cannot spawn follow-up after deletion');
+  normal.service.schedulePersonalityFollowUp('s');
+  assert.equal(normal.record.state.followupAt, undefined);
+  const breakfast = { id: 'breakfast', sourceApp: 'story', sourceDetail: 'chat_offline', timestamp: new Date(99500000).toISOString(), content: 'B和用户在群聊线下一起吃完早餐。' };
+  const informed = await scenario({ overdue: 120000, crossEvents: [breakfast] });
+  assert.equal(informed.builds[0][2].historicalAt, undefined, 'cross-app experience falls back to present, not a replay that drops it');
+  assert.ok(informed.calls[0][2].some(m => m.content.includes('一起吃完早餐')));
+  const changedEvents = [];
+  assert.equal((await scenario({ crossEvents: changedEvents, mutate: () => changedEvents.push(breakfast) })).saved.length, 0, 'new shared experience during generation invalidates stale output');
+  const empty = await scenario({ output: '' });
+  assert.equal(empty.saved.length, 0);
+  assert.equal(empty.record.state.handledAt, undefined, 'empty result is a failure, not a completed opportunity');
   assert.equal((await scenario({ quiet: true })).calls.length, 0);
   assert.equal((await scenario({ foreground: true })).calls.length, 0);
   assert.equal((await scenario({ mutate: ({ session }) => { session.proactiveDisabled = true; } })).saved.length, 0);

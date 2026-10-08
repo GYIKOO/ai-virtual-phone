@@ -19,6 +19,11 @@ export type ProactiveState = {
     revision: number;
     /** A settings change starts a new scheduling cycle, not a past interaction. */
     configuredAt?: number;
+    /** Scheduler lifecycle, independent of the visible transcript. Not a fictional message. */
+    cycleFloorAt?: number;
+    handledAt?: number;
+    handledMessageIds?: string[];
+    dismissedAt?: number;
     fixedAt?: number;
     personalityAt?: number;
     followupAt?: number;

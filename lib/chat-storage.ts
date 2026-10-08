@@ -14,6 +14,7 @@ import { emitChatPluginEvent, runChatPluginTransformSync } from "./chat-plugin-h
 import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
 import { findUserAvatarChangeIntent, inferAvatarDecisionFromReply } from "./chat-avatar-intent";
+import { dismissDeletedProactive } from "./proactive-storage";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -1951,6 +1952,10 @@ export function clearChatSessionMessages(sessionId: string) {
 
 function dispatchDeletedMessages(messages: ChatMessage[]): void {
     if (typeof window === "undefined" || messages.length === 0) return;
+    for (const sessionId of new Set(messages.map(message => message.sessionId))) {
+        const session = loadChatSessions().find(item => item.id === sessionId);
+        if (session) dismissDeletedProactive(sessionId, messages.filter(message => message.sessionId === sessionId).map(message => message.id), !!session.isGroup);
+    }
     window.dispatchEvent(new CustomEvent(CHAT_MESSAGES_DELETED_EVENT, { detail: { messages } }));
     for (const message of messages) {
         emitChatPluginEvent("message.deleted", { id: message.id, sessionId: message.sessionId });
