@@ -1,4 +1,24 @@
 import type { FollowUpConfig } from "./settings-storage";
+import type { ChatMessage } from "./chat-storage";
+
+/** Read each speaker's latest explicitly emitted intent in this round, never inherited state. */
+export function groupFollowUpValue(messages: ChatMessage[], field: string, eligibleIds: string[]): number | undefined {
+    const latest = new Map<string, number | undefined>();
+    for (const message of messages) {
+        if (message.role !== "assistant" || message.isRetracted || !message.senderCharacterId || !eligibleIds.includes(message.senderCharacterId)) continue;
+        const value = message.freshStateValues?.find(v => v.name === field)?.value;
+        // Metadata is only attached to one bubble of a response batch.
+        if (message.freshStateValues !== undefined) latest.set(message.senderCharacterId, value);
+    }
+    const values = [...latest.values()].filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    return values.length ? Math.max(...values) : undefined;
+}
+
+/** One group opportunity, independent of group size and private-chat personality tiers. */
+export function groupFollowUpDelay(value: number | undefined, count: number, rules: FollowUpConfig, random = Math.random): number | null {
+    if (count >= rules.maxConsecutive) return null;
+    return followUpDelay(4, value, 0, { ...rules, maxConsecutive: 1 }, random);
+}
 /** Independent of affection, anxiety and ambient contact frequency. Returns seconds. */
 export function followUpDelay(tier: number, value: number | undefined, count: number, rules: FollowUpConfig, random = Math.random): number | null {
     const cap = Math.min(rules.maxConsecutive, [0, 1, 1, 2, 3][tier] ?? 0);

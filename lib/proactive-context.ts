@@ -16,12 +16,26 @@ export function prepareProactiveSituation(session: ChatSession, history: ChatMes
     const conversation = history.filter(m => (m.role === "user" || m.role === "assistant") && !m.isRetracted && Date.parse(m.createdAt) <= now);
     const latest = conversation.at(-1);
     const after = latest ? Date.parse(latest.createdAt) : 0;
-    const cross = session.isGroup ? [] : filterTimelineByAllowedSources(loadNativeTimeline(session.contactId, {
-        timeAware: true, promptTimestampOptions: { timeZone: "UTC", includeTimeZone: true },
-    }), loadMemoryConfig().shortTermAllowedSources).filter(e =>
-        (e.sourceDetail === "group" || e.sourceDetail === "chat_offline" || e.sourceApp === "story")
-        && Date.parse(e.timestamp) > after && Date.parse(e.timestamp) <= now
-    ).sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+    const ids = session.isGroup ? session.participantIds ?? [] : [session.contactId];
+    const crossByKey = new Map<string, ReturnType<typeof loadNativeTimeline>[number]>();
+    const ownersByKey = new Map<string, Set<string>>();
+    const eventKey = (entry: ReturnType<typeof loadNativeTimeline>[number]) => `${entry.sourceApp}:${entry.sourceDetail}:${entry.groupSessionId}:${entry.id}`;
+    for (const id of ids) {
+        const entries = filterTimelineByAllowedSources(loadNativeTimeline(id, {
+            timeAware: true, promptTimestampOptions: { timeZone: "UTC", includeTimeZone: true },
+        }), loadMemoryConfig().shortTermAllowedSources).filter(e =>
+            (e.sourceDetail === "group" || e.sourceDetail === "chat_offline" || e.sourceApp === "story")
+            && !(session.isGroup && e.sourceDetail === "group" && e.groupSessionId === session.id)
+            && Date.parse(e.timestamp) > after && Date.parse(e.timestamp) <= now
+        );
+        for (const entry of entries) {
+            const key = eventKey(entry);
+            crossByKey.set(key, entry);
+            const owners = ownersByKey.get(key) ?? new Set<string>();
+            owners.add(id); ownersByKey.set(key, owners);
+        }
+    }
+    const cross = [...crossByKey.values()].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
     // Replay currently cannot reconstruct mutable cross-app projections safely.
     // If newer shared experience exists, generate NOW with full current context
     // rather than silently dropping it or leaking it into a past timestamp.
@@ -29,7 +43,6 @@ export function prepareProactiveSituation(session: ChatSession, history: ChatMes
     const at = historicalAt ?? now;
     const visible = conversation.filter(m => Date.parse(m.createdAt) <= at);
     const characters = loadCharacters();
-    const ids = session.isGroup ? session.participantIds ?? [] : [session.contactId];
     const times = ids.flatMap(id => {
         const character = characters.find(c => c.id === id);
         return character ? [`${character.name}：${buildCharacterTimeContext(character.timeZone, new Date(at)).timeContext}`] : [];
@@ -43,10 +56,13 @@ export function prepareProactiveSituation(session: ChatSession, history: ChatMes
         `本轮时间 UTC：${new Date(at).toISOString()}`, ...times,
         describe("本会话最后一条交流", last), describe("用户在本会话最后一次发言", lastUser),
         "历史发言中的相对日期和约定，以该条记录发生时的时间为参照。本轮从此刻的生活状态出发，而不是停留在最后一句话的场景里。",
-        "私聊的回复间隔只描述这段私聊；其间的群聊、见面和剧情经历同样构成双方的近况。邀约表示当时的意图，后续事件记录用于判断进展；记录未说明的结果保留为未知。",
+        session.isGroup
+            ? "群内的发言间隔只描述这段群聊。以下经历按所属成员标注，各成员的认知以自己的经历和群内已交流的信息为准。邀约表示当时的意图，后续记录用于判断进展；记录未说明的结果保留为未知。"
+            : "私聊的回复间隔只描述这段私聊；其间的群聊、见面和剧情经历同样构成双方的近况。邀约表示当时的意图，后续事件记录用于判断进展；记录未说明的结果保留为未知。",
         ...(cross.length ? ["上次本会话交流之后的近期经历（记录数据，按时间排序；更早内容见完整上下文）：",
             ...cross.slice(-8).map(e => JSON.stringify({ timeUTC: new Date(e.timestamp).toISOString(), elapsed: elapsedContactTime(e.timestamp, at), source: e.sourceDetail ?? e.sourceApp,
+                ...(session.isGroup ? { memoryOwners: [...ownersByKey.get(eventKey(e)) ?? []].map(id => ({ id, name: characters.find(c => c.id === id)?.name ?? id })) } : {}),
                 content: e.content.length > 1200 ? `${e.content.slice(0, 1200)}…（节选）` : e.content }))] : []),
     ].join("\n");
-    return { historicalAt, context, fingerprint: JSON.stringify(cross.map(e => [e.id, e.timestamp, e.content])) };
+    return { historicalAt, context, fingerprint: JSON.stringify(cross.map(e => [e.id, e.timestamp, e.content, [...ownersByKey.get(eventKey(e)) ?? []]])) };
 }

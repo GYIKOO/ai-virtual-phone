@@ -1,18 +1,20 @@
-import { loadChatSessions, loadChatMessages, clearFollowUpSchedule, type ChatSession } from "./chat-storage";
+import { loadChatSessions, loadChatMessages, clearFollowUpSchedule, createResponseRoundId, type ChatSession } from "./chat-storage";
 import { buildChatPromptMessages, sendLLMRequest, stripOnlineThinkingTag, stripPresetTexts } from "./chat-engine";
 import { buildGroupChatPromptMessages, parseGroupChatResponse } from "./group-chat-engine";
 import { cancelBailoutPrefix, cancelFollowUpBailout } from "./push-bailout-client";
 import { loadIdleReconnectRules } from "./idle-reconnect-storage";
 import { isWithinPushQuietHours, loadPushQuietHours } from "./push-client";
 import { anchorPlan, changeQuiet, releaseQuiet } from "./proactive-clock";
-import { kvGet } from "./kv-db";
 import { loadFollowUpConfig } from "./settings-storage";
-import { followUpDelay } from "./proactive-followup";
+import { followUpDelay, groupFollowUpDelay, groupFollowUpValue } from "./proactive-followup";
 import { replayTime } from "./proactive-replay";
 import { getProactiveAbsence } from "./proactive-presence";
 import { loadProactive, saveProactiveState, refreshProactive, flushProactive, type ProactiveRecord } from "./proactive-storage";
 import { dueProactive, maxFollowUps, nextProactiveAt, proactiveInstruction, type ProactiveSource } from "./proactive-policy";
 import { prepareProactiveSituation } from "./proactive-context";
+import { isChatSceneBlockingAutomation } from "./chat-automation-state";
+import { isGroupMuted } from "./group-admin";
+import { loadCharacters } from "./character-storage";
 
 let busy = false;
 let nextGlobalAttempt = 0;
@@ -40,7 +42,7 @@ function synchronize(session: ChatSession, record: ProactiveRecord, now: number)
     return { config: record.config, state };
 }
 function foregroundBusy(sessionId: string): boolean {
-    try { const at = JSON.parse(kvGet(`chat-generating:${sessionId}`) || "null")?.startedAt; return typeof at === "number" && Date.now() - at < 5 * 60000; } catch { return false; }
+    return isChatSceneBlockingAutomation(sessionId);
 }
 
 /** Switching mechanisms cancels ambient legacy jobs, never explicit appointments. */
@@ -59,7 +61,8 @@ export function schedulePersonalityFollowUp(sessionId: string, count?: number): 
     const record = loadProactive(sessionId);
     if (!session || !record) return;
     const { config, state } = synchronize(session, record, Date.now());
-    if (!config.enabled || session.proactiveDisabled || session.isGroup) return;
+    if (!config.enabled || session.proactiveDisabled || session.isBlacklisted) return;
+    if (session.isGroup && !config.groupFollowUpEnabled) return;
     const used = count ?? state.followupCount;
     const rules = loadFollowUpConfig();
     const history = loadChatMessages(sessionId);
@@ -68,9 +71,13 @@ export function schedulePersonalityFollowUp(sessionId: string, count?: number): 
     if (Date.parse(latest.proactiveTiming?.generatedAt ?? latest.createdAt) <= (state.dismissedAt ?? 0)) return;
     if (Date.parse(latest.proactiveTiming?.generatedAt ?? latest.createdAt) < (state.configuredAt ?? 0)) return;
     // Only this reply's explicitly emitted value counts, never an inherited old status.
-    const batch = latest.responseBatchId ? history.filter(m => m.responseBatchId === latest.responseBatchId && m.role === "assistant") : [latest];
-    const value = batch.flatMap(m => m.freshStateValues ?? []).find(v => v.name === rules.followUpFieldName)?.value;
-    const delay = followUpDelay(config.followUpTier, value, used, rules);
+    const batch = session.isGroup && latest.responseRoundId
+        ? history.filter(m => m.responseRoundId === latest.responseRoundId)
+        : latest.responseBatchId ? history.filter(m => m.responseBatchId === latest.responseBatchId && m.role === "assistant") : [latest];
+    const eligibleIds = (session.participantIds ?? []).filter(id => !isGroupMuted(session, id) && loadCharacters().some(c => c.id === id));
+    const value = session.isGroup ? groupFollowUpValue(batch, rules.followUpFieldName, eligibleIds)
+        : batch.flatMap(m => m.freshStateValues ?? []).find(v => v.name === rules.followUpFieldName)?.value;
+    const delay = session.isGroup ? groupFollowUpDelay(value, used, rules) : followUpDelay(config.followUpTier, value, used, rules);
     if (delay === null) {
         saveProactiveState(sessionId, { ...state, followupCount: used, followupAt: undefined });
         return;
@@ -129,10 +136,17 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
     const controller = new AbortController();
     const { config } = record;
     const anchor = lastMessage(session.id);
-    const candidateReplayAt = replayTime(record.state, source, Date.now(), getProactiveAbsence());
+    // Delayed group follow-ups re-evaluate the present, not an old conversation scene.
+    // Ambient contact retains its existing absence-bounded replay behavior.
+    const candidateReplayAt = session.isGroup && source === "followup" ? undefined
+        : replayTime(record.state, source, Date.now(), getProactiveAbsence());
     const situation = prepareProactiveSituation(session, loadChatMessages(session.id), candidateReplayAt, Date.now());
     const historicalAt = situation.historicalAt;
     const state = { ...record.state, lastAttemptAt: Date.now(), retryAt: Date.now() + 30 * 60000, lastError: undefined };
+    const responseRoundId = session.isGroup ? createResponseRoundId() : undefined;
+    const roster = JSON.stringify(session.participantIds ?? []);
+    const historyKey = () => JSON.stringify(loadChatMessages(session.id).filter(m => !responseRoundId || m.responseRoundId !== responseRoundId));
+    const originalHistoryKey = historyKey();
     // Persist a retry lease, not a fictional new conversation, before calling the API.
     if (!saveProactiveState(session.id, state)) return;
     await flushProactive();
@@ -141,7 +155,9 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
     const valid = () => !controller.signal.aborted && loadProactive(session.id)?.state.revision === state.revision
         && (historicalAt === undefined || replayTime(record.state, source, Date.now(), getProactiveAbsence()) === historicalAt)
         && !isWithinPushQuietHours(Date.now())
-        && loadChatSessions().some(s => s.id === session.id && !s.proactiveDisabled && !s.isBlacklisted);
+        && !foregroundBusy(session.id)
+        && loadChatSessions().some(s => s.id === session.id && !s.proactiveDisabled && !s.isBlacklisted
+            && (!session.isGroup || (JSON.stringify(s.participantIds ?? []) === roster && historyKey() === originalHistoryKey)));
     try {
         const history = loadChatMessages(session.id);
         const originalMessageIds = new Set(history.map(m => m.id));
@@ -150,7 +166,7 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
             ? await buildGroupChatPromptMessages(session, history, { appTags: tags, disableTools: true, historicalAt })
             : await buildChatPromptMessages(session, history, { appTags: tags, toolsAllowed: false, historicalAt });
         if (!valid() || lastMessage(session.id) !== anchor) return;
-        prompt.llmMessages.push({ role: "system", content: `${situation.context}\n\n${proactiveInstruction(config, source, historicalAt ?? Date.now())}` });
+        prompt.llmMessages.push({ role: "system", content: `${situation.context}\n\n${proactiveInstruction(config, source, historicalAt ?? Date.now(), !!session.isGroup)}` });
         if (historicalAt !== undefined) prompt.llmMessages.push({ role: "system", content: "本轮场景时间以调度事件给出的时间为准。沿用当前聊天的文字分条格式表达；此轮只生成文字交流，保持沉默时返回 <proactive-skip/>。" });
         let raw = await sendLLMRequest(prompt.config, prompt.preset, prompt.llmMessages, prompt.regexes, undefined,
             { appId: session.isGroup ? "group_chat" : "chat", appTags: tags, signal: controller.signal, debugSessionId: session.id });
@@ -168,7 +184,8 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
             const next = anchorPlan(config, state.revision, !!session.isGroup, latest ? `${latest.id}:${latest.createdAt}` : "empty", now, loadPushQuietHours(), now);
             saveProactiveState(session.id, { ...next, configuredAt: current.state.configuredAt, cycleFloorAt: now, handledAt: now,
                 handledMessageIds: visible ? loadChatMessages(session.id).filter(m => !originalMessageIds.has(m.id)).map(m => m.id) : current.state.handledMessageIds,
-                followupCount: !visible && source === "followup" ? Math.max(current.state.followupCount, maxFollowUps(config)) : current.state.followupCount });
+                followupCount: !visible && source === "followup" ? Math.max(current.state.followupCount, session.isGroup ? loadFollowUpConfig().maxConsecutive : maxFollowUps(config))
+                    : session.isGroup && source !== "followup" ? 0 : current.state.followupCount });
             await flushProactive();
         };
         if (!raw.trim()) throw new Error("主动消息返回空内容，未完成本轮机会。");
@@ -178,22 +195,27 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
         const { parseAndSaveResponse } = await import("./follow-up-service");
         const generatedAt = new Date().toISOString();
         let visible = false;
+        const savedSpeakers = new Set<string>();
         for (const result of results) {
             if (!valid()) break;
+            const canPersist = () => valid() && (!session.isGroup || loadChatSessions().some(s => s.id === session.id
+                && s.participantIds?.includes(result.characterId) && !isGroupMuted(s, result.characterId)
+                && loadCharacters().some(c => c.id === result.characterId)));
+            if (!canPersist()) continue;
             const saved = await parseAndSaveResponse(result.responseText, session.id, 0, undefined, history,
-                { ...(session.isGroup ? { senderCharacterId: result.characterId, senderName: result.characterName } : {}),
+                { canPersist, ...(session.isGroup ? { senderCharacterId: result.characterId, senderName: result.characterName, responseRoundId } : {}),
                     ...(historicalAt !== undefined ? { createdAt: new Date(historicalAt).toISOString(), historicalReplay: true,
                         proactiveTiming: { scheduledAt: new Date(historicalAt).toISOString(), generatedAt, backfilled: true } } : {}) });
             visible ||= saved.hasVisible;
+            if (saved.hasVisible) savedSpeakers.add(result.characterId);
         }
         if (visible && valid()) {
             await finishOpportunity(true);
-            schedulePersonalityFollowUp(session.id, source === "followup" ? record.state.followupCount + 1 : record.state.followupCount);
+            schedulePersonalityFollowUp(session.id, source === "followup" ? record.state.followupCount + 1 : session.isGroup ? 0 : record.state.followupCount);
             // Preserve memory accounting, without inventing a user message for this event.
             const { incrementEventCounter } = await import("./memory-storage");
             const { maybeRunSummarization } = await import("./memory-summarizer");
-            const { loadCharacters } = await import("./character-storage");
-            for (const id of new Set(results.map(r => r.characterId))) {
+            for (const id of savedSpeakers) {
                 const character = loadCharacters().find(c => c.id === id);
                 if (character) { incrementEventCounter(id); void maybeRunSummarization(id, character.name).catch(console.warn); }
             }

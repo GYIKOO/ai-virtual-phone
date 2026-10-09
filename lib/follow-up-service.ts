@@ -964,19 +964,25 @@ export async function parseAndSaveResponse(
         proactiveTiming?: import("./proactive-replay").ProactiveTiming;
         rawResponseText?: string;
         reasoningText?: string;
+        responseRoundId?: string;
+        /** 可取消的宿主自动生成：每次落库前校验场景与上下文。 */
+        canPersist?: () => boolean;
         /** 这轮回复实际触发过的快捷动作标记：按 insertAt 在原始位置落一对
          *  tool_call（标记原文，组装器原样进上下文、气泡隐藏）+ tool_notice
          *  （可见灰条），与小手机内直接调用快捷动作的显示一致 */
         shortcutMarker?: { text: string; insertAt: number; name: string };
     },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
+    const cancelled = () => ({ hasVisible: false, newCount: currentCount, stateValues: [] as StateValue[] });
+    if (options?.canPersist && !options.canPersist()) return cancelled();
     const responseBatchId = options?.responseBatchId || createResponseBatchId();
     const rawResponseText = options?.rawResponseText ?? rawText;
     const reasoningText = options?.reasoningText;
     void contextMessages;
     const sessions = loadChatSessions();
     const sess = sessions.find(s => s.id === sessionId);
-    const previousState = sess && !sess.isGroup ? getLatestCharacterStateValues(sess.contactId,
+    const stateOwnerId = sess?.isGroup ? options?.senderCharacterId : sess?.contactId;
+    const previousState = stateOwnerId ? getLatestCharacterStateValues(stateOwnerId,
         options?.historicalReplay && options.createdAt ? { before: { createdAt: options.createdAt, id: "" } } : undefined) : [];
 
     const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(rawText, previousState);
@@ -990,7 +996,7 @@ export async function parseAndSaveResponse(
 
     // Detect call triggers and AI media actions, filter them out (not stored as messages)
     let triggerCall: "voice" | "video" | undefined;
-    const charName = resolveFollowUpSenderName(sessionId);
+    const charName = options?.senderName || resolveFollowUpSenderName(sessionId);
 
     // 快捷动作配对消息：tool_call 存标记原文（组装器不跳过，历史上下文与模型当初
     // 的输出一致），tool_notice 是用户可见的灰条。按 insertAt 用游标扫描把配对
@@ -1012,6 +1018,7 @@ export async function parseAndSaveResponse(
 
     const filteredParts: ParsedMessagePart[] = [];
     for (const p of parts) {
+        if (options?.canPersist && !options.canPersist()) return cancelled();
         // Historical text must never execute a present-day call, transfer, invitation or tool action.
         if (options?.historicalReplay && p.mediaType) continue;
         if (p.mediaType === "voice_call") { triggerCall = "voice"; continue; }
@@ -1063,6 +1070,9 @@ export async function parseAndSaveResponse(
                 responseBatchId,
                 proactiveTiming: options?.proactiveTiming,
                 rawResponseText,
+                responseRoundId: options?.responseRoundId,
+                senderCharacterId: options?.senderCharacterId,
+                senderName: options?.senderName,
                 statusPanel,
                 statusRegionMode,
                 innerMonologue,
@@ -1135,6 +1145,7 @@ export async function parseAndSaveResponse(
         }));
     };
     for (let i = 0; i < filteredParts.length; i++) {
+        if (options?.canPersist && !options.canPersist()) break;
         if (i === markerPartIdx) saveShortcutMarkerPair();
         const generatedPart = buildGeneratedFollowUpImageMessage(filteredParts[i]);
         const createdAt = nextCreatedAt();
@@ -1147,6 +1158,7 @@ export async function parseAndSaveResponse(
             mediaUrl: generatedPart.mediaUrl,
             mediaData: generatedPart.mediaData,
             responseBatchId,
+            responseRoundId: options?.responseRoundId,
             rawResponseText,
             proactiveTiming: options?.proactiveTiming,
             statusPanel: i === metaIdx && statusPanel ? statusPanel : undefined,
@@ -1172,6 +1184,7 @@ export async function parseAndSaveResponse(
     }
     if (markerPartIdx >= filteredParts.length) saveShortcutMarkerPair();
 
+    if (savedMessages.length === 0) return cancelled();
     await dispatchBackgroundMessagesOneByOne(sessionId, savedMessages, options?.silent === true);
     if (imageReplacementTasks.length > 0) {
         await Promise.allSettled(imageReplacementTasks);

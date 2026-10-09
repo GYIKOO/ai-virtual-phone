@@ -3,6 +3,8 @@
 import { forwardRef, Fragment, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChatSession, ChatMessage, CHAT_APP_SETTINGS_UPDATED_EVENT, CHAT_INITIAL_VISIBLE_MESSAGE_COUNT, CHAT_LOAD_MORE_MESSAGE_COUNT, CHAT_REQUEST_REPLY_EVENT, loadChatAppSettings, loadChatMessages, loadChatContacts, loadChatSessions, saveChatSessions, pushChatMessage, updateChatMessage, deleteChatMessage, deleteChatMessagesFrom, deleteChatMessagesByIds, retractChatMessage, editChatMessage, updateMessageMediaData, replaceResponseBatchWithParts, replaceGroupResponseRound, isReadingDiscussMessage, isSystemInstructionMessage, getSystemInstructionDisplayContent, createResponseBatchId, createResponseRoundId, getLatestStateValues, getLatestCharacterStateValues, compareChatMessages, isSessionStreamingEnabled, resolveChatBackgroundImage, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { cleanStreamText, splitStreamPreviewSegments, stripLiteralTexts, stripXmlTagBlocks } from "@/lib/stream-preview";
+import { startManualChatRun, finishManualChatRun } from "@/lib/chat-automation-state";
+import { schedulePersonalityFollowUp } from "@/lib/proactive-service";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
 import { parseAIResponse, type ParsedMessagePart } from "@/lib/rich-message-parser";
@@ -364,6 +366,7 @@ function createGenerationRun(sessionId: string): ActiveGenerationRun {
         pendingNativeToolCalls: [],
     };
     activeGenerationRuns.set(sessionId, run);
+    startManualChatRun(sessionId, run.runId);
     return run;
 }
 
@@ -376,6 +379,7 @@ function finishGenerationRun(sessionId: string, runId: string): boolean {
     const run = activeGenerationRuns.get(sessionId);
     if (!run || run.runId !== runId) return false;
     activeGenerationRuns.delete(sessionId);
+    finishManualChatRun(sessionId, runId);
     return true;
 }
 
@@ -402,6 +406,7 @@ function cancelGenerationRun(sessionId: string): ActiveGenerationRun | null {
     if (!run) return null;
     run.controller.abort();
     activeGenerationRuns.delete(sessionId);
+    finishManualChatRun(sessionId, run.runId);
     return run;
 }
 
@@ -429,6 +434,8 @@ function createOfflineGenerationRun(sessionId: string): Omit<ActiveGenerationRun
         controller: new AbortController(),
     };
     activeOfflineGenerationRuns.set(sessionId, run);
+    startManualChatRun(sessionId, run.runId, true);
+    kvSet(`chat-offline-generating:${sessionId}`, JSON.stringify({ startedAt: Date.now(), runId: run.runId }));
     return run;
 }
 
@@ -441,6 +448,8 @@ function finishOfflineGenerationRun(sessionId: string, runId: string): boolean {
     const run = activeOfflineGenerationRuns.get(sessionId);
     if (!run || run.runId !== runId) return false;
     activeOfflineGenerationRuns.delete(sessionId);
+    finishManualChatRun(sessionId, runId, true);
+    kvRemove(`chat-offline-generating:${sessionId}`);
     return true;
 }
 
@@ -449,6 +458,8 @@ function cancelOfflineGenerationRun(sessionId: string): boolean {
     if (!run) return false;
     run.controller.abort();
     activeOfflineGenerationRuns.delete(sessionId);
+    finishManualChatRun(sessionId, run.runId, true);
+    kvRemove(`chat-offline-generating:${sessionId}`);
     return true;
 }
 
@@ -1514,7 +1525,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                 console.log("[ChatRoom] followup-fired received, reloading messages, setting isGenerating=false");
                 // Reload messages from storage (the service already saved them)
                 syncMessagesFromStorage();
-                setIsGenerating(false);
+                // 旧后台任务的收尾不能清掉已经接手的手动生成状态。
+                setIsGenerating(activeGenerationRuns.has(session.id) || isBackgroundReplyGenerating(session.id));
             }
         };
         window.addEventListener("followup-started", onStarted);
@@ -2654,6 +2666,8 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             await Promise.allSettled(imageReplacementTasks);
             throwIfGenerationStopped(guard);
         }
+        throwIfGenerationStopped(guard);
+        if (!offlineMode && !theaterMode) schedulePersonalityFollowUp(session.id, 0);
     };
 
     // AI auto-play: search & play a song by title/artist when AI recommends music
@@ -4257,7 +4271,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     };
 
     const toggleOfflineMode = () => {
-        if (!offlineMode && isGenerating) {
+        if (!offlineMode && isGenerating && !isBackgroundReplyGenerating(session.id)) {
             showChatToast("请先等待对方回复");
             return;
         }
@@ -4265,6 +4279,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             showChatToast("线下回复生成中");
             return;
         }
+        cancelBackgroundGeneration(session.id);
         cancelFollowUp(session.id);
         setShowPlusMenu(false);
         setShowEmojiPanel(false);
@@ -4282,6 +4297,7 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
     };
 
     const toggleTheaterMode = () => {
+        cancelBackgroundGeneration(session.id);
         setShowPlusMenu(false);
         setShowEmojiPanel(false);
         setShowStickerPanel(false);

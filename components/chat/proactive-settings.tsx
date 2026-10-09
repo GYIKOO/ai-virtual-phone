@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { ChatSession } from "@/lib/chat-storage";
 import { Toggle } from "@/components/ui/form";
-import { defaultProactiveConfig, DEFAULT_PROACTIVE_INSTRUCTION, type ProactiveConfig } from "@/lib/proactive-policy";
+import { defaultProactiveConfig, DEFAULT_PROACTIVE_INSTRUCTION, DEFAULT_GROUP_FOLLOWUP_INSTRUCTION, type ProactiveConfig } from "@/lib/proactive-policy";
 import { loadProactive, saveProactiveConfig } from "@/lib/proactive-storage";
 import { assessProactive } from "@/lib/proactive-assessment";
 import { loadCharacters } from "@/lib/character-storage";
@@ -11,6 +11,7 @@ import { loadCharacters } from "@/lib/character-storage";
 export function ProactiveSettings({ session, allowed, managed = false }: { session: ChatSession; allowed: boolean; managed?: boolean }) {
     const [config, setConfig] = useState(() => loadProactive(session.id)?.config ?? defaultProactiveConfig());
     const [draft, setDraft] = useState(config.instruction);
+    const [groupDraft, setGroupDraft] = useState(config.groupFollowUpInstruction);
     const [assessing, setAssessing] = useState(false);
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
@@ -63,7 +64,18 @@ export function ProactiveSettings({ session, allowed, managed = false }: { sessi
                 </>}
                 <p className="menu-desc">追发倾向随人设评估在后台更新，并结合本轮跟进意愿决定是否继续交流。等待范围和次数上限在「追发规则」统一设置。</p>
             </>}
-            {session.isGroup && <p className="menu-desc">群成员可自行交流，无需等待你回复；每次生成一小轮对话，不循环触发。</p>}
+            {session.isGroup && <>
+                <div className="proactive-setting-heading flex justify-between gap-3"><span>群聊追发</span><Toggle checked={config.groupFollowUpEnabled} onChange={groupFollowUpEnabled => update({ groupFollowUpEnabled })} /></div>
+                <p className="menu-desc">成员有话想说时，可在一轮回复后再次交流，无需你参与。沿用「追发规则」的等待范围、意愿阈值和次数上限；实际发送时可接话、换话题或保持安静。</p>
+                {config.groupFollowUpEnabled && <>
+                    <p className="menu-desc">只读取本轮成员新输出的跟进意愿；未输出时不追发。自定义状态栏或预设需包含「追发规则」中配置的同名数值。</p>
+                    <details><summary>群聊追发提示词（可修改）</summary>
+                        <textarea aria-label="群聊追发提示词" className="ui-textarea mt-2 w-full" rows={4} value={groupDraft} onChange={e => setGroupDraft(e.target.value)} />
+                        <button type="button" className="ui-btn ui-btn-ghost mt-2 mr-2" onClick={() => setGroupDraft(DEFAULT_GROUP_FOLLOWUP_INSTRUCTION)}>载入默认文案</button>
+                        <button type="button" className="ui-btn ui-btn-secondary mt-2" onClick={() => { update({ groupFollowUpInstruction: groupDraft }); setNotice("群聊追发提示词已保存"); }}>保存提示词</button>
+                    </details>
+                </>}
+            </>}
             <details><summary>主动交流提示词（可修改）</summary>
                 <textarea aria-label="主动交流提示词" className="ui-textarea mt-2 w-full" rows={8} value={draft} onChange={e => setDraft(e.target.value)} />
                 <button type="button" className="ui-btn ui-btn-ghost mt-2 mr-2" onClick={() => { setDraft(DEFAULT_PROACTIVE_INSTRUCTION); setNotice("已载入新版默认文案，保存后生效"); }}>载入默认文案</button>

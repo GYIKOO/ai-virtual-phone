@@ -93,12 +93,12 @@ for (const file of ['lib/chat-engine.ts', 'lib/group-chat-engine.ts']) {
 }
 assert.ok(fs.readFileSync('lib/chat-storage.ts', 'utf8').includes('if (session) dismissDeletedProactive(sessionId,'), 'all message deletion paths reach scoped dismissal');
 
-async function scenario({ group = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0, overdue = 1, deferred = false, absence = { leftAt: 99000000, returnedAt: 100000000 }, changedConfig = false, unversioned = false, changedAnchor = false, enabled = true, crossEvents = [] } = {}) {
+async function scenario({ group = false, groupFollowup = false, muted = false, output = 'hello', mutate, failure = false, quiet = false, foreground = false, fresh = true, source = 'fixed', used = 0, overdue = 1, deferred = false, absence = { leftAt: 99000000, returnedAt: 100000000 }, changedConfig = false, unversioned = false, changedAnchor = false, enabled = true, crossEvents = [] } = {}) {
   let now = 100000000;
-  const session = { id: 's', contactId: 'c', isGroup: group };
+  const session = { id: 's', contactId: 'c', isGroup: group, participantIds: group ? ['c'] : undefined };
   const createdAt = new Date(now - 3600000).toISOString();
   const history = [{ id: 'u', role: 'user', createdAt }];
-  let record = { config: { ...config, enabled, followUpTier: 2 }, state: { revision: 1, [`${source}At`]: now - overdue, deferred: { [source]: deferred }, quietReleased: { [source]: true }, followupCount: used, followupRules: JSON.stringify(rules),
+  let record = { config: { ...config, enabled, groupFollowUpEnabled: groupFollowup, followUpTier: 2 }, state: { revision: 1, [`${source}At`]: now - overdue, deferred: { [source]: deferred }, quietReleased: { [source]: true }, followupCount: used, followupRules: JSON.stringify(rules),
     anchor: `u:${createdAt}`, anchorAt: now - 3600000, clockVersion: 2, quietSetting: '' } };
   if (changedConfig || unversioned) record.state = { ...p.planProactive(record.config, now, 2, group), ...(changedConfig ? { configuredAt: now } : {}) };
   if (changedAnchor) { record.state.configuredAt = now - 1800000; history.push({ id: 'new', role: 'user', createdAt: new Date(now).toISOString() }); }
@@ -116,7 +116,8 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
     './character-time': load('lib/character-time.ts'),
   });
   const service = load('lib/proactive-service.ts', {
-    './chat-storage': { loadChatSessions: () => [session], loadChatMessages: () => history, clearFollowUpSchedule() {} },
+    './chat-storage': { loadChatSessions: () => [session], loadChatMessages: () => history, clearFollowUpSchedule() {}, createResponseRoundId: () => `round-${saved.length}` },
+    './group-admin': { isGroupMuted: () => muted },
     './chat-engine': {
       buildChatPromptMessages: async (...args) => { builds.push(args); return prompt; }, stripPresetTexts: x => x,
       sendLLMRequest: async (...args) => { calls.push(args); if (mutate) mutate({ session, record, history, service }); if (failure) throw new Error('mock failure'); return output; },
@@ -130,8 +131,9 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
     './settings-storage': { loadFollowUpConfig: () => rules }, './proactive-followup': followup,
     './proactive-replay': replay,
     './proactive-context': context,
+    './chat-automation-state': { isChatSceneBlockingAutomation: () => foreground },
     './proactive-presence': { getProactiveAbsence: () => absence },
-    './follow-up-service': { parseAndSaveResponse: async (...args) => { saved.push(args); history.push({ id: 'a', role: 'assistant', createdAt: args[5]?.createdAt ?? new Date(now).toISOString(), proactiveTiming: args[5]?.proactiveTiming, stateValues: [{ name: '跟进意愿', value: 90 }], freshStateValues: fresh ? [{ name: '跟进意愿', value: 90 }] : [] }); return { hasVisible: true }; } },
+    './follow-up-service': { parseAndSaveResponse: async (...args) => { saved.push(args); history.push({ id: saved.length === 1 ? 'a' : `a${saved.length}`, role: 'assistant', senderCharacterId: args[5]?.senderCharacterId, responseRoundId: args[5]?.responseRoundId, createdAt: args[5]?.createdAt ?? new Date(now).toISOString(), proactiveTiming: args[5]?.proactiveTiming, stateValues: [{ name: '跟进意愿', value: 90 }], freshStateValues: fresh ? [{ name: '跟进意愿', value: 90 }] : [] }); return { hasVisible: true }; } },
     './memory-storage': { incrementEventCounter() {} }, './memory-summarizer': { maybeRunSummarization: async () => {} },
     './character-storage': { loadCharacters: () => [{ id: 'c', name: 'C' }] },
   }, {
@@ -216,5 +218,30 @@ async function scenario({ group = false, output = 'hello', mutate, failure = fal
   assert.equal(group.calls[0][5].appId, 'group_chat');
   assert.equal(group.saved[0][5].senderCharacterId, 'c');
   assert.equal(group.record.state.followupAt, undefined, 'groups do not follow up based on absent user');
+  const talkingGroup = await scenario({ group: true, groupFollowup: true });
+  assert.ok(talkingGroup.record.state.followupAt, 'fresh group intent schedules one shared opportunity');
+  assert.ok(talkingGroup.saved[0][5].responseRoundId, 'all speakers belong to a native response round');
+  for (let i = 0; i < 3; i++) await talkingGroup.advance(181000);
+  assert.equal(talkingGroup.calls.length, 4, 'one ambient turn plus exactly three follow-ups');
+  assert.equal(talkingGroup.record.state.followupCount, 3);
+  assert.equal(talkingGroup.record.state.followupAt, undefined);
+  await talkingGroup.advance(181000);
+  assert.equal(talkingGroup.calls.length, 4, 'changing topics cannot reset the chain');
+  const lateGroup = await scenario({ group: true, groupFollowup: true, source: 'followup', overdue: 120000 });
+  assert.equal(lateGroup.builds[0][2].historicalAt, undefined, 'late group follow-up uses the present even inside absence');
+  assert.ok(lateGroup.calls[0][2].some(m => m.content.includes('也可以谈起此刻关注的新事情')));
+  assert.equal((await scenario({ group: true, groupFollowup: true, fresh: false })).record.state.followupAt, undefined);
+  assert.equal((await scenario({ group: true, groupFollowup: true, muted: true })).saved.length, 0);
+  assert.equal((await scenario({ group: true, groupFollowup: true, mutate: ({ session }) => { session.participantIds = []; } })).saved.length, 0);
+  const silentGroup = await scenario({ group: true, groupFollowup: true, source: 'followup', output: '<proactive-skip/>' });
+  assert.equal(silentGroup.record.state.followupAt, undefined);
+  assert.equal(silentGroup.record.state.followupCount, rules.maxConsecutive);
+  const deletedGroup = await scenario({ group: true, groupFollowup: true });
+  deletedGroup.history.pop();
+  await deletedGroup.advance(181000);
+  assert.equal(deletedGroup.calls.length, 1, 'deletion cancels the group chain');
+  const newTopic = await scenario({ group: true, groupFollowup: true, used: 3 });
+  assert.equal(newTopic.record.state.followupCount, 0, 'a new ambient opportunity may start a new bounded group chain');
+  assert.ok(newTopic.record.state.followupAt);
   console.log('Proactive policy, storage and runtime regression tests passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

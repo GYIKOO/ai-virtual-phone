@@ -12,6 +12,8 @@ export type ProactiveConfig = {
     initiativeTier: number;
     adjustment: number;
     followUpTier: number;
+    groupFollowUpEnabled: boolean;
+    groupFollowUpInstruction: string;
     instruction: string;
     assessment?: { reason: string; characterUpdatedAt: string; assessedAt: number };
 };
@@ -47,10 +49,12 @@ export const DEFAULT_PROACTIVE_INSTRUCTION = [
     "让已有的关系和共同经历决定交流的分寸、情绪与表达方式。角色有话想说时，就按自己的性格自然地联系；正在忙碌、专注于别的事情，或觉得对话已经告一段落时，也可以继续自己的生活。",
     "群聊是一段成员之间的共同生活：有话题的人发起交流，感兴趣的人接话，各自的立场与关系在交谈中自然体现。本次展开一小轮对话，留下后续发展的空间。",
 ].join("\n\n");
+export const DEFAULT_GROUP_FOLLOWUP_INSTRUCTION = "结合当前时间、群内最近的交流与成员各自的近况，让有话想说的成员自然开口。仍有兴致的话题可以接着聊，也可以谈起此刻关注的新事情；交流已经告一段落时，可以保持安静。";
 export function defaultProactiveConfig(): ProactiveConfig {
     return { version: 1, enabled: false, fixedEnabled: true, intervalMinutes: 480,
         jitterPercent: 20, personalityEnabled: false, initiativeTier: 2,
-        adjustment: 0, followUpTier: 0, instruction: DEFAULT_PROACTIVE_INSTRUCTION };
+        adjustment: 0, followUpTier: 0, groupFollowUpEnabled: false,
+        groupFollowUpInstruction: DEFAULT_GROUP_FOLLOWUP_INSTRUCTION, instruction: DEFAULT_PROACTIVE_INSTRUCTION };
 }
 const finite = (value: unknown, fallback: number, min: number, max: number) =>
     typeof value === "number" && Number.isFinite(value) ? Math.max(min, Math.min(max, value)) : fallback;
@@ -63,6 +67,8 @@ export function normalizeProactiveConfig(value?: Partial<ProactiveConfig> | null
         initiativeTier: Math.round(finite(value?.initiativeTier, 2, 0, 4)),
         adjustment: [-40, -20, 0, 20, 40].includes(value?.adjustment ?? NaN) ? value!.adjustment! : 0,
         followUpTier: Math.round(finite(value?.followUpTier, 0, 0, 4)),
+        groupFollowUpEnabled: value?.groupFollowUpEnabled === true,
+        groupFollowUpInstruction: typeof value?.groupFollowUpInstruction === "string" ? value.groupFollowUpInstruction : d.groupFollowUpInstruction,
         instruction: typeof value?.instruction === "string" && value.instruction !== LEGACY_PROACTIVE_INSTRUCTION ? value.instruction : d.instruction,
         assessment: value?.assessment };
 }
@@ -115,7 +121,7 @@ export function dueProactive(state: ProactiveState, now: number): ProactiveSourc
 export function consumeProactive(config: ProactiveConfig, state: ProactiveState, now: number, isGroup: boolean): ProactiveState {
     return { ...planProactive(config, now, state.revision, isGroup), followupCount: state.followupCount, lastAttemptAt: now };
 }
-export function proactiveInstruction(config: ProactiveConfig, source: ProactiveSource, at = Date.now()): string {
-    const focus = source === "followup" ? "\n本次是上一轮交流的跟进机会。结合尚待确认、补充或继续讨论的具体内容，以及角色自己的动机决定是否再开口。发言后重新评估这件事是否还需要跟进；已经告一段落时可以保持沉默。" : "";
+export function proactiveInstruction(config: ProactiveConfig, source: ProactiveSource, at = Date.now(), isGroup = false): string {
+    const focus = source === "followup" ? `\n${isGroup ? config.groupFollowUpInstruction : "本次是上一轮交流的跟进机会。结合尚待确认、补充或继续讨论的具体内容，以及角色自己的动机决定是否再开口。发言后重新评估这件事是否还需要跟进；已经告一段落时可以保持沉默。"}` : "";
     return `${config.instruction}${focus}\n[系统调度事件：${source === "followup" ? "补充联系机会" : "自主交流机会"}；时间：${new Date(at).toISOString()}]\n输出协议：发言时沿用当前聊天格式；本轮保持沉默时返回唯一标记 <proactive-skip/>。`;
 }
