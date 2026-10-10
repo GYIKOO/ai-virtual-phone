@@ -23,7 +23,7 @@ import { loadStoryMessages, replaceStoryMessages, resolveActiveStorySchemes, typ
 import type { ChatMessage } from "./chat-storage";
 import { MacroEngine } from "./macro-engine";
 import { prepareStoryInstructionHistory, wrapStoryInstruction } from "./story-instructions";
-import { DEFAULT_STORY_USER_AGENCY_PROMPT, DEFAULT_STORY_VOICE_FORMAT_PROMPT } from "./story-constraints";
+import { resolveStoryUserControlPrompt, resolveStoryUserControlEndingPrompt, DEFAULT_STORY_VOICE_FORMAT_PROMPT } from "./story-constraints";
 
 const DEFAULT_STORY_FOLD_TAGS = "think,thinking,summary,story_status,story_theater";
 const DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS = "think,thinking,story_theater";
@@ -333,14 +333,14 @@ async function buildStoryPromptMessages(
   if (settings?.floatingPhoneInContext && floatingChatContext?.trim()) {
     messages.push({ role: "system", content: `# 悬浮小手机最近线上聊天\n以下记录用于衔接线上与线下剧情，不要逐字复述：\n${floatingChatContext.trim()}` });
   }
-  if (settings?.preventUserControl) {
-    const prompt = (settings.userAgencyPrompt ?? DEFAULT_STORY_USER_AGENCY_PROMPT).trim();
-    if (prompt) messages.push({ role: "system", content: prompt });
-  }
+  const userControlPrompt = resolveStoryUserControlPrompt(settings).trim();
+  if (userControlPrompt) messages.push({ role: "system", content: userControlPrompt });
   if (settings?.enforceVoiceFormat) {
     const prompt = (settings.voiceFormatPrompt ?? DEFAULT_STORY_VOICE_FORMAT_PROMPT).trim();
     if (prompt) messages.push({ role: "system", content: prompt });
   }
+  const userControlEndingPrompt = resolveStoryUserControlEndingPrompt(settings).trim();
+  if (userControlEndingPrompt) messages.push({ role: "system", content: userControlEndingPrompt });
   if (instructionHistory.directorInstruction.trim()) {
     messages.push({ role: "user", content: wrapStoryInstruction(instructionHistory.directorInstruction), _debugMeta: { marker: "本轮导演指令" } });
   }

@@ -7,7 +7,7 @@ import { TextExpandModal } from "@/components/ui/modal";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { StoryPaginationManager, type StoryBranchCreateInput } from "@/components/story/story-pagination-manager";
 import { downloadFile } from "@/lib/download-utils";
-import { DEFAULT_STORY_USER_AGENCY_PROMPT, DEFAULT_STORY_VOICE_FORMAT_PROMPT } from "@/lib/story-constraints";
+import { resolveStoryUserControlMode, resolveStoryUserControlPrompt, resolveStoryUserControlEndingPrompt, STORY_USER_CONTROL_OPTIONS, DEFAULT_STORY_VOICE_FORMAT_PROMPT, type StoryUserControlMode } from "@/lib/story-constraints";
 import type { Character } from "@/lib/character-types";
 import type { PresetConfig } from "@/lib/settings-types";
 import type { StoryCharacterSettings, StoryGroup, StoryProseStyleScheme, StoryQuickInputScheme, StorySchemeRepository, StorySession, StoryTailScheme, StoryUiPrefs } from "@/lib/story-storage";
@@ -443,6 +443,9 @@ function QuickOptionsEditor({
 
 export function StorySettingsPage(props: StorySettingsPageProps) {
   const normalized = useMemo(() => normalizeSettings(props.settings, props.schemeRepo), [props.settings, props.schemeRepo]);
+  const userControlMode = resolveStoryUserControlMode(normalized);
+  const userControlOption = STORY_USER_CONTROL_OPTIONS.find((option) => option.value === userControlMode)!;
+  const userControlPromptField = userControlMode === "moderate" ? "moderateUserControlPrompt" : userControlMode === "strong" ? "strongUserControlPrompt" : "userAgencyPrompt";
   const repo = props.schemeRepo;
   // 方案定义 → 公用仓库；启用选择 → 当前角色设置
   const patchRepo = (updates: Partial<StorySchemeRepository>) => {
@@ -596,8 +599,22 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
 
         <SettingCard title="生成设置" hint="检查预设条目与生成设置是否重复">
           <ToggleRow title="字数与人称由预设决定" detail="开启后不追加下方的字数及用户人称要求" checked={Boolean(normalized.usePresetNarration)} onChange={(value) => patchSettings({ usePresetNarration: value })} />
-          <ToggleRow title="不代写用户" detail="开启后追加下方要求；关闭后由绑定预设决定" checked={Boolean(normalized.preventUserControl)} onChange={(value) => patchSettings({ preventUserControl: value })} />
-          {normalized.preventUserControl && <label className="story-settings-field"><span>不代写用户提示词</span><textarea value={normalized.userAgencyPrompt ?? DEFAULT_STORY_USER_AGENCY_PROMPT} onChange={(event) => patchSettings({ userAgencyPrompt: event.target.value })} /></label>}
+          <label className="story-settings-field">
+            <span>抢话设置</span>
+            <select value={userControlMode} onChange={(event) => {
+              const mode = event.target.value as StoryUserControlMode;
+              patchSettings({ userControlMode: mode, preventUserControl: mode === "none" });
+            }}>
+              {STORY_USER_CONTROL_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+          </label>
+          <p className="story-settings-note">{userControlOption.detail}</p>
+          {userControlMode !== "preset" && <label className="story-settings-field"><span>{userControlOption.label}提示词</span><textarea value={resolveStoryUserControlPrompt(normalized)} onChange={(event) => patchSettings({ [userControlPromptField]: event.target.value })} /><small>各档分别保存，仅追加当前档的内容；字数与人称沿用其他设置。</small></label>}
+          {(userControlMode === "moderate" || userControlMode === "strong") && <p className="story-settings-note">若预设或文风中另有“不代写用户”的要求，建议同步调整，避免冲突。</p>}
+          {(userControlMode === "moderate" || userControlMode === "strong") && <>
+            <label className="story-settings-field"><span>抢话收尾要求</span><textarea value={resolveStoryUserControlEndingPrompt(normalized)} onChange={(event) => patchSettings({ userControlEndingPrompt: event.target.value })} /></label>
+            <p className="story-settings-note">适当抢话与强抢话共用，追加在当前档提示词之后，确保结尾给用户留出回应空间。</p>
+          </>}
           <ToggleRow title="约束语音识别格式" detail="开启后追加可编辑的对白格式要求；关闭可能影响分句朗读识别，但不限制写法" checked={Boolean(normalized.enforceVoiceFormat)} onChange={(value) => patchSettings({ enforceVoiceFormat: value })} />
           {normalized.enforceVoiceFormat && <label className="story-settings-field"><span>语音格式提示词</span><textarea value={normalized.voiceFormatPrompt ?? DEFAULT_STORY_VOICE_FORMAT_PROMPT} onChange={(event) => patchSettings({ voiceFormatPrompt: event.target.value })} /></label>}
           <div className="story-number-grid">

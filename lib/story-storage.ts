@@ -298,8 +298,13 @@ export type StoryPromptEntry = {
 };
 
 export type StoryCharacterSettings = {
+  userControlMode?: "preset" | "none" | "moderate" | "strong";
+  /** Legacy toggle: used only when userControlMode is absent. */
   preventUserControl?: boolean;
   userAgencyPrompt?: string;
+  moderateUserControlPrompt?: string;
+  strongUserControlPrompt?: string;
+  userControlEndingPrompt?: string;
   enforceVoiceFormat?: boolean;
   voiceFormatPrompt?: string;
   usePresetNarration?: boolean;

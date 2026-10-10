@@ -1643,9 +1643,11 @@
         .story-dialog > footer .story-settings-primary { background:var(--c-story-heading,#303236); color:#fff; }
         .story-dialog > footer button:disabled { opacity:.4; }
         .story-group-picker { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; max-height:330px; overflow-y:auto; margin-top:13px; }
-        .story-group-picker label { min-width:0; padding:8px; border:1px solid rgba(100,116,139,.08); border-radius:13px; background:rgba(148,163,184,.04); display:flex; align-items:center; gap:8px; }
+        /* Keep the focus target inside its scrolling card, not the dialog's containing block. */
+        .story-group-picker label { position:relative; min-width:0; padding:8px; border:1px solid rgba(100,116,139,.08); border-radius:13px; background:rgba(148,163,184,.04); display:flex; align-items:center; gap:8px; }
         .story-group-picker label[data-selected="true"] { border-color:color-mix(in srgb,var(--c-story-heading,#1e293b) 38%,transparent); background:color-mix(in srgb,var(--c-story-heading,#1e293b) 6%,transparent); }
-        .story-group-picker label > input { position:absolute; opacity:0; pointer-events:none; }
+        .story-group-picker label > input { position:absolute; top:50%; left:8px; width:1px; height:1px; margin:0; transform:translateY(-50%); opacity:0; pointer-events:none; }
+        .story-group-picker label:has(> input:focus-visible) { outline:2px solid var(--c-story-heading,#1e293b); outline-offset:-2px; }
         .story-group-picker label > span:last-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:calc(10.5px*var(--app-text-scale,1)); }
         @media (max-width:390px) {
           .story-book-hero { grid-template-columns:94px minmax(0,1fr); gap:14px; }

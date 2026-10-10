@@ -9,6 +9,11 @@ function load(file, dependencies = {}) {
   return exports;
 }
 const instructions = load('lib/story-instructions.ts');
+const constraints = load('lib/story-constraints.ts');
+assert.equal(constraints.resolveStoryUserControlMode(), 'preset');
+assert.equal(constraints.resolveStoryUserControlMode({ preventUserControl: true }), 'none');
+assert.equal(constraints.resolveStoryUserControlMode({ userControlMode: 'unknown', preventUserControl: true }), 'none');
+assert.equal(constraints.resolveStoryUserControlMode({ userControlMode: 'unknown' }), 'preset');
 const row = (id, role, rawContent, kind) => ({ id, role, rawContent, kind, sessionId: 's', createdAt: '2026-10-03T00:00:00Z' });
 const user = row('u', 'user', '普通扮演');
 const director = row('d', 'user', '镜头转向窗外', 'director');
@@ -28,14 +33,14 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
   let captured, contextOptions, saved = [user, director, reply];
   const engine = load('lib/story-engine.ts', {
     './story-instructions': instructions,
-    './story-constraints': load('lib/story-constraints.ts'),
+    './story-constraints': constraints,
     './character-storage': { loadCharacters: () => [{ id: 'char', name: '角色' }, { id: 'other', name: '配角' }] },
     './settings-storage': {
       loadBindingConfig: () => ({ characterBindings: [] }), resolveBinding: () => ({ apiConfigId: 'api', presetId: 'p' }),
       loadApiConfigs: () => [{ id: 'api' }], loadPresets: () => [{ id: 'p' }], loadRegexes: () => [], loadWorldBooks: () => [], resolveUserIdentity: () => ({ name: 'user' }),
     },
     './llm-prompt-assembler': { assemblePromptPayload: ({ history }) => history.map(m => ({ role: m.role, content: m.content })) },
-    './chat-engine': { ChatEngineError: Error, sendLLMRequest: async (_c, _p, messages) => { captured = messages; return '<content>正文</content><summary>事件</summary>'; } },
+    './chat-engine': { ChatEngineError: Error, previewMessagesForApi: (_c, _p, messages) => messages, sendLLMRequest: async (_c, _p, messages) => { captured = messages; return '<content>正文</content><summary>事件</summary>'; } },
     './memory-storage': { loadMemoryConfig: () => ({}) },
     './memory-service': { retrieveCoreMemoriesForPrompt: async () => null, retrieveMemoriesForPrompt: async () => null },
     './short-term-assembler': { prepareShortTermContext: (_c, _a, options) => { contextOptions = options; return { truncatedHistory: options.history, recentBlocks: [], unifiedRecentItems: [], wbActivationContext: '' }; } },
@@ -76,9 +81,55 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
   assert.ok(!combined().includes('正文长度以'));
   await engine.generateStoryCompletion('char', saved, { settings: { preventUserControl: false, userAgencyPrompt: '不应发送的边界', enforceVoiceFormat: false, voiceFormatPrompt: '不应发送的格式' } });
   assert.ok(!combined().includes('不应发送'));
-  await engine.generateStoryCompletion('char', [user, director], { participantIds: ['char', 'other'], settings: { enforceVoiceFormat: true }, storyMemory: { independent: true }, retryInstruction: '临时重试优先' });
+  const prompts = {
+    none: constraints.DEFAULT_STORY_USER_AGENCY_PROMPT,
+    moderate: constraints.DEFAULT_STORY_MODERATE_USER_CONTROL_PROMPT,
+    strong: constraints.DEFAULT_STORY_STRONG_USER_CONTROL_PROMPT,
+  };
+  const fields = { none: 'userAgencyPrompt', moderate: 'moderateUserControlPrompt', strong: 'strongUserControlPrompt' };
+  const endingPrompt = constraints.DEFAULT_STORY_USER_CONTROL_ENDING_PROMPT;
+  assert.match(endingPrompt, /剧情正文都不得以用户的行动或对白结束/);
+  // New modes take precedence over legacy flags, and never inject inactive defaults.
+  for (const mode of ['preset', 'none', 'moderate', 'strong']) {
+    await engine.generateStoryCompletion('char', saved, { participantIds: ['char', 'other'], settings: { userControlMode: mode, preventUserControl: mode !== 'none', usePresetNarration: true } });
+    for (const [other, prompt] of Object.entries(prompts)) {
+      assert.equal(captured.filter(m => m.content === prompt).length, mode === other ? 1 : 0, `${mode}: only active prompt injected once`);
+    }
+    assert.equal(captured.filter(m => m.content === endingPrompt).length, ['moderate', 'strong'].includes(mode) ? 1 : 0, 'ending rule applies once to both takeover modes only');
+    const preview = await engine.previewStoryPromptPayload('char', saved, { participantIds: ['char', 'other'], settings: { userControlMode: mode, preventUserControl: mode !== 'none', usePresetNarration: true } });
+    assert.deepEqual(preview.messages, captured, 'preview and actual generation use identical constraints');
+    assert.ok(!combined().includes('正文长度以'));
+  }
+  const customSettings = { userAgencyPrompt: '自定不抢话', moderateUserControlPrompt: '自定适当抢话', strongUserControlPrompt: '自定强抢话' };
+  for (const mode of ['none', 'moderate', 'strong', 'preset', 'moderate']) {
+    const settings = JSON.parse(JSON.stringify({ ...customSettings, userControlMode: mode }));
+    await engine.generateStoryCompletion('char', saved, { settings });
+    assert.equal(combined().includes(endingPrompt), ['moderate', 'strong'].includes(mode), 'existing custom prompts also receive shared ending rule');
+    for (const [other, field] of Object.entries(fields)) {
+      assert.equal(combined().includes(customSettings[field]), mode === other, 'switching/serialization retains each draft without leaking inactive prompts');
+    }
+    assert.ok(Object.values(prompts).every(prompt => !combined().includes(prompt)), 'custom prompts replace defaults');
+    if (fields[mode]) {
+      await engine.generateStoryCompletion('char', saved, { settings: { ...settings, [fields[mode]]: '  ' } });
+      assert.ok(Object.values(prompts).every(prompt => !combined().includes(prompt)), 'explicit blank does not restore default');
+      assert.ok(Object.values(customSettings).every(prompt => !combined().includes(prompt)));
+      assert.equal(combined().includes(endingPrompt), ['moderate', 'strong'].includes(mode), 'clearing mode text does not remove the shared ending requirement');
+    }
+  }
+  for (const mode of ['moderate', 'strong']) {
+    await engine.generateStoryCompletion('char', saved, { settings: { userControlMode: mode, userControlEndingPrompt: '自定义收尾要求' } });
+    assert.match(combined(), /自定义收尾要求/);
+    assert.ok(!combined().includes(endingPrompt));
+    await engine.generateStoryCompletion('char', saved, { settings: { userControlMode: mode, userControlEndingPrompt: '' } });
+    assert.ok(!combined().includes(endingPrompt), 'editable blank ending rule remains blank');
+  }
+  await engine.generateStoryCompletion('char', [user, director], { participantIds: ['char', 'other'], settings: { enforceVoiceFormat: true, userControlMode: 'strong' }, storyMemory: { independent: true }, retryInstruction: '临时重试优先' });
+  assert.ok(combined().includes(prompts.strong));
+  assert.equal(captured.at(-3).content, endingPrompt, 'shared ending rule follows voice formatting and precedes director/retry instructions');
   assert.match(captured.at(-2).content, /镜头转向窗外/);
   assert.match(captured.at(-1).content, /临时重试优先/);
   console.log('PASS: multiplayer roster, default-off/editable constraints, preset narration and independent-branch director/retry');
+  console.log('PASS: user-control modes, legacy compatibility, independent editable drafts and explicit empty prompts');
+  console.log('PASS: shared takeover ending rule, custom prompts, preview parity and instruction ordering');
   console.log('PASS: director lifetime, roleplay distinction, retry slicing, escaping, request-only guidance, projection exclusion and no destructive preparation');
 })().catch(error => { console.error(error); process.exitCode = 1; });
