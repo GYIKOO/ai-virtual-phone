@@ -301,7 +301,8 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
                         <span>
                           {isMain ? <strong>主线剧情</strong> : (
                             <input
-                              value={session.branchName || "分线剧情"}
+                              value={session.branchName ?? ""}
+                              placeholder="分线剧情"
                               disabled={Boolean(session.mergedIntoSessionId)}
                               aria-label="分线名称"
                               onClick={(event) => event.stopPropagation()}

@@ -161,7 +161,7 @@ function sanitizeProseStyleScheme(raw: unknown): StoryProseStyleScheme | null {
   // 新建方案时 prompt 留空是正常状态（等用户填写），不能因此丢弃整个方案。
   return {
     id: item.id.trim(),
-    name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : "未命名文风",
+    name: typeof item.name === "string" ? item.name : "未命名文风",
     prompt: typeof item.prompt === "string" ? item.prompt : "",
   };
 }
@@ -172,7 +172,7 @@ function sanitizeTailScheme(raw: unknown): StoryTailScheme | null {
   if (typeof item.id !== "string" || !item.id.trim()) return null;
   return {
     id: item.id.trim(),
-    name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : "未命名方案",
+    name: typeof item.name === "string" ? item.name : "未命名方案",
     prompt: typeof item.prompt === "string" ? item.prompt : "",
     renderHtml: typeof item.renderHtml === "string" ? item.renderHtml : "",
     preview: typeof item.preview === "string" ? item.preview : "",
@@ -188,7 +188,7 @@ function sanitizeQuickInputScheme(raw: unknown): StoryQuickInputScheme | null {
   const cursor = item.cursor === "left" || item.cursor === "right" ? item.cursor : "middle";
   return {
     id: item.id.trim(),
-    name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : "未命名方案",
+    name: typeof item.name === "string" ? item.name : "未命名方案",
     options,
     cursor,
   };
@@ -309,6 +309,7 @@ export type StoryCharacterSettings = {
   enforceVoiceFormat?: boolean;
   voiceFormatPrompt?: string;
   usePresetNarration?: boolean;
+  usePresetProseStyle?: boolean;
   presetName?: string;
   extraPrompt?: string;
   customPromptEntries?: StoryPromptEntry[];
@@ -487,7 +488,7 @@ function normalizeStorySessions(sessions: StorySession[]): { items: StorySession
     const ownerType: StoryOwnerType = session.ownerType === "group" ? "group" : "single";
     const ownerId = session.ownerId?.trim() || characterId;
     const branchId = session.branchId?.trim() || "main";
-    const branchName = session.branchName?.trim() || (branchId === "main" ? "主线剧情" : session.title?.trim() || "分线剧情");
+    const branchName = typeof session.branchName === "string" ? session.branchName : (branchId === "main" ? "主线剧情" : session.title?.trim() || "分线剧情");
     const createdAt = session.createdAt || session.updatedAt || new Date().toISOString();
     const participantIds = ownerType === "group"
       ? Array.from(new Set((session.participantIds || [characterId]).map((value) => value.trim()).filter(Boolean)))

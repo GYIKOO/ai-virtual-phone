@@ -590,7 +590,7 @@ export function ImageGenerationSettings() {
                                         onChange={(event) => updateNovelAi({ activePresetId: event.target.value })}
                                     >
                                         {naiSettings.presets.map(p => (
-                                            <option key={p.id} value={p.id}>{p.name}</option>
+                                            <option key={p.id} value={p.id}>{p.name.trim() || "未命名预设"}</option>
                                         ))}
                                     </Select>
                                 </div>

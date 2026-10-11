@@ -715,7 +715,7 @@ export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
 function normalizeNovelAiPreset(preset: Partial<import("./settings-types").NovelAiPreset> | null | undefined, index: number): import("./settings-types").NovelAiPreset {
     return {
         id: typeof preset?.id === "string" && preset.id.trim() ? preset.id.trim() : `preset_nai_${Date.now()}_${index}`,
-        name: typeof preset?.name === "string" && preset.name.trim() ? preset.name.trim() : `预设 ${index + 1}`,
+        name: typeof preset?.name === "string" ? preset.name : `预设 ${index + 1}`,
         model: normalizeNovelAiModel(preset?.model),
         resolution: normalizeNovelAiResolution(preset?.resolution),
         steps: normalizeNovelAiSteps(preset?.steps),
@@ -733,7 +733,7 @@ function normalizeNovelAiPreset(preset: Partial<import("./settings-types").Novel
 function normalizeOpenAiPreset(preset: Partial<OpenAiImagePreset> | null | undefined, index: number): OpenAiImagePreset {
     return {
         id: typeof preset?.id === "string" && preset.id.trim() ? preset.id.trim() : `preset_openai_${Date.now()}_${index}`,
-        name: typeof preset?.name === "string" && preset.name.trim() ? preset.name.trim() : "默认方案",
+        name: typeof preset?.name === "string" ? preset.name : "默认方案",
         requestMode: preset?.requestMode === "server" || preset?.requestMode === "direct" ? preset.requestMode : DEFAULT_IMAGE_GENERATION_SETTINGS.requestMode,
         apiKey: typeof preset?.apiKey === "string" ? preset.apiKey : "",
         baseUrl: typeof preset?.baseUrl === "string" ? preset.baseUrl : DEFAULT_IMAGE_GENERATION_SETTINGS.baseUrl,

@@ -22,7 +22,7 @@ function load(name) {
   const filename = `lib/${name.replace('./', '')}.ts`;
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { exports, require: load, window: { dispatchEvent: event => events.push(event) },
-      CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail; } },
+      CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
       indexedDB, IDBKeyRange, console, Date, structuredClone, setTimeout, clearTimeout }, { filename });
   return exports;
 }
@@ -32,7 +32,7 @@ function load(name) {
   db.version(1).stores({ sessions: 'id, characterId, updatedAt', messages: 'id, sessionId, createdAt' });
   const legacy = { id: 'legacy-main', characterId: 'a', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', foldTags: tags.LEGACY_STORY_FOLD_TAGS, contextExcludedTags: 'private_note' };
   await db.table('sessions').bulkPut([legacy, { ...legacy, id: 'custom-main', characterId: 'custom', foldTags: 'custom_tag' }, { ...legacy, id: 'empty-main', characterId: 'empty', foldTags: '', contextExcludedTags: '' }]);
-  const sharedSettings = { minChars: 1000, maxChars: 2000, userControlMode: 'strong', userPerspective: 'third',
+  const sharedSettings = { minChars: 1000, maxChars: 2000, userControlMode: 'strong', userPerspective: 'third', usePresetProseStyle: true,
     customPromptEntries: [{ id: 'entry', content: 'test', name: 'test', enabled: true }], activeStatusSchemeId: 'status-html', floatingPhoneEnabled: true };
   await db.sessions.bulkPut([
     { ...legacy, id: 'm-main', characterId: 'm', branchId: 'main', settings: { minChars: 100 } },
@@ -44,6 +44,15 @@ function load(name) {
   kv.set('story-active-page-map-v1', JSON.stringify({ 'single:m': 'm-active' }));
   let store = load('./story-storage');
   await store.hydrateStoryStorage();
+  const repo = store.loadStorySchemeRepository();
+  for (const key of ['proseStyleSchemes', 'statusSchemes', 'theaterSchemes', 'quickInputSchemes']) repo[key][0].name = '';
+  store.saveStorySchemeRepository(repo);
+  for (const key of ['proseStyleSchemes', 'statusSchemes', 'theaterSchemes', 'quickInputSchemes']) {
+    assert.equal(store.loadStorySchemeRepository()[key][0].name, '', `${key} accepts clearing a title`);
+    repo[key][0].name = ' 新标题 ';
+  }
+  store.saveStorySchemeRepository(repo);
+  for (const key of ['proseStyleSchemes', 'statusSchemes', 'theaterSchemes', 'quickInputSchemes']) assert.equal(store.loadStorySchemeRepository()[key][0].name, ' 新标题 ', 'typing spaces does not trim the draft');
   const get = id => store.loadStorySessions().find(s => s.id === id);
   const json = value => JSON.parse(JSON.stringify(value));
   assert.deepEqual(json(get('m-main').settings), sharedSettings, 'existing main adopts remembered page settings during migration');
@@ -62,6 +71,8 @@ function load(name) {
   assert.equal(store.createOrGetStorySession('custom').foldTags, 'custom_tag');
   assert.equal(store.createOrGetStorySession('empty').foldTags, '');
   const first = store.createOrGetStorySession('a', { branchId: 'first', baseSession: main });
+  store.updateStorySession(first.id, { branchName: '' });
+  assert.equal(store.loadStorySessions().find(s => s.id === first.id).branchName, '', 'page title does not refill during normalization');
   const edited = store.updateStorySession(first.id, { foldTags: 'think,summary,my_status', contextExcludedTags: 'secret', settings: sharedSettings, uiPrefs: { theme: 'night' }, customCSS: '.shared {}' });
   store.saveStoryLaunchTarget(edited);
   const next = store.createOrGetStorySession('a', { branchId: 'quick', baseSession: main, independentStory: true });

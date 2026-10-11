@@ -9,13 +9,14 @@ let entries = [], summaries = [], deleted = [], failures = false, hydrated = tru
 const exportsObject = {};
 const storage = { length: 0, key: () => null, getItem: () => null };
 const deps = {
+  './orphan-chat-cleanup': { orphanChatCandidate: () => null },
   './kv-db': { hydrateKvDb: async () => {}, isKvHydrated: () => hydrated, kvEntries: () => entries },
   './media-cache-storage': { MEDIA_STORE_PROTOCOL: 'media-store://', listMediaCacheSummaries: async () => summaries,
     deleteMediaRef: async ref => { deleted.push(ref); } },
 };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync('lib/storage-cleanup.ts', 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-}).outputText, { exports: exportsObject, require: n => deps[n], Blob, ArrayBuffer, Map, Set, WeakSet, Date, setTimeout,
+}).outputText, { exports: exportsObject, require: n => deps[n], Blob, ArrayBuffer, Map, Set, WeakSet, Date, setTimeout, atob, decodeURIComponent,
   localStorage: storage, sessionStorage: storage,
   indexedDB: { databases: async () => failures ? [{ name: 'broken' }] : [{ name: 'AiPhoneMediaCacheDB' }], open: () => { const request = { result: { objectStoreNames: [], close() {} } }; setTimeout(() => failures ? request.onerror() : request.onsuccess(), 0); return request; } },
 });
@@ -28,7 +29,9 @@ const { collectMediaReferences, cleanupCandidates, scanStorageCleanup, cleanStor
   collectMediaReferences(new Map([['mc_123_map', new Set(['mc_123_set'])]]), refs);
   for (const suffix of ['shared', 'html', 'json', 'key', 'map', 'set']) assert.ok(refs.has(`mc_123_${suffix}`));
   collectMediaReferences('data:text/html;base64,bWNfMTIzX3NoYXJlZA==', refs);
-  assert.ok(refs.has('__opaque_document__'), 'opaque embedded documents require blocking cleanup');
+  assert.ok(!refs.has('__opaque_document__'), 'readable encoded text is inspected');
+  collectMediaReferences('data:application/json,' + encodeURIComponent('{"img":"media-store://mc_123_percent"}'), refs);
+  assert.ok(refs.has('mc_123_percent'));
   const rows = [item('shared'), item('orphan'), item('voice', { category: 'audio' }), item('new', { createdAt: now }), item('unknown', { category: 'file' }), item('bad', { createdAt: NaN })];
   assert.equal(cleanupCandidates(rows, refs, now).map(x => x.id).join(), 'mc_123_orphan,mc_123_voice');
   summaries = [item('orphan')];
@@ -39,8 +42,13 @@ const { collectMediaReferences, cleanupCandidates, scanStorageCleanup, cleanStor
   assert.equal(skipped.count, 0, 'new cross-app reference protects selected asset');
   assert.equal(deleted.length, 0);
   entries = [{ key: 'embedded', value: 'data:text/html;base64,bWNfMTIzX3NoYXJlZA==' }];
-  assert.equal((await scanStorageCleanup()).media.length, 0, 'uninspectable documents protect all media');
-  await assert.rejects(() => cleanStorageCandidates(first.media));
+  assert.equal((await scanStorageCleanup()).media.length, 1, 'readable embedded text does not block unrelated media');
+  entries = [{ key: 'embedded', value: 'data:text/html;base64,%%%bad' }];
+  const opaque = await scanStorageCleanup();
+  assert.equal(opaque.media.length, 0, 'malformed documents keep media protected');
+  assert.equal(opaque.errors.length, 0, 'opaque documents are a media warning, not a global failure');
+  assert.equal(opaque.mediaWarnings.length, 1);
+  assert.equal((await cleanStorageCandidates(first.media)).count, 0);
   entries = []; failures = true;
   const incomplete = await scanStorageCleanup();
   assert.equal(incomplete.media.length, 0);

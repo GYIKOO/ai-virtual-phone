@@ -62,7 +62,7 @@ type StorySettingsPageProps = {
 function normalizeSettings(value: StoryCharacterSettings, repo: StorySchemeRepository): StoryCharacterSettings {
   return {
     ...value,
-    presetName: value.presetName || "默认剧情",
+    presetName: value.presetName ?? "默认剧情",
     minChars: value.minChars ?? 800,
     maxChars: value.maxChars ?? 1500,
     userPerspective: value.userPerspective || "second",
@@ -99,7 +99,7 @@ function ProseStyleEditor({
       <div className="story-settings-label-row"><label>文风方案</label><span>所有角色共用，当前角色选择启用哪一套</span></div>
       <div className="story-settings-inline story-settings-inline-with-save">
         <select value={active.id} onChange={(event) => onChange(schemes, event.target.value)}>
-          {schemes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          {schemes.map((item) => <option key={item.id} value={item.id}>{item.name || "未命名文风"}</option>)}
         </select>
         <button type="button" aria-label="新增文风方案" onClick={() => {
           const id = `story-style-${Date.now()}`;
@@ -333,7 +333,7 @@ function SchemeEditor({
                   setDraftId(event.target.value);
                   setPreviewHtml(next?.renderHtml || "");
                 }}>
-                  {draftSchemes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  {draftSchemes.map((item) => <option key={item.id} value={item.id}>{item.name || "未命名方案"}</option>)}
                 </select>
                 <button type="button" aria-label={`新增${label}`} onClick={() => {
                   const id = `${tag}-${Date.now()}`;
@@ -632,7 +632,8 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
             <CharLimitInput label="最多字数" value={normalized.maxChars ?? 1500} onCommit={(maxChars) => patchSettings({ maxChars })} />
           </div>
           <label className="story-settings-field"><span>用户人称</span><select value={normalized.userPerspective} onChange={(event) => patchSettings({ userPerspective: event.target.value as StoryCharacterSettings["userPerspective"] })}><option value="second">第二人称“你”</option><option value="third">第三人称“TA/他/她”</option><option value="username">使用用户名“{props.userName}”</option></select></label>
-          <ProseStyleEditor schemes={repo.proseStyleSchemes} activeId={normalized.activeProseStyleSchemeId!} onChange={(proseStyleSchemes, activeProseStyleSchemeId) => { patchRepo({ proseStyleSchemes }); patchSettings({ activeProseStyleSchemeId }); }} />
+          <ToggleRow title="文风由预设决定" detail="不追加文风方案，保留当前方案选择" checked={Boolean(normalized.usePresetProseStyle)} onChange={(value) => patchSettings({ usePresetProseStyle: value })} />
+          {!normalized.usePresetProseStyle && <ProseStyleEditor schemes={repo.proseStyleSchemes} activeId={normalized.activeProseStyleSchemeId!} onChange={(proseStyleSchemes, activeProseStyleSchemeId) => { patchRepo({ proseStyleSchemes }); patchSettings({ activeProseStyleSchemeId }); }} />}
         </SettingCard>
 
         <SettingCard title="语音与播放">
@@ -702,7 +703,7 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
               <div className="story-settings-label-row"><label>输入方案</label><span>所有角色共用，当前角色选择启用哪一套</span></div>
               <div className="story-settings-inline">
                 <select value={quickInputActive.id} onChange={(event) => props.onUiPrefsChange({ ...props.uiPrefs, activeQuickInputSchemeId: event.target.value })}>
-                  {repo.quickInputSchemes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                  {repo.quickInputSchemes.map((item) => <option key={item.id} value={item.id}>{item.name || "未命名方案"}</option>)}
                 </select>
                 <button type="button" aria-label="新增快捷输入方案" onClick={() => {
                   const id = `quick-${Date.now()}`;

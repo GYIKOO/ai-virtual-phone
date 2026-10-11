@@ -34,7 +34,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /事实纠正�
 assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向用于安排事件发展/);
 
 (async () => {
-  let captured, contextOptions, saved = [user, director, reply];
+  let captured, contextOptions, schemes = {}, saved = [user, director, reply];
   const engine = load('lib/story-engine.ts', {
     './story-tag-settings': load('lib/story-tag-settings.ts'),
     './story-instructions': instructions,
@@ -52,7 +52,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
     './calendar-storage': { buildCalendarScheduleMarker: () => '', getCurrentCalendarScheduleForPrompt: () => '' },
     './calendar-utils': { getWeekStartIso: () => '' },
     './story-parser': { parseStoryResponse: rawText => ({ rawText, renderedText: '正文', summaryText: '事件' }) },
-    './story-storage': { loadStoryMessages: () => saved, resolveActiveStorySchemes: () => ({}) },
+    './story-storage': { loadStoryMessages: () => saved, resolveActiveStorySchemes: () => schemes },
     './macro-engine': { MacroEngine: class {} },
   });
   await engine.generateStoryCompletion('char', [user, director], { retryInstruction: '不要下雨' });
@@ -78,6 +78,17 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   await engine.generateStoryCompletion('char', [], { sessionId: 's' });
   assert.ok(contextOptions.excludeStoryMessageIds.includes('a'), 'first-reply retry with empty context still excludes old projection');
   const combined = () => captured.map(m => m.content).join('\n');
+  schemes = { proseStyle: { name: '测试文风', prompt: '方案文风要求' }, status: { prompt: '状态栏协议' }, theater: { prompt: '小剧场协议' } };
+  await engine.generateStoryCompletion('char', saved, { settings: {} });
+  assert.ok(combined().includes('方案文风要求'), 'existing default style remains enabled');
+  await engine.generateStoryCompletion('char', saved, { settings: { usePresetProseStyle: true, proseStyle: '旧文风', proseStylePrompt: '旧自定义文风', extraPrompt: '用户额外要求' } });
+  for (const value of ['方案文风要求', '旧文风', '旧自定义文风']) assert.ok(!combined().includes(value), 'preset mode disables all automatic style fallbacks');
+  for (const value of ['状态栏协议', '小剧场协议', '用户额外要求', '800—1500']) assert.ok(combined().includes(value), 'other settings remain independent');
+  const stylePreview = await engine.previewStoryPromptPayload('char', saved, { settings: { usePresetProseStyle: true } });
+  assert.ok(!stylePreview.messages.map(m => m.content).join('\n').includes('方案文风要求'));
+  schemes = {};
+  await engine.generateStoryCompletion('char', saved, { settings: { usePresetProseStyle: true, proseStyle: '旧文风', proseStylePrompt: '旧自定义文风' } });
+  assert.ok(!combined().includes('旧文风') && !combined().includes('旧自定义文风'));
   const taggedUser = row('tags', 'user', '正文<think>隐藏思考</think><summary>保留摘要</summary>');
   await engine.generateStoryCompletion('char', [taggedUser]);
   assert.ok(!combined().includes('隐藏思考'));
