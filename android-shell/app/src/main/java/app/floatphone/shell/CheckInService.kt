@@ -331,11 +331,14 @@ class CheckInService : Service() {
             avatar: String,
             source: String = SOURCE_CHECK_IN,
         ) {
+            val revision = NativeBridgePolicy.revision
             // 优先同进程直改：绕开 Android 12+ 对后台启动服务的限制，
             // 也免掉 Intent 投递的时序竞态。
             val instance = liveInstance
             if (instance != null) {
-                instance.main.post { instance.showCheckIn(characterId, name, avatar, source) }
+                instance.main.post {
+                    if (revision == NativeBridgePolicy.revision) instance.showCheckIn(characterId, name, avatar, source)
+                }
                 return
             }
 
@@ -362,6 +365,7 @@ class CheckInService : Service() {
                         putExtra(EXTRA_NAME, name)
                         putExtra(EXTRA_AVATAR, avatar)
                         putExtra(EXTRA_SOURCE, source)
+                        putExtra("accessRevision", revision)
                     },
                 )
             }
@@ -392,10 +396,11 @@ class CheckInService : Service() {
          */
         @Volatile
         private var pendingUserShot: String = ""
+        private var pendingUserShotRevision: Long = -1L
 
         /** 读走并清空用户主动截屏的结果（空串 = 没有待取）。 */
         fun consumePendingUserShot(): String {
-            val value = pendingUserShot
+            val value = if (pendingUserShotRevision == NativeBridgePolicy.revision && NativeBridgePolicy.captureAllowed()) pendingUserShot else ""
             pendingUserShot = ""
             return value
         }
@@ -628,7 +633,10 @@ class CheckInService : Service() {
                 val name = intent.getStringExtra(EXTRA_NAME).orEmpty()
                 val avatar = intent.getStringExtra(EXTRA_AVATAR).orEmpty()
                 val source = intent.getStringExtra(EXTRA_SOURCE).orEmpty().ifBlank { SOURCE_CHECK_IN }
-                main.post { showCheckIn(characterId, name, avatar, source) }
+                val revision = intent.getLongExtra("accessRevision", -1L)
+                main.post {
+                    if (revision == NativeBridgePolicy.revision) showCheckIn(characterId, name, avatar, source)
+                }
             }
             ACTION_STOP -> {
                 teardown()
@@ -650,12 +658,25 @@ class CheckInService : Service() {
      * takeScreenshot 是回调式的，几毫秒到几百毫秒不等；这段时间里用户
      * 完全不知道发生了什么。先给个「正在截屏」的即时反馈，体感才不突兀。
      */
+    private var pendingAccessRevision = -1L
+
+    private fun pendingAccessAllowed(): Boolean = pendingAccessRevision == NativeBridgePolicy.revision &&
+        (if (captureSource == SOURCE_USER) NativeBridgePolicy.captureAllowed()
+         else NativeBridgePolicy.checkInAllowed(pendingCharacterId))
+
     private fun showCheckIn(
         characterId: String,
         name: String,
         avatar: String,
         source: String = SOURCE_CHECK_IN,
     ) {
+        if (!(if (source == SOURCE_USER) NativeBridgePolicy.captureAllowed()
+              else NativeBridgePolicy.checkInAllowed(characterId))) {
+            fail(this, characterId, "截屏授权已关闭。")
+            return
+        }
+        pendingAccessRevision = NativeBridgePolicy.revision
+        val captureRevision = pendingAccessRevision
         lastShowAt = System.currentTimeMillis()
         showCount += 1
         captureSource = source
@@ -688,6 +709,11 @@ class CheckInService : Service() {
 
         ScreenshotBridge.captureBitmap { bitmap, error ->
             main.post {
+                if (captureRevision != pendingAccessRevision || !pendingAccessAllowed()) {
+                    bitmap?.recycle()
+                    if (captureRevision == pendingAccessRevision) { discardPending(); hideWindow() }
+                    return@post
+                }
                 if (bitmap == null) {
                     // 截不到图就直接如实收场：不弹一张没有内容的浮层让用户干等
                     val reason = error ?: "截屏失败"
@@ -805,6 +831,11 @@ class CheckInService : Service() {
      * 位图从头到尾没离开过内存，也就无所谓「删不删」。
      */
     private fun acceptCheckIn() {
+        if (!pendingAccessAllowed()) {
+            discardPending()
+            hideWindow()
+            return
+        }
         val bitmap = pendingBitmap
         val reply = consumeReplyText()
         // 用户主动截屏这条路上，收件人是**刚才选的**，不是进 showCheckIn 时传的
@@ -852,13 +883,14 @@ class CheckInService : Service() {
         // 那次请求本来就是网页发起的，它必然活着。
         if (captureSource == SOURCE_USER && payload.optBoolean("accepted")) {
             pendingUserShot = payload.toString()
+            pendingUserShotRevision = pendingAccessRevision
             lastTargetReason = ""
         } else if (captureSource == SOURCE_USER) {
             // 用户主动截屏但没成：把原因留痕，诊断面板能看出是「没选收件人」
             // 还是「图没处理成功」，而不是笼统一句「点了没反应」。
             lastTargetReason = payload.optString("reason", "")
         }
-        ShellBus.dispatchOverlayEvent("checkIn", payload)
+        ShellBus.dispatchOverlayEvent("checkIn", payload, pendingAccessRevision)
         discardPending()
         hideWindow()
     }
@@ -907,6 +939,7 @@ class CheckInService : Service() {
     }
 
     private fun publishResult(accepted: Boolean, reason: String? = null, reply: String = "") {
+        if (!pendingAccessAllowed()) return
         // 收件人：用户主动截屏那条路上 pendingCharacterId 是空的，实际收件人
         // 记在 selectedTargetId 里（浮层当场选的或默认角色），这里一并带上，
         // 网页据此决定发给谁——老壳不带这个字段，网页会退回「最近会话」。
@@ -916,7 +949,7 @@ class CheckInService : Service() {
             .put("accepted", accepted)
         if (!accepted && !reason.isNullOrBlank()) payload.put("reason", reason)
         if (reply.isNotEmpty()) payload.put("reply", reply)
-        ShellBus.dispatchOverlayEvent("checkIn", payload)
+        ShellBus.dispatchOverlayEvent("checkIn", payload, pendingAccessRevision)
     }
 
     private fun scheduleAutoDismiss() {

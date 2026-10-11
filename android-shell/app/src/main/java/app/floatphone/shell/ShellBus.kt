@@ -24,18 +24,25 @@ object ShellBus {
     fun isWebAlive(): Boolean = webView != null
 
     /** 在主线程执行一段 JS。失败静默——原生侧不该因为网页异常而崩。 */
-    fun evalJs(script: String) {
+    fun evalJs(script: String, requiredRevision: Long? = null) {
         val target = webView ?: return
-        target.post { runCatching { target.evaluateJavascript(script, null) } }
+        val document = NativeBridgePolicy.document
+        target.post {
+            if (webView !== target || NativeBridgePolicy.document != document ||
+                !SecureShellBridge.isTrustedOrigin(target.url) ||
+                (requiredRevision != null && requiredRevision != NativeBridgePolicy.revision)) return@post
+            runCatching { target.evaluateJavascript(script, null) }
+        }
     }
 
     /**
      * 向网页派发一个通话浮窗事件。
      * @param action restore（点浮窗回全屏）/ hangup（挂断）/ reply（快捷回复）/ tick（心跳）
      */
-    fun dispatchOverlayEvent(action: String, payload: JSONObject = JSONObject()) {
+    fun dispatchOverlayEvent(action: String, payload: JSONObject = JSONObject(), requiredRevision: Long? = null) {
+        if (action == "foregroundApp" && !NativeBridgePolicy.perceptionAllowed("foregroundApp")) return
         val detail = JSONObject(payload.toString()).put("action", action)
         val literal = JSONObject.quote(detail.toString())
-        evalJs("window.dispatchEvent(new CustomEvent('shell-call-overlay',{detail:JSON.parse($literal)}))")
+        evalJs("window.dispatchEvent(new CustomEvent('shell-call-overlay',{detail:JSON.parse($literal)}))", requiredRevision)
     }
 }

@@ -81,6 +81,7 @@ class HealthBridge(private val context: Context) {
         /** 累计成功刷新次数（诊断用）。 */
         @Volatile
         private var refreshCount = 0
+        @Volatile private var permissionEpoch = 0L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -107,6 +108,14 @@ class HealthBridge(private val context: Context) {
 
     /** 睡眠读取权限是否已授予（读的是异步刷新的缓存）。 */
     fun hasSleepPermission(): Boolean = granted
+
+    /** Revalidate after returning from system settings; stale grants must not release cached health data. */
+    fun invalidatePermission() {
+        permissionEpoch++
+        granted = false
+        cachedJson = ""
+        cachedAt = 0L
+    }
 
     /**
      * 跳到 Health Connect 的设置页（用户在那里看数据来源与撤销授权）。
@@ -152,6 +161,7 @@ class HealthBridge(private val context: Context) {
             return
         }
         refreshing = true
+        val epoch = permissionEpoch
         scope.launch {
             try {
                 // 权限控制器要从客户端上拿（client.permissionController）。
@@ -159,6 +169,7 @@ class HealthBridge(private val context: Context) {
                 // 那是凭印象写的，CI 已证伪。
                 val client = HealthConnectClient.getOrCreate(context)
                 val has = client.permissionController.getGrantedPermissions().contains(PERM_SLEEP)
+                if (epoch != permissionEpoch) return@launch
                 granted = has
                 if (!has) {
                     cachedJson = ""
@@ -179,6 +190,9 @@ class HealthBridge(private val context: Context) {
                 lastError = ""
                 refreshCount += 1
             } catch (e: Throwable) {
+                granted = false
+                cachedJson = ""
+                cachedAt = 0L
                 lastError = e.message ?: "读健康数据失败"
             } finally {
                 refreshing = false

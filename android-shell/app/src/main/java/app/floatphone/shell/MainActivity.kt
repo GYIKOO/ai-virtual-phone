@@ -27,7 +27,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
-import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -72,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rootContainer: FrameLayout
     private lateinit var webView: WebView
     private val nativeCapabilities = NativeCapabilities(this)
+    private lateinit var secureShellBridge: SecureShellBridge
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var pluginFileSelection = false
 
@@ -105,17 +105,14 @@ class MainActivity : AppCompatActivity() {
      *
      * Health Connect 的授权走它自己的 ActivityResultContract，不是系统的
      * requestPermissions；用户勾了哪几项由返回的集合告诉我们。
-     * 结果记完就够——真正的读取由网页调 refreshHealth 触发，壳不替网页做判断。
+     * 返回后重新核对权限，网页通过能力查询读取最新状态。
      */
     private val healthPermissionLauncher = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
-    ) { grantedPermissions ->
-        healthPermissionGranted = grantedPermissions.contains(HealthBridge.PERM_SLEEP)
+    ) { _ ->
+        healthBridge.invalidatePermission()
+        healthBridge.refresh()
     }
-
-    /** 睡眠读取权限的最近一次申请结果（网页靠轮询 getHealthCapabilities 确认）。 */
-    @Volatile
-    private var healthPermissionGranted = false
 
     /**
      * 定位权限的申请结果回调。
@@ -316,11 +313,11 @@ class MainActivity : AppCompatActivity() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
 
-        webView.addJavascriptInterface(ShellBridge(), "AndroidShell")
+        secureShellBridge = SecureShellBridge(webView, ShellBridge(), PhoneWidgetBridge())
+        secureShellBridge.install()
         nativeCapabilities.install(webView)
         // 桌面小组件桥：独立命名空间，跟通话/截屏那套分开，
         // 免得以後加方法时和 AndroidShell 里几十个方法混在一起。
-        webView.addJavascriptInterface(PhoneWidgetBridge(), "PhoneWidget")
         // 步数传感器是异步的（没有同步取值接口），必须提前挂上才有值可读。
         // 这里只是「挂监听」，不申请权限；没授权时 attachStepSensor 内部会直接返回。
         PerceptionBridge.attachStepSensor(this)
@@ -330,11 +327,13 @@ class MainActivity : AppCompatActivity() {
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                secureShellBridge.reset()
                 nativeCapabilities.reset()
                 pendingWebPermissionRequest?.deny()
                 pendingWebPermissionRequest = null
             }
             override fun onPageFinished(view: WebView, url: String) {
+                secureShellBridge.onPageFinished(url)
                 nativeCapabilities.onPageFinished(view)
             }
 
@@ -586,11 +585,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        healthBridge.invalidatePermission()
+        if (NativeBridgePolicy.perceptionAllowed("sleep")) healthBridge.refresh()
         CallOverlayService.onHostForeground()
         CheckInService.onHostForeground()
     }
 
     override fun onDestroy() {
+        secureShellBridge.reset()
         nativeCapabilities.reset()
         if (ShellBus.webView === webView) ShellBus.webView = null
         CookieManager.getInstance().flush()
@@ -600,11 +602,11 @@ class MainActivity : AppCompatActivity() {
 
     /** 暴露给网页的原生桥（网页侧可用 window.AndroidShell 特性检测壳环境）。 */
     inner class ShellBridge {
-        @JavascriptInterface
+        @ShellMethod
         fun getVersion(): String = VERSION
 
         /** 实测系统状态栏高度（CSS px）。页面侧兜底轮询用；主要注入路径见 injectStatusBarHeight。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getStatusBarHeightPx(): Int = statusBarHeightCssPx
 
         // ── 感知桥（电量 / 网络 / 应用名）────────────────
@@ -612,15 +614,15 @@ class MainActivity : AppCompatActivity() {
         // 这样阈值与开关随网页部署即时生效，不必重编 APK。
 
         /** 设备状态快照 JSON：{ battery:{percent,charging}, network:{type,metered} }。 */
-        @JavascriptInterface
-        fun getPerceptionSnapshot(): String = perception.snapshotJson()
+        @ShellMethod
+        fun getPerceptionSnapshot(): String = NativeBridgePolicy.filterPerception(perception.snapshotJson())
 
         /** 包名 → 应用显示名；取不到返回空串。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getAppLabel(packageName: String): String = perception.appLabel(packageName)
 
         /** 本机支持哪些感知能力，给「感知 → 诊断」面板用。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getPerceptionCapabilities(): String = perception.capabilitiesJson()
 
         /**
@@ -631,11 +633,11 @@ class MainActivity : AppCompatActivity() {
          * 这里刻意不再加第二个同名方法：同一个 ShellBridge 里两个同名同参方法
          * 会构成 JVM 平台声明冲突（之前 openUrl 就这么炸过一次）。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun readUsageStats(maxEntries: Int): String = perception.usageStatsJson(maxEntries)
 
         /** 活动识别权限是否已授予（步数感知的前提）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun hasStepPermission(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
             || ContextCompat.checkSelfPermission(
                 this@MainActivity,
@@ -649,7 +651,7 @@ class MainActivity : AppCompatActivity() {
          * 那时用户还不知道这个权限是干什么用的，拒绝率会很高。
          * 已经授予或系统版本不需要时直接返回 true。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun requestStepPermission(): Boolean {
             if (hasStepPermission()) {
                 PerceptionBridge.attachStepSensor(this@MainActivity)
@@ -667,46 +669,46 @@ class MainActivity : AppCompatActivity() {
         // 每个动作都是一次性、立即可见、可撤销的；不做任何持续/隐蔽行为。
 
         /** 手电筒：开关。 */
-        @JavascriptInterface
+        @ShellMethod
         fun setTorch(on: Boolean): String = deviceAction.setTorch(on).toString()
 
         /** 手电筒当前状态（本进程内的记忆，见 DeviceActionBridge）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun isTorchOn(): Boolean = deviceAction.isTorchOn()
 
         /** 音量：stream=media/ring/alarm/notification，action=up/down/set/mute，level=0-100。 */
-        @JavascriptInterface
+        @ShellMethod
         fun setVolume(stream: String, action: String, level: Int): String =
             deviceAction.setVolume(stream, action, level).toString()
 
         /** 屏幕亮度：level=0-100（需要「修改系统设置」权限）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun setBrightness(level: Int): String = deviceAction.setBrightness(level).toString()
 
         /** 勿扰模式开关（需要勿扰访问权限）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun setDnd(on: Boolean): String = deviceAction.setDnd(on).toString()
 
         /** 按包名打开另一个应用。 */
-        @JavascriptInterface
+        @ShellMethod
         fun openApp(packageName: String): String = deviceAction.openApp(packageName).toString()
 
         /** 按应用显示名找包名（找不到返回空串）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun findPackageByLabel(label: String): String = deviceAction.findPackageByLabel(label)
 
         /** 设闹钟（会打开系统时钟 App 让用户确认）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun setAlarm(hour: Int, minute: Int, message: String): String =
             deviceAction.setAlarm(hour, minute, message).toString()
 
         /** 设倒计时（直接启动，秒为单位）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun setTimer(seconds: Int, message: String): String =
             deviceAction.setTimer(seconds, message).toString()
 
         /** 媒体播放控制：action=play/pause/toggle/next/prev/stop。 */
-        @JavascriptInterface
+        @ShellMethod
         fun mediaControl(action: String): String = deviceAction.mediaControl(action).toString()
 
         /**
@@ -716,11 +718,11 @@ class MainActivity : AppCompatActivity() {
          * 同一个 ShellBridge 里两个 openUrl 方法名与参数类型相同、仅返回类型不同，
          * 会构成 JVM 平台声明冲突，导致整包编译失败——这里用独立名字把两者分开。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun openWebUrl(url: String): String = deviceAction.openUrl(url).toString()
 
         /** 是否已授予「使用情况访问」权限（屏幕使用时间的前提）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun hasUsageStatsAccess(): Boolean = deviceAction.hasUsageStatsAccess()
 
         // ── 日历桥（读系统日程 / 写角色纪念日）────
@@ -728,11 +730,11 @@ class MainActivity : AppCompatActivity() {
         // 但不接受「往我日历里写东西」。两个权限独立授予，所以状态也独立。
 
         /** 是否已授予读日历权限。 */
-        @JavascriptInterface
+        @ShellMethod
         fun hasCalendarReadPermission(): Boolean = calendar.hasReadPermission()
 
         /** 是否已授予写日历权限。 */
-        @JavascriptInterface
+        @ShellMethod
         fun hasCalendarWritePermission(): Boolean = calendar.hasWritePermission()
 
         /**
@@ -741,7 +743,7 @@ class MainActivity : AppCompatActivity() {
          * 返回 true 表示「现在就已授权」，false 表示弹出了系统对话框、
          * 结果要稍后由 hasCalendarReadPermission() 等轮询确认。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun requestCalendarPermission(read: Boolean, write: Boolean): Boolean {
             val needed = mutableListOf<String>()
             if (read && !calendar.hasReadPermission()) needed.add(Manifest.permission.READ_CALENDAR)
@@ -752,7 +754,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         /** 读未来 daysAhead 天（可含过去 daysBack 天）的系统日程，返回 JSON 数组。 */
-        @JavascriptInterface
+        @ShellMethod
         fun readCalendarEvents(daysAhead: Int, daysBack: Int): String =
             calendar.readEventsJson(daysAhead, daysBack)
 
@@ -760,7 +762,7 @@ class MainActivity : AppCompatActivity() {
          * 往系统日历新增一条日程。只新增，不修改不删除用户已有安排。
          * allDay=true 时用 year/month/day（month 为 1-12）；否则用 startMillis/endMillis。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun insertCalendarEvent(
             title: String,
             allDay: Boolean,
@@ -775,11 +777,11 @@ class MainActivity : AppCompatActivity() {
         ).toString()
 
         /** 删除一条由角色写入的日程（用户后悔时的清理路径）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun deleteCalendarEvent(eventId: Long): String = calendar.deleteOwnEvent(eventId).toString()
 
         /** 日历能力与授权状态。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getCalendarCapabilities(): String = calendar.capabilitiesJson()
 
         // ── 位置桥（角色知道你在哪儿）────
@@ -787,11 +789,11 @@ class MainActivity : AppCompatActivity() {
         // 刻意不申请后台定位权限——采样本来就只在 App 活着时发生。
 
         /** 定位能力与授权状态（含「系统定位开关有没有开」）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getLocationCapabilities(): String = locationBridge.capabilitiesJson()
 
         /** 是否已授予定位权限（粗略或精确任一即可）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun hasLocationPermission(): Boolean = locationBridge.hasAny()
 
         /**
@@ -801,7 +803,7 @@ class MainActivity : AppCompatActivity() {
          * 结果要稍后由 hasLocationPermission() 轮询确认——申请是异步的，
          * 不能同步拿到结果。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun requestLocationPermission(): Boolean {
             if (locationBridge.hasAny()) return true
             val needed = mutableListOf<String>()
@@ -817,7 +819,7 @@ class MainActivity : AppCompatActivity() {
          *
          * 同步返回缓存值：定位本身是异步的，网页按采样周期先 refresh 再读。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun readLocation(): String = locationBridge.readJson().toString()
 
         /**
@@ -826,13 +828,13 @@ class MainActivity : AppCompatActivity() {
          * 网页在采样时调：光靠「最后已知位置」可能拿到几小时前的坐标，
          * 说「到了公司」就错了。结果落进缓存，随后的 readLocation 能读到。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun refreshLocation() {
             locationBridge.refresh()
         }
 
         /** 位置桥内部状态（诊断面板用，不含具体坐标）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getLocationDiagnostics(): String = locationBridge.diagnosticsJson()
 
         // ── 健康桥（角色知道昨晚睡得怎么样）────
@@ -840,12 +842,12 @@ class MainActivity : AppCompatActivity() {
         // 不读心率血氧、不写任何健康数据。
 
         /** 健康能力与授权状态（含「Health Connect 装没装」）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getHealthCapabilities(): String = healthBridge.capabilitiesJson()
 
         /** 睡眠读取权限是否已授予。 */
-        @JavascriptInterface
-        fun hasHealthPermission(): Boolean = healthBridge.hasSleepPermission() || healthPermissionGranted
+        @ShellMethod
+        fun hasHealthPermission(): Boolean = healthBridge.hasSleepPermission()
 
         /**
          * 申请睡眠读取权限。
@@ -854,7 +856,7 @@ class MainActivity : AppCompatActivity() {
          * 的授权页、结果要稍后由 hasHealthPermission() 轮询确认——
          * 申请是异步的，不能同步拿到结果。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun requestHealthPermission(): Boolean {
             if (healthBridge.hasSleepPermission()) return true
             if (!healthBridge.isAvailable()) return false
@@ -865,32 +867,32 @@ class MainActivity : AppCompatActivity() {
         }
 
         /** 读缓存的最近一觉（JSON；读不到返回空对象）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun readSleep(): String = healthBridge.readJson().toString()
 
         /** 请健康桥在后台取一次睡眠数据（结果落缓存，随后的 readSleep 能读到）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun refreshHealth() {
             healthBridge.refresh()
         }
 
         /** 跳 Health Connect 设置页（用户在那里看数据来源、撤销授权）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun openHealthSettings(): Boolean = healthBridge.openHealthSettings()
 
         /** 健康桥内部状态（诊断面板用，不含睡眠内容）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getHealthDiagnostics(): String = healthBridge.diagnosticsJson()
 
         /** 本机支持哪些设备动作（含授权状态）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getDeviceActionCapabilities(): String = deviceAction.capabilitiesJson()
 
         /**
          * 跳系统授权页。which = write_settings / dnd / accessibility / battery / app_details。
          * 由网页在用户点「去授权」时调用，壳不主动跳。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun openSystemSettings(which: String): Boolean = deviceAction.openSystemSettings(which)
 
         /**
@@ -904,7 +906,7 @@ class MainActivity : AppCompatActivity() {
          * @param avatarUrl 角色头像：data:image/... 内联，或 http(s) 直链；空则用应用图标。
          * @return 是否已发出（JS 端据此决定要不要退回浏览器通知路径）。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun notify(title: String, body: String, avatarUrl: String, sessionId: String?): Boolean = runCatching {
             ensureMessageChannel()
             val manager = getSystemService(NotificationManager::class.java)
@@ -964,7 +966,7 @@ class MainActivity : AppCompatActivity() {
          * （图片、音乐、安装包等）走这里，交给系统托管——切后台、锁屏、退出 App 都会继续，
          * 完成后通知栏提示。返回是否成功入队。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun downloadUrl(url: String, fileName: String): Boolean = runCatching {
             if (!url.startsWith("http://") && !url.startsWith("https://")) return@runCatching false
             val request = DownloadManager.Request(Uri.parse(url)).apply {
@@ -988,7 +990,7 @@ class MainActivity : AppCompatActivity() {
          * @param callId 本次通话 id，随事件回传，供网页校验是不是同一通电话
          * @return 是否已具备浮窗权限；false 时网页应引导用户去授权
          */
-        @JavascriptInterface
+        @ShellMethod
         fun startCallOverlay(name: String, avatar: String, meta: String, callId: String, elapsedSeconds: Int): Boolean {
             // 通话接通时（App 一定在前台）就把服务暖好：窗口建出来但先藏着。
             // 切到后台只是把已有窗口显示出来（showCallOverlay），不再从后台启动
@@ -1002,23 +1004,23 @@ class MainActivity : AppCompatActivity() {
         }
 
         /** 浮窗内部状态快照（JSON），网页诊断面板直接展示。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getOverlayDebugInfo(): String = CallOverlayService.debugInfo(this@MainActivity)
 
         /** 切到后台：把预热好的浮窗显示出来。 */
-        @JavascriptInterface
+        @ShellMethod
         fun showCallOverlay() {
             runCatching { CallOverlayService.show(this@MainActivity) }
         }
 
         /** 回到前台：把浮窗藏起来（服务继续活着，下次切出去秒显）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun hideCallOverlay() {
             runCatching { CallOverlayService.hide(this@MainActivity) }
         }
 
         /** 更新浮窗显示（改名/换头像/刷新时长），不重建窗口。 */
-        @JavascriptInterface
+        @ShellMethod
         fun updateCallOverlay(name: String, avatar: String, meta: String, elapsedSeconds: Int) {
             // 同样走缓存文件：update 也是 Intent，一样受 Binder 事务上限约束
             val avatarRef = CallOverlayService.prepareAvatarRef(this@MainActivity, avatar)
@@ -1033,33 +1035,33 @@ class MainActivity : AppCompatActivity() {
          * 走同进程实例直改（不走 Intent）：角标是高频小改动，没必要排队等一次
          * Service 投递。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun updateCallOverlayPending(count: Int) {
             runCatching { CallOverlayService.updatePending(this@MainActivity, count) }
         }
 
         /** 收掉浮窗（挂断或退回全屏时调用）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun stopCallOverlay() {
             runCatching { CallOverlayService.stop(this@MainActivity) }
         }
 
         /** 读当前快捷回复条配色（网页侧「通话浮窗外观」用它回显预设与自定义项）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getOverlayThemeJson(): String = CallOverlayService.currentThemeJson(this@MainActivity)
 
         /** 下发完整配色（预设键 + 逐项自定义）；已弹出的回复条会即时换色。 */
-        @JavascriptInterface
+        @ShellMethod
         fun setOverlayThemeJson(json: String) {
             runCatching { CallOverlayService.setThemeJson(this@MainActivity, json) }
         }
 
         /** 浮窗权限是否已授予。 */
-        @JavascriptInterface
+        @ShellMethod
         fun canDrawOverlay(): Boolean = CallOverlayService.canDraw(this@MainActivity)
 
         /** 跳到系统的「显示在其他应用上层」授权页。 */
-        @JavascriptInterface
+        @ShellMethod
         fun requestOverlayPermission() {
             if (Build.VERSION.SDK_INT < 23) return
             runCatching {
@@ -1073,11 +1075,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         /** 无障碍服务是否已开启。 */
-        @JavascriptInterface
+        @ShellMethod
         fun isAccessibilityConnected(): Boolean = CallControlService.connected
 
         /** 跳到系统「无障碍」设置页，引导用户开启通话控制服务。 */
-        @JavascriptInterface
+        @ShellMethod
         fun openAccessibilitySettings() {
             runCatching {
                 startActivity(
@@ -1091,7 +1093,7 @@ class MainActivity : AppCompatActivity() {
          * 截屏能力与状态（系统是否支持、无障碍是否已开启）。
          * 设置面板据此显示三态：不支持 / 要开无障碍 / 可用。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun getScreenshotCapabilities(): String = ScreenshotBridge.capabilitiesJson()
 
         /**
@@ -1102,21 +1104,21 @@ class MainActivity : AppCompatActivity() {
          * （action='screenshot'）推回网页。之所以不在这里同步返回图片：
          * takeScreenshot 是回调式 API，且编码几 MB 的 PNG 不能阻塞主线程。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun captureScreenshot(): String = ScreenshotBridge.capture().toString()
 
         // ── 查岗预览浮层（截屏先给用户过目，同意才发给角色）────
 
         /** 查岗服务能力与状态（系统支持 / 无障碍 / 浮窗权限）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getCheckInCapabilities(): String = CheckInService.capabilitiesJson(this@MainActivity)
 
         /** 截屏桥的内部状态快照（诊断面板用，不含任何画面内容）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getScreenshotDiagnostics(): String = ScreenshotBridge.diagnosticsJson()
 
         /** 查岗浮层的内部状态快照（诊断面板用）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getCheckInDiagnostics(): String = CheckInService.diagnosticsJson(this@MainActivity)
 
         /**
@@ -1126,25 +1128,25 @@ class MainActivity : AppCompatActivity() {
          * 「点球时页面已被回收」的那次，后者处理当场送达的。拉到即清空，
          * 所以同一张图不会被发两遍。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun consumePendingUserShot(): String = CheckInService.consumePendingUserShot()
 
         // ── 截屏悬浮球（你自己点一下截屏）────
 
         /** 悬浮球能力与状态。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getScreenshotBallCapabilities(): String = ScreenshotBallService.capabilitiesJson()
 
         /**
          * 下发悬浮球外观（文字 / 颜色 / 大小），球正显示着会当场重画。
          * 参数形如 {"text":"截","color":"#5B7CFA","diameter":50}。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun setScreenshotBallStyle(json: String): Boolean =
             ScreenshotBallService.setStyle(this@MainActivity, json)
 
         /** 读悬浮球当前外观（设置页回显用）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getScreenshotBallStyle(): String =
             ScreenshotBallService.styleJson(this@MainActivity)
 
@@ -1155,12 +1157,12 @@ class MainActivity : AppCompatActivity() {
          * 只会拿到空的。清单只含角色 id 与名字，不含聊天内容或屏幕信息。
          * 参数形如 {"targets":[{"id":"...","name":"..."}],"defaultId":"..."}。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun setScreenshotShareTargets(json: String): Boolean =
             CheckInService.setShareTargets(this@MainActivity, json)
 
         /** 读分享目标状态（诊断面板用：手上几个角色、默认发给谁、上次发给了谁）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun getScreenshotShareTargets(): String =
             CheckInService.shareTargetsJson(this@MainActivity)
 
@@ -1168,11 +1170,11 @@ class MainActivity : AppCompatActivity() {
          * 拉起截屏悬浮球。用户打开开关时（App 在前台）调用——
          * Android 12+ 禁止后台启动前台服务，必须先暖好。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun prepareScreenshotBall(): Boolean = ScreenshotBallService.prepare(this@MainActivity)
 
         /** 收掉截屏悬浮球（用户关掉开关时调用）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun stopScreenshotBall() {
             ScreenshotBallService.stop(this@MainActivity)
         }
@@ -1182,11 +1184,11 @@ class MainActivity : AppCompatActivity() {
          * Android 12+ 禁止后台启动前台服务，而查岗正是后台触发，必须先暖好。
          * 返回是否成功发起；false 多半是没给浮窗权限。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun prepareCheckIn(): Boolean = CheckInService.prepare(this@MainActivity)
 
         /** 收掉查岗服务（用户关闭全部查岗时调用）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun stopCheckIn() {
             CheckInService.stop(this@MainActivity)
         }
@@ -1198,14 +1200,14 @@ class MainActivity : AppCompatActivity() {
          * 「页面被回收期间用户从通知里回的话」，后者处理当场送达的。
          * 拉到即清空，所以同一句不会被发两遍。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun consumePendingReplies(): String = NotificationReplyReceiver.consumePendingReplies(this@MainActivity)
 
         /**
          * 弹一次查岗预览：截当前屏 → 浮层给用户过目 → 结果经 'checkIn' 事件回推。
          * 只表示「已请求」，用户是否同意要等事件。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun requestCheckIn(characterId: String, name: String, avatar: String) {
             CheckInService.show(this@MainActivity, characterId, name, avatar)
         }
@@ -1216,19 +1218,19 @@ class MainActivity : AppCompatActivity() {
          * 与通话浮窗的 getOverlayThemeJson 分开走：两者配色互不影响，
          * 设置页各自回显自己那份。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun getCheckInTheme(): String = CheckInOverlayTheme.themeJson(this@MainActivity)
 
         /**
          * 下发查岗浮层配色（`{key, custom}`）。浮层正开着且在等用户决定时
          * 不会重建窗口——见 CheckInOverlayTheme.setTheme 的注释。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun setCheckInTheme(json: String): Boolean =
             CheckInOverlayTheme.setTheme(this@MainActivity, json)
 
         /** 打开本应用的系统设置页（引导用户关电池限制、开自启动）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun openAppSettings() {
             runCatching {
                 startActivity(
@@ -1240,7 +1242,7 @@ class MainActivity : AppCompatActivity() {
 
         /** 请求忽略电池优化（保活关键一步）。 */
         @SuppressLint("BatteryLife")
-        @JavascriptInterface
+        @ShellMethod
         fun requestIgnoreBatteryOptimization() {
             runCatching {
                 startActivity(
@@ -1260,7 +1262,7 @@ class MainActivity : AppCompatActivity() {
          * （Manifest 里已用 maxSdkVersion=28 限定）。
          * 返回是否写入成功；文件名里的非法字符会被替换，避免路径穿越。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun saveBase64File(fileName: String, base64: String): Boolean = runCatching {
             val safeName = fileName
                 .replace(Regex("[\\\\/:*?\"<>|]"), "_")
@@ -1295,7 +1297,7 @@ class MainActivity : AppCompatActivity() {
          * Intent.data 带上（对方 Activity 的 intent-filter 能收到）。
          * 返回是否成功发起跳转——目标未安装时返回 false，页面据此提示。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun launchExternalApp(packageName: String, dataUrl: String): Boolean = runCatching {
             val intent = packageManager.getLaunchIntentForPackage(packageName)
                 ?: return@runCatching false
@@ -1311,7 +1313,7 @@ class MainActivity : AppCompatActivity() {
          * 对方只需在 Manifest 里声明对应的 intent-filter——是跨 App 联动的推荐方式，
          * 而且对方没在运行时也能把它的入口 Activity 拉起来。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun openUrl(url: String): Boolean = runCatching {
             startActivity(
                 Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -1405,7 +1407,7 @@ class MainActivity : AppCompatActivity() {
     private inner class PhoneWidgetBridge {
 
         /** 壳是否支持小组件。老壳没有这个对象，网页据此降级。 */
-        @JavascriptInterface
+        @ShellMethod
         fun isSupported(): Boolean = true
 
         /**
@@ -1414,7 +1416,7 @@ class MainActivity : AppCompatActivity() {
          * 返回 true 只表示「已受理」——真正的渲染是异步的（要等离屏 WebView 加载完），
          * 网页不该把返回值当作「已经显示出来了」。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun update(html: String, widthDp: Int, heightDp: Int, scale: Int): Boolean = runCatching {
             // 尺寸记一份：系统定时刷新（onUpdate）时网页不在场，只能靠这里存的值。
             PhoneWidgetProvider.saveSize(this@MainActivity, widthDp, heightDp, scale)
@@ -1423,7 +1425,7 @@ class MainActivity : AppCompatActivity() {
         }.getOrDefault(false)
 
         /** 用上次缓存的 HTML 重画一次（用户改完尺寸/主题时调用）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun refresh(): Boolean = runCatching {
             val (w, h, scale) = PhoneWidgetProvider.loadSize(this@MainActivity)
             PhoneWidgetRenderer.renderCached(this@MainActivity, w, h, scale)
@@ -1431,7 +1433,7 @@ class MainActivity : AppCompatActivity() {
         }.getOrDefault(false)
 
         /** 桌面上是否已经放了小组件（没放时设置页给「添加到桌面」引导）。 */
-        @JavascriptInterface
+        @ShellMethod
         fun isPlaced(): Boolean = PhoneWidgetProvider.isPlaced(this@MainActivity)
 
         /**
@@ -1441,11 +1443,11 @@ class MainActivity : AppCompatActivity() {
          * 用户在设置页看到的预览又是正常的（那是 iframe 渲染的，走不到原生）。
          * 有了它，设置页能如实列出「HTML 推到了没 / PNG 落盘了没 / 最后一次渲染成败」。
          */
-        @JavascriptInterface
+        @ShellMethod
         fun diagnostics(): String = PhoneWidgetRenderer.diagnosticsJson(this@MainActivity)
 
         /** 拉起系统的「添加到桌面」引导。Android 8+ 有效，更低版本静默失败。 */
-        @JavascriptInterface
+        @ShellMethod
         fun requestPin(): Boolean = runCatching {
             PhoneWidgetProvider.requestPin(this@MainActivity)
             true

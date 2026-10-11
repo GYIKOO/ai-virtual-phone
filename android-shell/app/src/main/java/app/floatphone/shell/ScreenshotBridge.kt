@@ -136,6 +136,8 @@ object ScreenshotBridge {
      *         （成功带 base64/width/height，失败带 reason）。
      */
     fun capture(): JSONObject {
+        if (!NativeBridgePolicy.captureAllowed()) return fail("截屏功能已关闭。")
+        val revision = NativeBridgePolicy.revision
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return fail("系统版本太低，截屏需要 Android 11 及以上")
         }
@@ -143,13 +145,17 @@ object ScreenshotBridge {
         if (capturing) return fail("上一张还没截完，请稍等一下")
 
         captureBitmap { bitmap, error ->
+            if (revision != NativeBridgePolicy.revision || !NativeBridgePolicy.captureAllowed()) {
+                bitmap?.recycle()
+                return@captureBitmap
+            }
             if (bitmap == null) {
                 val reason = error ?: "截屏失败"
                 recordFailure("capture", reason)
                 publish(JSONObject().put("ok", false).put("reason", reason))
                 return@captureBitmap
             }
-            encodeAndPublish(bitmap)
+            encodeAndPublish(bitmap, revision)
         }
         return JSONObject().put("ok", true).put("accepted", true)
     }
@@ -227,7 +233,7 @@ object ScreenshotBridge {
     }
 
     /** 把位图编码成 PNG 并推回网页。 */
-    private fun encodeAndPublish(bitmap: Bitmap) {
+    private fun encodeAndPublish(bitmap: Bitmap, revision: Long) {
         try {
             val png = ByteArrayOutputStream()
             val bytes = try {
@@ -247,6 +253,7 @@ object ScreenshotBridge {
                     .put("height", bitmap.height)
                     .put("bytes", bytes.size)
                     .put("base64", Base64.encodeToString(bytes, Base64.NO_WRAP)),
+                revision,
             )
         } catch (e: Throwable) {
             val reason = e.message ?: "处理屏幕画面失败"
@@ -274,8 +281,8 @@ object ScreenshotBridge {
         else -> "截屏失败（错误码 $errorCode）"
     }
 
-    private fun publish(payload: JSONObject) {
-        ShellBus.dispatchOverlayEvent("screenshot", payload)
+    private fun publish(payload: JSONObject, revision: Long = NativeBridgePolicy.revision) {
+        ShellBus.dispatchOverlayEvent("screenshot", payload, revision)
     }
 
     private fun fail(reason: String): JSONObject = JSONObject().put("ok", false).put("reason", reason)

@@ -15,6 +15,7 @@ import { OfflinePushRevampAnnouncement } from "./offline-push-revamp-announcemen
 import { SplashAnimation } from "./splash-animation";
 import { MusicProvider } from "@/lib/music-context";
 import { hydrateKvDb, isKvHydrated } from "@/lib/kv-db";
+import { installNativeBridgePolicySync, syncNativeBridgePolicy } from "@/lib/shell-bridge-security";
 import { getThemeAssetMap, readThemeProfile } from "@/lib/theme-storage";
 import { resolveActiveIconSkins, type ThemeProfile } from "@/lib/theme-types";
 import { hasPendingMcpOAuthCallback } from "@/lib/tool-executor";
@@ -236,6 +237,8 @@ export function MainApp() {
   const [kvHydrateFailed, setKvHydrateFailed] = useState(false);
   const [initAttempt, setInitAttempt] = useState(0);
 
+  useEffect(() => installNativeBridgePolicySync(), []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -253,6 +256,7 @@ export function MainApp() {
         return;
       }
       setKvHydrateFailed(false);
+      syncNativeBridgePolicy();
 
       if (process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_LOCAL_TEST_FIXTURES === "true") {
         try {

@@ -16,7 +16,9 @@ import { startPerception, stopPerception } from "@/lib/perception";
 export function PerceptionBootstrap() {
   useEffect(() => {
     void startPerception();
-    return () => stopPerception();
+    const ready = () => { void startPerception(); };
+    window.addEventListener("float-shell-ready", ready);
+    return () => { window.removeEventListener("float-shell-ready", ready); stopPerception(); };
   }, []);
   return null;
 }
