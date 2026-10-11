@@ -415,10 +415,13 @@ function getMarkerContent(
     regexCtx?: RegexContext,
     characterRelations?: string,
     dwellingContext?: string,
+    appId?: string,
 ): string | null {
     switch (identifier) {
         case "charDescription":
-            return `You are ${character.name}.\n${character.persona}`;
+            return appId === "story"
+                ? `角色资料：${character.name}\n${character.persona}`
+                : `You are ${character.name}.\n${character.persona}`;
         case "charPersonality":
             return character.personality?.trim() || null;
         case "personaDescription":
@@ -775,6 +778,7 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                     regexes, { macroEngine: engine, activeTags },
                     input.characterRelations,
                     input.dwellingContext,
+                    appId,
                 );
                 if (markerContent) {
                     // Expand macros in marker content ({{char}}/{{user}} in char descriptions etc.)

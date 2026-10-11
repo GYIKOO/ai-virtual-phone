@@ -4,6 +4,7 @@
 
 import type { PresetConfig } from "./settings-types";
 import { getCheckPhonePromptTags } from "./checkphone-config";
+import { DEFAULT_STORY_OUTPUT_PROMPT } from "./story-default-prompt";
 
 export const BUILTIN_PRESET_ID = "builtin_default_v1";
 export const BUILTIN_PRESET_VERSION = 265; // 升版本会用出厂内容重写用户的内置预设副本（自定义会丢），非必要不升
@@ -254,44 +255,7 @@ export function createBuiltinPreset(): PresetConfig {
                 identifier: "story_output_format",
                 name: "▸ 剧情模式输出格式",
                 role: "system",
-                content: [
-                    "<story_output_format>",
-                    "【时间】{{timeContext}}",
-                    "当前正在进行的日程：{{当前日程}}",
-                    "【模式】你当前处于剧情模式。这不是即时通讯聊天，而是连续推进的长文本互动场景。",
-                    "【上下文】assistant 是你在剧情模式中之前说过或叙述过的内容，user 是 {{user}} 在剧情模式中的输入；<charDescription>、<worldInfoBefore>、<worldInfoAfter> 中是你的人设与背景；<memoryCore>、<memoryLongTerm> 和 <shortTermMemory> 是你可以调用的记忆与近期事件。",
-                    "【写作要求】",
-                    "- 回复必须输出两个 XML 字段：<content> 和 <summary>",
-                    "- <content> 中写剧情正文，不要拆成多条微信短消息",
-                    "- <summary> 中写本轮剧情摘要，用于 recent_story 和记忆提取",
-                    "- 允许动作描写、环境描写、神态描写、情绪变化和心理活动",
-                    "- 允许人物对白和叙述混排，但整体必须保持自然流畅",
-                    "- 回复要承接上一轮剧情，推动场景继续向前发展",
-                    "- 语言风格必须符合 {{char}} 的人设和当前情境",
-                    "",
-                    "【严格禁止】",
-                    "- 禁止输出 [好感度:X]、[占有欲:X]、[焦虑值:X] 等状态值标签",
-                    "- 禁止输出 [内心]...[/内心] 标签",
-                    "- 禁止输出红包、转账、表情包、拍一拍、名片、语音通话、视频通话等聊天协议指令",
-                    "- 禁止把回复写成微信聊天那种一行一条的即时消息格式",
-                    "- 禁止输出任何解释性前缀，例如“以下是剧情回复”",
-                    "- 禁止在 <content> / <summary> 头部或任何位置输出时间戳或时间标签（如 `[2026-05-22 14:30]`、`(14:30)` 等）。系统会自动给每条消息附加时间，你再输出会重复显示；正文里需要的叙事性时间描写（「那天黄昏」等）不算。",
-                    "",
-                    "【格式】",
-                    "- 仅输出 XML 本体，不要附加额外说明",
-                    "- <content> 保留正常段落结构",
-                    "- <summary> 保持简洁，概括关键事件、关系变化、情绪推进",
-                    "- 允许用户通过正则对你的输出再做进一步样式转换，因此不要主动删除你自己输出中的结构化文本",
-                    "",
-                    "【模板】",
-                    "<content>",
-                    "这里写剧情正文",
-                    "</content>",
-                    "<summary>",
-                    "这里写剧情摘要",
-                    "</summary>",
-                    "</story_output_format>",
-                ].join("\n"),
+                content: DEFAULT_STORY_OUTPUT_PROMPT,
                 injection_position: 0,
                 injection_depth: 0,
                 enabled: true,
