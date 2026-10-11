@@ -1,4 +1,5 @@
 "use client";
+import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS } from "@/lib/story-tag-settings";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
@@ -693,8 +694,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
     setVisibleMessageCount(STORY_INITIAL_LOAD);
     setMessages(loadStoryMessages(session.id));
     setCustomCssDraft(session.customCSS || "");
-    setFoldTagsDraft(session.foldTags ?? "think,thinking,story_status,story_theater");
-    setContextExcludedTagsDraft(session.contextExcludedTags ?? "think,thinking,story_theater");
+    setFoldTagsDraft(session.foldTags ?? DEFAULT_STORY_FOLD_TAGS);
+    setContextExcludedTagsDraft(session.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS);
     const ownerKey = getStorySessionOwnerKey(session);
     saveStoryActivePage(ownerKey, session.id);
     kvSet(STORY_ACTIVE_TARGET_KEY, JSON.stringify({ ownerType: session.ownerType || "single", ownerId: session.ownerId || session.characterId }));
@@ -1071,7 +1072,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     // 抛出去会让整个剧情页白屏，所以失败时跳过缓存刷新，错误留到发送时提示
     let signature: { regexSignature: string; parserVersion: number };
     try {
-      signature = getStoryRenderSignature(activeCharacterId);
+      signature = getStoryRenderSignature(activeCharacterId, currentSession.foldTags);
     } catch {
       return;
     }
@@ -1138,8 +1139,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
     const next = updateStorySession(currentSession.id, updates);
     if (!next) return;
     setCustomCssDraft(next.customCSS || "");
-    setFoldTagsDraft(next.foldTags ?? "think,thinking,story_status,story_theater");
-    setContextExcludedTagsDraft(next.contextExcludedTags ?? "think,thinking,story_theater");
+    setFoldTagsDraft(next.foldTags ?? DEFAULT_STORY_FOLD_TAGS);
+    setContextExcludedTagsDraft(next.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS);
     setStorageVersion((value) => value + 1);
   }
 
@@ -1227,8 +1228,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
     if (!next) return;
     if (next.id === activeSessionId) {
       setCustomCssDraft(next.customCSS || "");
-      setFoldTagsDraft(next.foldTags ?? "think,thinking,story_status,story_theater");
-      setContextExcludedTagsDraft(next.contextExcludedTags ?? "think,thinking,story_theater");
+      setFoldTagsDraft(next.foldTags ?? DEFAULT_STORY_FOLD_TAGS);
+      setContextExcludedTagsDraft(next.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS);
     }
     setStorageVersion((value) => value + 1);
   }
@@ -1947,7 +1948,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
           onTagsChange={(foldTags, contextExcludedTags) => {
             setFoldTagsDraft(foldTags);
             setContextExcludedTagsDraft(contextExcludedTags);
-            applySessionUpdates({ foldTags: foldTags.trim() || undefined, contextExcludedTags: contextExcludedTags.trim() || undefined });
+            applySessionUpdates({ foldTags: foldTags.trim(), contextExcludedTags: contextExcludedTags.trim() });
           }}
           onOpenCss={() => {
             setSettingsOpen(false);

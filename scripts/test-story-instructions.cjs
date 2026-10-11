@@ -28,10 +28,15 @@ assert.equal(instructions.getStoryRetryContext([user, director, reply], 'a').len
 assert.equal(instructions.getStoryRetryContext([user, director, reply], 'd').length, 2);
 assert.equal(instructions.getStoryRetryContext([user], 'missing'), null);
 assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;/);
+assert.match(instructions.wrapStoryRetryInstruction(' A & </Request> '), /A &amp; &lt;\/Request&gt;/);
+assert.ok(!instructions.wrapStoryInstruction('镜头转向窗外').includes('编辑反馈'), 'director mode retains its own semantics');
+assert.match(instructions.wrapStoryRetryInstruction('改一下'), /事实纠正作为新版剧情的事实前提/);
+assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向用于安排事件发展/);
 
 (async () => {
   let captured, contextOptions, saved = [user, director, reply];
   const engine = load('lib/story-engine.ts', {
+    './story-tag-settings': load('lib/story-tag-settings.ts'),
     './story-instructions': instructions,
     './story-constraints': constraints,
     './character-storage': { loadCharacters: () => [{ id: 'char', name: '角色' }, { id: 'other', name: '配角' }] },
@@ -55,6 +60,17 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
   assert.ok(contextOptions.excludeStoryMessageIds.includes('a'), 'discarded reply projection excluded before generation');
   assert.match(captured.at(-2).content, /镜头转向窗外/);
   assert.match(captured.at(-1).content, /不要下雨/);
+  assert.match(captured.at(-1).content, /编辑反馈/);
+  assert.ok(!captured.at(-2).content.includes('编辑反馈'), 'director and retry instructions remain distinct');
+  for (const feedback of ['角色从未到访旧港，相关回忆的设定有误。', '这一段节奏太急，改得舒缓些。', '让大家在下一段动身去旧港。', '角色从未到访旧港；这一段安排初次到访。']) {
+    await engine.generateStoryCompletion('char', [user], { retryInstruction: feedback });
+    assert.equal(captured.at(-1).content, instructions.wrapStoryRetryInstruction(feedback), 'all feedback kinds use revision framing without guessing or rewriting user text');
+    assert.equal(captured.at(-1)._debugMeta.marker, '临时重试要求');
+    assert.ok(!contextOptions.history.some(m => m.content.includes(feedback)), 'editorial feedback stays outside narrative history');
+    assert.equal(saved.length, 3, 'feedback must not mutate stored history');
+  }
+  await engine.generateStoryCompletion('char', [user], { retryInstruction: '   ' });
+  assert.ok(captured.every(m => !m.content.includes('编辑反馈')), 'blank retries add no editorial instruction');
   const result = await engine.generateStoryCompletion('char', saved);
   assert.ok(captured.every(m => !m.content.includes('Request')), 'consumed and temporary instructions do not persist');
   assert.ok(!result.rawText.includes('不要下雨'));
@@ -62,6 +78,17 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
   await engine.generateStoryCompletion('char', [], { sessionId: 's' });
   assert.ok(contextOptions.excludeStoryMessageIds.includes('a'), 'first-reply retry with empty context still excludes old projection');
   const combined = () => captured.map(m => m.content).join('\n');
+  const taggedUser = row('tags', 'user', '正文<think>隐藏思考</think><summary>保留摘要</summary>');
+  await engine.generateStoryCompletion('char', [taggedUser]);
+  assert.ok(!combined().includes('隐藏思考'));
+  assert.ok(combined().includes('保留摘要'), 'folding summary does not exclude it from context');
+  await engine.generateStoryCompletion('char', [taggedUser], { sessionContextExcludedTags: '' });
+  assert.ok(combined().includes('隐藏思考'), 'explicit empty context tags remain empty');
+  await engine.generateStoryCompletion('char', [taggedUser], { sessionContextExcludedTags: 'summary' });
+  assert.ok(!combined().includes('保留摘要'));
+  const customFolds = await engine.generateStoryCompletion('char', [user], { sessionFoldTags: '' });
+  assert.equal(customFolds.regexSignature, engine.getStoryRenderSignature('char', '').regexSignature);
+  assert.notEqual(customFolds.regexSignature, engine.getStoryRenderSignature('char').regexSignature, 'fold changes invalidate render cache');
   await engine.generateStoryCompletion('char', saved, { settings: { userPerspective: 'third' } });
   assert.ok(combined().includes('TA/他/她，按用户设定选用'));
   assert.ok(!combined().includes('使用第三人称“TA”称呼用户'));
@@ -131,5 +158,6 @@ assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;
   console.log('PASS: multiplayer roster, default-off/editable constraints, preset narration and independent-branch director/retry');
   console.log('PASS: user-control modes, legacy compatibility, independent editable drafts and explicit empty prompts');
   console.log('PASS: shared takeover ending rule, custom prompts, preview parity and instruction ordering');
+  console.log('PASS: retry editorial feedback framing, escaping, correction/direction/mixed notes and request-only lifetime');
   console.log('PASS: director lifetime, roleplay distinction, retry slicing, escaping, request-only guidance, projection exclusion and no destructive preparation');
 })().catch(error => { console.error(error); process.exitCode = 1; });

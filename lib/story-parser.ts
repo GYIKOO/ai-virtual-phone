@@ -75,7 +75,7 @@ export function parseStoryResponse(
   let textForSummary = trimmed;
   if (options?.foldTags) {
     for (const tag of options.foldTags.split(",").map(t => t.trim()).filter(Boolean)) {
-      if (tag.toLowerCase() === effectiveSummaryTag) continue;
+      if (tag.toLowerCase() === effectiveSummaryTag || tag.toLowerCase() === "summary") continue;
       const escaped = escapeTagName(tag);
       textForSummary = textForSummary.replace(new RegExp(`<${escaped}>[\\s\\S]*?</${escaped}>`, "gi"), "");
     }

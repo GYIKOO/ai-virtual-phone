@@ -1,4 +1,5 @@
 "use client";
+import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS } from "@/lib/story-tag-settings";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeftIcon, PhotoIcon, PlusIcon, TrashIcon, XMarkIcon } from "@heroicons/react/24/solid";
@@ -746,8 +747,9 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
         </SettingCard>
 
         <SettingCard title="标签与高级设置">
-          <label className="story-settings-field"><span>折叠标签</span><input value={props.foldTags} onChange={(event) => props.onTagsChange(event.target.value, props.contextExcludedTags)} placeholder="think,thinking,story_status,story_theater" /></label>
-          <label className="story-settings-field"><span>不进上下文标签</span><input value={props.contextExcludedTags} onChange={(event) => props.onTagsChange(props.foldTags, event.target.value)} placeholder="think,thinking,story_theater" /></label>
+          <label className="story-settings-field"><span>折叠标签</span><input value={props.foldTags} onChange={(event) => props.onTagsChange(event.target.value, props.contextExcludedTags)} placeholder={DEFAULT_STORY_FOLD_TAGS} /></label>
+          <label className="story-settings-field"><span>不进上下文标签</span><input value={props.contextExcludedTags} onChange={(event) => props.onTagsChange(props.foldTags, event.target.value)} placeholder={DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS} /></label>
+          <p className="story-settings-note">同一角色或多人组的新分线继承上次使用的剧情设置；已有分线保留各自设置。折叠仅影响显示，不会自动排除上下文。</p>
           <button className="story-settings-row-button" type="button" onClick={() => setWallpaperOpen(true)}><span><strong>背景壁纸</strong><small>{props.uiPrefs.wallpaper ? "已设置 · 仅当前角色" : "未设置"}</small></span><ChevronLeftIcon width={17} style={{ transform: "rotate(180deg)" }} /></button>
           <button className="story-settings-row-button" type="button" onClick={props.onOpenCss}><span><strong>页面 CSS 样式</strong><small>进入完整样式编辑页面</small></span><ChevronLeftIcon width={17} style={{ transform: "rotate(180deg)" }} /></button>
           <button className="story-settings-row-button" type="button" onClick={props.onRebuildCache}><span><strong>重建剧情渲染缓存</strong><small>方案或标签变化后使用</small></span><ChevronLeftIcon width={17} style={{ transform: "rotate(180deg)" }} /></button>

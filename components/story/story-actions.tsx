@@ -88,10 +88,10 @@ export function StoryActions({ busy, retryTarget, request, onRequest, onSubmit }
           <div><span className="story-instruction-eyebrow">剧情工具</span><h2 id={`${id}-title`}>{retry ? "重试这一段" : "导演指令"}</h2></div>
           <button type="button" aria-label="关闭剧情指令" onClick={close}><XMarkIcon width={21} height={21} /></button>
         </div>
-        <p id={`${id}-hint`}>{retry ? "要求仅用于这次重试，不会保存到剧情记录。留空可直接重试。" : "用创作指令指导下一段，不会被当作你的角色对白。记录中默认折叠显示。"}</p>
+        <p id={`${id}-hint`}>{retry ? "可以指出原稿问题，也可以提出新的剧情方向。仅用于这次重试，不会保存到剧情记录。留空可直接重试。" : "用创作指令指导下一段，不会被当作你的角色对白。记录中默认折叠显示。"}</p>
         <label htmlFor={`${id}-input`}>{retry ? "希望这一段如何调整？（可选）" : "希望接下来的剧情如何发展？"}</label>
         <textarea id={`${id}-input`} ref={inputRef} rows={5} value={draft} onChange={event => setDraft(event.target.value)}
-          placeholder={retry ? "留空直接重试，或写下你的调整要求……" : "例如：放慢节奏，着重描写环境与人物反应……"}
+          placeholder={retry ? "原稿哪里有问题，或希望怎样调整？留空直接重试……" : "例如：放慢节奏，着重描写环境与人物反应……"}
           onKeyDown={event => {
             if (!event.nativeEvent.isComposing && event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submit(); }
           }} />

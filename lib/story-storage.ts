@@ -1,6 +1,7 @@
 import Dexie from "dexie";
 import { formatChatTimestamp } from "./llm-prompt-assembler";
 import { hydrateKvDb, kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS, LEGACY_STORY_FOLD_TAGS, STORY_FOLD_TAGS_VERSION } from "./story-tag-settings";
 
 export type StoryUiPrefs = {
   hideBubble?: boolean;
@@ -377,6 +378,7 @@ export type StorySession = {
   updatedAt: string;
   customCSS?: string;
   foldTags?: string;            // Comma-separated tag names to fold for this session.
+  foldTagsVersion?: number;     // One-time default migration; preserve later explicit edits/empty values.
   contextExcludedTags?: string; // Comma-separated tag names stripped before sending story history to the LLM.
   uiPrefs?: StoryUiPrefs;
   /** 剧情 APP 专属设置；每个角色的唯一会话各自独立保存。 */
@@ -478,6 +480,9 @@ function normalizeStorySessions(sessions: StorySession[]): { items: StorySession
       ? Array.from(new Set((session.participantIds || [characterId]).map((value) => value.trim()).filter(Boolean)))
       : [characterId];
     const branchOrder = branchId === "main" ? 0 : Math.max(1, session.branchOrder ?? 1);
+    const migrateFoldTags = (session.foldTagsVersion ?? 0) < STORY_FOLD_TAGS_VERSION;
+    const foldTags = migrateFoldTags && (session.foldTags === undefined || session.foldTags === LEGACY_STORY_FOLD_TAGS)
+      ? DEFAULT_STORY_FOLD_TAGS : session.foldTags;
     const item: StorySession = {
       ...session,
       id,
@@ -489,11 +494,13 @@ function normalizeStorySessions(sessions: StorySession[]): { items: StorySession
       branchName,
       branchOrder,
       createdAt,
+      foldTags,
+      foldTagsVersion: migrateFoldTags ? STORY_FOLD_TAGS_VERSION : session.foldTagsVersion,
     };
     if (
       id !== session.id || characterId !== session.characterId || ownerType !== session.ownerType
       || ownerId !== session.ownerId || branchId !== session.branchId || branchName !== session.branchName
-      || createdAt !== session.createdAt || branchOrder !== session.branchOrder
+      || createdAt !== session.createdAt || branchOrder !== session.branchOrder || migrateFoldTags
       || participantIds.join("\u0000") !== (session.participantIds || []).join("\u0000")
     ) changed = true;
     const branchKey = `${ownerType}:${ownerId}:${branchId}`;
@@ -726,8 +733,21 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
   if (existing) return existing;
 
   const now = new Date().toISOString();
-  const base = options.baseSession;
   const ownerSessions = loadStorySessionsForOwner(ownerType, ownerId);
+  // All entry points (catalog, quick new story, chat invitation) inherit the
+  // owner's last active page instead of silently reverting to its main page.
+  let activeBase: StorySession | undefined;
+  if (branchId !== "main") {
+    try {
+      const pageMap = JSON.parse(kvGet("story-active-page-map-v1") || "{}");
+      const rememberedId = pageMap?.[`${ownerType}:${ownerId}`];
+      activeBase = ownerSessions.find((item) => item.id === rememberedId);
+    } catch { /* Invalid/stale remembered pages fall back to the supplied template. */ }
+  }
+  const base = activeBase
+    ?? ownerSessions.find((item) => item.id === options.baseSession?.id)
+    ?? options.baseSession
+    ?? ownerSessions.find((item) => (item.branchId || "main") === "main");
   const session: StorySession = {
     id: generateId("story_sess"),
     characterId,
@@ -744,8 +764,9 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
     independentStory: branchId === "main" ? false : Boolean(options.independentStory),
     createdAt: now,
     updatedAt: now,
-    foldTags: base?.foldTags ?? "think,thinking,story_status,story_theater",
-    contextExcludedTags: base?.contextExcludedTags ?? "think,thinking,story_theater",
+    foldTags: base?.foldTags ?? DEFAULT_STORY_FOLD_TAGS,
+    foldTagsVersion: STORY_FOLD_TAGS_VERSION,
+    contextExcludedTags: base?.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS,
     customCSS: base?.customCSS,
     settings: base?.settings ? { ...base.settings } : undefined,
     uiPrefs: base?.uiPrefs ? { ...base.uiPrefs } : {},
@@ -851,6 +872,7 @@ export function updateStorySession(sessionId: string, updates: Partial<StorySess
   const next: StorySession = {
     ..._sessionsCache[idx],
     ...updates,
+    ...(Object.prototype.hasOwnProperty.call(updates, "foldTags") ? { foldTagsVersion: STORY_FOLD_TAGS_VERSION } : {}),
     uiPrefs: { ..._sessionsCache[idx].uiPrefs, ...updates.uiPrefs },
     updatedAt: updates.updatedAt || new Date().toISOString(),
   };

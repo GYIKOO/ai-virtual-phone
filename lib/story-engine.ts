@@ -22,11 +22,10 @@ import { STORY_PARSER_VERSION } from "./story-parser";
 import { loadStoryMessages, replaceStoryMessages, resolveActiveStorySchemes, type StoryCharacterSettings, type StoryMessage } from "./story-storage";
 import type { ChatMessage } from "./chat-storage";
 import { MacroEngine } from "./macro-engine";
-import { prepareStoryInstructionHistory, wrapStoryInstruction } from "./story-instructions";
+import { prepareStoryInstructionHistory, wrapStoryInstruction, wrapStoryRetryInstruction } from "./story-instructions";
 import { resolveStoryUserControlPrompt, resolveStoryUserControlEndingPrompt, DEFAULT_STORY_VOICE_FORMAT_PROMPT } from "./story-constraints";
 
-const DEFAULT_STORY_FOLD_TAGS = "think,thinking,summary,story_status,story_theater";
-const DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS = "think,thinking,story_theater";
+import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS, storyFoldSignature } from "./story-tag-settings";
 
 export type StoryGenerationOptions = {
   sessionId?: string;
@@ -179,10 +178,10 @@ function resolveStoryConfigs(characterId: string): {
   };
 }
 
-export function getStoryRenderSignature(characterId: string): { regexSignature: string; parserVersion: number; regexes: RegexConfig[] } {
+export function getStoryRenderSignature(characterId: string, foldTags?: string): { regexSignature: string; parserVersion: number; regexes: RegexConfig[] } {
   const { regexSignature, regexes } = resolveStoryConfigs(characterId);
   return {
-    regexSignature,
+    regexSignature: storyFoldSignature(regexSignature, foldTags),
     parserVersion: STORY_PARSER_VERSION,
     regexes,
   };
@@ -200,8 +199,8 @@ export async function generateStoryCompletion(
 
   const { apiConfig, preset: resolvedPreset, regexes, worldBooks, regexSignature, summaryTag } = resolveStoryConfigs(characterId);
   const preset = selectStoryPresetPrompts(resolvedPreset, options?.settings?.enabledPresetPromptIds);
-  const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
-  const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
+  const effectiveFoldTags = options?.sessionFoldTags?.trim() ?? DEFAULT_STORY_FOLD_TAGS;
+  const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
   const llmMessages = await buildStoryPromptMessages(
     characterId,
     history,
@@ -216,7 +215,7 @@ export async function generateStoryCompletion(
     options?.sessionId,
   );
   if (options?.retryInstruction?.trim()) {
-    llmMessages.push({ role: "user", content: wrapStoryInstruction(options.retryInstruction), _debugMeta: { marker: "临时重试要求" } });
+    llmMessages.push({ role: "user", content: wrapStoryRetryInstruction(options.retryInstruction), _debugMeta: { marker: "临时重试要求" } });
   }
 
   const userIdentity = resolveUserIdentity(characterId, "story");
@@ -236,7 +235,7 @@ export async function generateStoryCompletion(
     rawText: parsed.rawText,
     renderedText: parsed.renderedText,
     storySummary: parsed.summaryText,
-    regexSignature,
+    regexSignature: storyFoldSignature(regexSignature, effectiveFoldTags),
     parserVersion: STORY_PARSER_VERSION,
     promptMessages: llmMessages,
     model: apiConfig.defaultModel,
@@ -358,7 +357,7 @@ export async function previewStoryPromptPayload(
   }
   const { apiConfig, preset: resolvedPreset, regexes, worldBooks } = resolveStoryConfigs(characterId);
   const preset = selectStoryPresetPrompts(resolvedPreset, options?.settings?.enabledPresetPromptIds);
-  const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() || DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
+  const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
   const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, options?.settings, options?.floatingChatContext, options?.participantIds, options?.storyMemory, options?.sessionId);
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),
@@ -369,9 +368,9 @@ export async function previewStoryPromptPayload(
 }
 
 export function rebuildStorySessionRenderCache(characterId: string, sessionId: string, options?: { sessionFoldTags?: string }): StoryMessage[] {
-  const { regexSignature, parserVersion } = getStoryRenderSignature(characterId);
+  const { regexSignature, parserVersion } = getStoryRenderSignature(characterId, options?.sessionFoldTags);
   const { regexes, summaryTag } = resolveStoryConfigs(characterId);
-  const effectiveFoldTags = options?.sessionFoldTags?.trim() || DEFAULT_STORY_FOLD_TAGS;
+  const effectiveFoldTags = options?.sessionFoldTags?.trim() ?? DEFAULT_STORY_FOLD_TAGS;
 
   const character = loadCharacters().find((c) => c.id === characterId);
   const userIdentity = resolveUserIdentity(characterId, "story");
