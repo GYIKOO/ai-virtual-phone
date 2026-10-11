@@ -771,6 +771,21 @@ export function StoryApp({ onClose }: StoryAppProps) {
     return () => window.removeEventListener("story-session-settings-updated", onSettingsUpdate);
   }, []);
 
+  // Shared preferences may be edited through another page (e.g. 小卷 tools).
+  useEffect(() => {
+    const onOwnerSettingsUpdate = (event: Event) => {
+      const session = loadStorySessions().find(item => item.id === activeSessionIdRef.current);
+      if (!session || session.mergedIntoSessionId
+        || getStorySessionOwnerKey(session) !== (event as CustomEvent).detail?.ownerKey) return;
+      setCustomCssDraft(session.customCSS || "");
+      setFoldTagsDraft(session.foldTags ?? DEFAULT_STORY_FOLD_TAGS);
+      setContextExcludedTagsDraft(session.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS);
+      setStorageVersion(value => value + 1);
+    };
+    window.addEventListener("story-owner-settings-updated", onOwnerSettingsUpdate);
+    return () => window.removeEventListener("story-owner-settings-updated", onOwnerSettingsUpdate);
+  }, []);
+
   // 公用方案仓库变化（设置页保存/小卷工具写入/迁移）时刷新方案相关 UI
   useEffect(() => {
     const onRepoUpdate = () => {

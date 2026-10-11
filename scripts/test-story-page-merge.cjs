@@ -35,7 +35,7 @@ function load(name) {
   modules.set(name, exports);
   const filename = `lib/${name.slice(2)}.ts`;
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
-    { exports, require: load, window: {}, indexedDB, IDBKeyRange, console, Date, setTimeout, clearTimeout }, { filename });
+    { exports, require: load, window: {}, indexedDB, IDBKeyRange, console, Date, structuredClone, setTimeout, clearTimeout }, { filename });
   return exports;
 }
 const json = value => JSON.parse(JSON.stringify(value));
@@ -82,6 +82,7 @@ const json = value => JSON.parse(JSON.stringify(value));
   const merging = store.mergeStoryPageIntoMain('branch');
   assert.throws(() => store.pushStoryMessage({ sessionId: 'branch', role: 'user', rawContent: 'race' }), /正在合并/);
   assert.throws(() => store.deleteStoryMessage('main1'), /正在合并/);
+  assert.throws(() => store.updateStorySession('empty', { settings: { minChars: 900 } }), /正在合并/, 'shared settings cannot race merging peers');
   await merging;
   const mainRows = store.loadStoryMessages('main');
   assert.deepEqual(json(mainRows.map(m => m.id)), ['main1', 'branch3', 'main5']);

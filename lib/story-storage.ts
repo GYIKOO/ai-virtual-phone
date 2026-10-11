@@ -381,12 +381,13 @@ export type StorySession = {
   mergedMessageIds?: string[];
   updatedAt: string;
   customCSS?: string;
-  foldTags?: string;            // Comma-separated tag names to fold for this session.
+  foldTags?: string;            // Owner-shared comma-separated tag names to fold.
   foldTagsVersion?: number;     // One-time default migration; preserve later explicit edits/empty values.
   contextExcludedTags?: string; // Comma-separated tag names stripped before sending story history to the LLM.
   uiPrefs?: StoryUiPrefs;
-  /** 剧情 APP 专属设置；每个角色的唯一会话各自独立保存。 */
+  /** 剧情偏好按角色/多人组共享；镜像在会话上以兼容备份和既有读取入口。 */
   settings?: StoryCharacterSettings;
+  sharedSettingsVersion?: number;
   lastMessageId?: string;
   lastMessagePreview?: string;
   lastMessageAt?: string;
@@ -539,6 +540,45 @@ function persistStorySessionsSnapshot(sessions: StorySession[]): void {
   }).catch(() => undefined);
 }
 
+// Only preferences are shared. Page identity, participants, memory boundaries,
+// lifecycle and message metadata must never be copied between pages.
+function sharedStoryPreferences(session: StorySession) {
+  return {
+    settings: session.settings ? structuredClone(session.settings) : undefined,
+    uiPrefs: session.uiPrefs ? structuredClone(session.uiPrefs) : {},
+    foldTags: session.foldTags ?? DEFAULT_STORY_FOLD_TAGS,
+    foldTagsVersion: STORY_FOLD_TAGS_VERSION,
+    contextExcludedTags: session.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS,
+    customCSS: session.customCSS,
+    sharedSettingsVersion: 1,
+  };
+}
+
+async function migrateSharedStoryPreferences(): Promise<void> {
+  let pageMap: Record<string, string> = {};
+  try { pageMap = JSON.parse(kvGet("story-active-page-map-v1") || "{}") || {}; } catch { /* Use main below. */ }
+  const owners = new Map<string, StorySession[]>();
+  for (const session of _sessionsCache) {
+    if (session.mergedIntoSessionId) continue; // Archives retain their read-only snapshot.
+    const key = getStorySessionOwnerKey(session);
+    owners.set(key, [...(owners.get(key) || []), session]);
+  }
+  const changed = new Map<string, StorySession>();
+  for (const [key, pages] of owners) {
+    if (pages.every(page => page.sharedSettingsVersion === 1)) continue;
+    // Existing shared preferences win over newly imported legacy pages. On first
+    // migration use the remembered live page, then main, then the newest page.
+    const source = pages.find(page => page.sharedSettingsVersion === 1)
+      ?? pages.find(page => page.id === pageMap[key])
+      ?? pages.find(page => (page.branchId || "main") === "main")
+      ?? [...pages].sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""))[0];
+    for (const page of pages) changed.set(page.id, { ...page, ...sharedStoryPreferences(source) });
+  }
+  if (!changed.size) return;
+  await storyDb.transaction("rw", storyDb.sessions, () => storyDb.sessions.bulkPut([...changed.values()]));
+  _sessionsCache = _sessionsCache.map(page => changed.get(page.id) || page);
+}
+
 // ── 旧版按角色保存的方案 → 公用方案仓库迁移 ──────────────────
 // 旧数据里文风/状态栏/小剧场方案列表挂在每个角色的 settings 上、快捷输入
 // 选项挂在 uiPrefs 上；现在统一并入公用仓库（去重后共享），角色侧只保留
@@ -662,7 +702,7 @@ async function migrateLegacyStorySchemeData(): Promise<void> {
     }
 
     if (!settingsChanged && !prefsChanged) continue;
-    updateStorySession(session.id, {
+    updateStorySessionRecord(session.id, {
       ...(settingsChanged ? { settings: { ...nextSettings, proseStyleSchemes: undefined, statusSchemes: undefined, theaterSchemes: undefined } } : {}),
       ...(prefsChanged ? { uiPrefs: { ...prefs, quickInputOptions: undefined, quickInputCursor: undefined, activeQuickInputSchemeId } } : {}),
       // 迁移是数据结构调整而非用户活动，保留原排序时间戳
@@ -688,8 +728,9 @@ export async function hydrateStoryStorage(): Promise<void> {
   // 迁移失败不应阻塞剧情数据水合（旧结构数据下次启动会再尝试迁移）
   try {
     await migrateLegacyStorySchemeData();
+    await migrateSharedStoryPreferences();
   } catch (error) {
-    console.warn("[StoryStorage] scheme migration failed:", error);
+    console.warn("[StoryStorage] settings migration failed:", error);
   }
   _hydrated = true;
 }
@@ -751,8 +792,8 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
 
   const now = new Date().toISOString();
   const ownerSessions = loadStorySessionsForOwner(ownerType, ownerId);
-  // All entry points (catalog, quick new story, chat invitation) inherit the
-  // owner's last active page instead of silently reverting to its main page.
+  // All entry points use the owner's shared preferences. The remembered live
+  // page is only a fallback for legacy data whose migration could not complete.
   let activeBase: StorySession | undefined;
   if (branchId !== "main") {
     try {
@@ -761,9 +802,9 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
       activeBase = ownerSessions.find((item) => item.id === rememberedId);
     } catch { /* Invalid/stale remembered pages fall back to the supplied template. */ }
   }
-  const base = activeBase
-    ?? ownerSessions.find((item) => item.id === options.baseSession?.id)
-    ?? options.baseSession
+  const base = ownerSessions.find(item => !item.mergedIntoSessionId && item.sharedSettingsVersion === 1)
+    ?? (activeBase?.mergedIntoSessionId ? undefined : activeBase)
+    ?? ownerSessions.find((item) => !item.mergedIntoSessionId && item.id === options.baseSession?.id)
     ?? ownerSessions.find((item) => (item.branchId || "main") === "main");
   const session: StorySession = {
     id: generateId("story_sess"),
@@ -781,12 +822,7 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
     independentStory: branchId === "main" ? false : Boolean(options.independentStory),
     createdAt: now,
     updatedAt: now,
-    foldTags: base?.foldTags ?? DEFAULT_STORY_FOLD_TAGS,
-    foldTagsVersion: STORY_FOLD_TAGS_VERSION,
-    contextExcludedTags: base?.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS,
-    customCSS: base?.customCSS,
-    settings: base?.settings ? { ...base.settings } : undefined,
-    uiPrefs: base?.uiPrefs ? { ...base.uiPrefs } : {},
+    ...sharedStoryPreferences(base || { id: "", characterId, updatedAt: now }),
   };
   _sessionsCache.unshift(session);
   storyDb.sessions.put(session).catch(() => undefined);
@@ -939,7 +975,7 @@ export function deleteStoryGroup(groupId: string): void {
   deleteStorySessions(sessionIds, { allowMain: true });
 }
 
-export function updateStorySession(sessionId: string, updates: Partial<StorySession>): StorySession | null {
+function updateStorySessionRecord(sessionId: string, updates: Partial<StorySession>): StorySession | null {
   assertStorySessionWritable(sessionId);
   const idx = _sessionsCache.findIndex((session) => session.id === sessionId);
   if (idx === -1) return null;
@@ -953,6 +989,34 @@ export function updateStorySession(sessionId: string, updates: Partial<StorySess
   _sessionsCache[idx] = next;
   storyDb.sessions.put(next).catch(() => undefined);
   return next;
+}
+
+export function updateStorySession(sessionId: string, updates: Partial<StorySession>): StorySession | null {
+  const preferenceKeys = ["settings", "uiPrefs", "foldTags", "contextExcludedTags", "customCSS"] as const;
+  if (!preferenceKeys.some(key => Object.prototype.hasOwnProperty.call(updates, key))) {
+    return updateStorySessionRecord(sessionId, updates);
+  }
+  assertStorySessionWritable(sessionId);
+  const source = _sessionsCache.find(page => page.id === sessionId);
+  if (!source) return null;
+  const peers = _sessionsCache.filter(page => !page.mergedIntoSessionId
+    && getStorySessionOwnerKey(page) === getStorySessionOwnerKey(source));
+  // A preference write from a third page must not race an in-flight merge.
+  peers.forEach(page => assertStorySessionWritable(page.id));
+  const next = { ...source, ...updates, uiPrefs: { ...source.uiPrefs, ...updates.uiPrefs },
+    updatedAt: updates.updatedAt || new Date().toISOString() };
+  const changed = new Map(peers.map(page => [page.id, {
+    ...(page.id === sessionId ? next : page), ...sharedStoryPreferences(next),
+  }]));
+  _sessionsCache = _sessionsCache.map(page => changed.get(page.id) || page);
+  // Persist all preference mirrors in one transaction, never a partial set.
+  storyDb.transaction("rw", storyDb.sessions, () => storyDb.sessions.bulkPut([...changed.values()])).catch(() => undefined);
+  if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    window.dispatchEvent(new CustomEvent("story-owner-settings-updated", {
+      detail: { ownerKey: getStorySessionOwnerKey(source) },
+    }));
+  }
+  return changed.get(sessionId)!;
 }
 
 export function pushStoryMessage(
