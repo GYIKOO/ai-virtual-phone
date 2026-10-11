@@ -119,7 +119,14 @@ async function testDeliveryPaths() {
         { endpoint: 'https://web-push.invalid' },
     ], 'legacy-user');
     assert.deepEqual(Array.from(channels), [`device:${deviceId}`, `device:${second}`, 'legacy-user']);
-    assert.match(source, /messages: shellPushChannels\(subs, job.user_id\)/);
+    assert.ok(source.includes('const shellTopics = shellPushChannels(subs, job.user_id)'), 'delivery derives only from owner-scoped subscriptions');
+    assert.ok(source.includes('push_subscriptions?user_id=eq.${encodeURIComponent(job.user_id)}&select=endpoint,p256dh,auth'), 'subscription lookup is scoped before both web and shell delivery');
+    assert.ok(!source.includes('push_subscriptions?select='), 'executor must not query every account subscription');
+    const gateway = fs.readFileSync('supabase/functions/ai-phone-push/index.ts', 'utf8');
+    assert.ok(!gateway.includes('push_subscriptions?select='), 'status, diagnostics and test must not query every account subscription');
+    assert.ok(!gateway.includes('push_jobs?select='), 'diagnostics must not expose other account jobs');
+    assert.ok(source.includes('messages: shellTopics.map(topic'), 'broadcast uses the scoped topics');
+    assert.ok(!source.includes('push_subscriptions?endpoint=like.shell:'), 'no project-wide shell subscription query');
 
     // Exercise the bridge worker's real dispatcher without invoking its job handler.
     const calls = [];

@@ -12,7 +12,7 @@ function load(path, context, dependencies) {
 }
 
 (async () => {
-    let native, setting = true, clicks = 0, notified = 0;
+    let native, setting = true, clicks = 0, notified = 0, richShell = false, richNotified = 0;
     const context = {
         window: {}, document: { hidden: true, createElement: () => ({ click() { clicks++; }, remove() {} }), body: { appendChild() {} } },
         navigator: { userAgent: 'Android' }, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
@@ -20,6 +20,7 @@ function load(path, context, dependencies) {
     };
     const dependencies = {
         './android-native': { getAndroidNative: () => native },
+        './shell-notify': { canSendShellNotification: () => richShell, sendShellNotification: () => { richNotified++; } },
         './chat-storage': { loadChatAppSettings: () => ({ browserNotificationsEnabled: setting }) },
     };
     const download = load('lib/download-utils.ts', context, dependencies);
@@ -42,6 +43,13 @@ function load(path, context, dependencies) {
     assert.equal(notifications.isNotificationEnabled(), true);
     notifications.sendBrowserNotification('角色', { body: '消息' });
     assert.equal(notified, 1);
+    richShell = true;
+    notifications.sendBrowserNotification('already routed by shell', { chatNoticeHandled: true });
+    assert.equal(notified, 1, 'rich shell has one notification route; old APK still uses native fallback');
+    assert.equal(richNotified, 0);
+    notifications.sendBrowserNotification('朋友圈', { body: '新互动' });
+    assert.equal(richNotified, 1, 'non-chat notifications still reach the native shell');
+    richShell = false;
     context.document.hidden = false;
     notifications.sendBrowserNotification('visible');
     setting = false; context.document.hidden = true;
