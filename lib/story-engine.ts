@@ -279,7 +279,9 @@ async function buildStoryPromptMessages(
     : prepareShortTermContext(characterId, "story", {
       userName: userIdentity?.name ?? "用户",
       history: historyMessages,
-      excludeStoryMessageIds: storedMessages.filter(message => !historyIds.has(message.id)).map(message => message.id),
+      // Current-page prose is already in history. Exclude its projections too,
+      // including discarded retry suffixes, while retaining other pages' events.
+      excludeStoryMessageIds: [...new Set([...storedMessages.map(message => message.id), ...historyIds])],
       afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
     });
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = context;

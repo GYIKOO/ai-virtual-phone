@@ -36,6 +36,8 @@ type StoryPaginationManagerProps = {
   onSessionSelect: (sessionId: string) => void;
   onBranchCreate: (input: StoryBranchCreateInput) => void;
   onBranchDelete: (sessionIds: string[]) => void;
+  onBranchMerge: (sessionId: string) => void;
+  mergeBusy: boolean;
   onSessionUpdate: (sessionId: string, updates: Partial<StorySession>) => void;
   onExportSession: (sessionId: string) => void;
   onExportAll: () => void;
@@ -263,7 +265,7 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
                     disabled={!deleteSelection.length}
                     onClick={() => {
                       if (!deleteSelection.length) return;
-                      if (window.confirm(`删除选中的 ${deleteSelection.length} 条分线？消息也会一并删除。`)) {
+                      if (window.confirm(`删除选中的 ${deleteSelection.length} 条分线？普通分线的消息也会删除；已归档分页仅移除归档入口，不删除主线记录。`)) {
                         props.onBranchDelete(deleteSelection);
                         setDeleteSelection([]);
                       }
@@ -300,6 +302,7 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
                           {isMain ? <strong>主线剧情</strong> : (
                             <input
                               value={session.branchName || "分线剧情"}
+                              disabled={Boolean(session.mergedIntoSessionId)}
                               aria-label="分线名称"
                               onClick={(event) => event.stopPropagation()}
                               onKeyDown={(event) => event.stopPropagation()}
@@ -307,7 +310,7 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
                             />
                           )}
                           <small>
-                            {isMain ? "默认主线 · 不可更名删除" : [
+                            {session.mergedIntoSessionId ? "已并入主线 · 只读归档" : isMain ? "默认主线 · 不可更名删除" : [
                               session.independentStory ? "独立剧情" : "角色记忆",
                               session.inheritRecentMemory ? "已继承最近记忆" : "从创建时开始",
                             ].join(" · ")}
@@ -316,7 +319,11 @@ export function StoryPaginationManager(props: StoryPaginationManagerProps) {
                         </span>
                       </div>
                       <div className="story-directory-actions">
-                        {!isMain && session.independentStory && !session.includedInMemoryAt ? (
+                        {!isMain && !session.independentStory && !session.mergedIntoSessionId ? (
+                          <button type="button" className="story-branch-memory" disabled={props.mergeBusy}
+                            onClick={() => props.onBranchMerge(session.id)}>合并进主线</button>
+                        ) : null}
+                        {!isMain && session.independentStory && !session.includedInMemoryAt && !session.mergedIntoSessionId ? (
                           <button type="button" className="story-branch-memory" onClick={() => {
                             if (window.confirm("结束这条独立剧情并把剧情摘要加入角色记忆？")) {
                               const now = new Date().toISOString();

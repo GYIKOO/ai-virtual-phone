@@ -2380,6 +2380,7 @@ async function handleDeleteStoryScheme(args: Record<string, unknown>, ctx: Masco
     // 公用方案被删后，所有还选着它的角色都回落到剩余首个方案
     const { loadStorySessions, updateStorySession } = await import("./story-storage");
     for (const session of loadStorySessions()) {
+        if (session.mergedIntoSessionId) continue;
         const currentId = kind === "status" ? session.settings?.activeStatusSchemeId : session.settings?.activeTheaterSchemeId;
         if (currentId !== target.id) continue;
         updateStorySession(session.id, {

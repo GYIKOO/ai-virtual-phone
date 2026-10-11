@@ -68,6 +68,7 @@ import {
   hydrateStoryStorage,
   loadStoryGroups,
   loadStoryMessages,
+  mergeStoryPageIntoMain,
   loadStorySessions,
   loadStorySessionsForOwner,
   loadStorySchemeRepository,
@@ -519,6 +520,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [contextExcludedTagsDraft, setContextExcludedTagsDraft] = useState("");
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
   const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [mergingPage, setMergingPage] = useState(false);
+  const mergingPageRef = useRef(false);
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
   // 逐帧 setState 会让整个剧情页以事件频率重渲染（iOS 上拉到顶/底按住不动时
   // 表现为持续的重排/闪烁）
@@ -635,6 +638,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     return `${new Date(message.createdAt).toLocaleString()} ${name}：${text}`;
   }).join("\n"), [currentCharacter?.name, floatingChatMessages, userIdentity?.name]);
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
+  const isReadOnly = Boolean(currentSession?.mergedIntoSessionId);
   const latestAssistantMessageId = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant")?.id || "",
     [messages],
@@ -1063,7 +1067,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (!ready || !activeCharacterId || !currentSession || isGenerating) return;
+    if (!ready || !activeCharacterId || !currentSession || isGenerating || isReadOnly || mergingPage) return;
 
     const activeAssistantMessages = messages.filter((message) => message.role === "assistant");
     if (activeAssistantMessages.length === 0) return;
@@ -1132,10 +1136,10 @@ export function StoryApp({ onClose }: StoryAppProps) {
     // 依赖用 id/foldTags 原始值而不是 session 对象：会话缓存归一化会更换对象
     // 引用，按对象依赖会让本 effect 在无关渲染中反复重跑
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, activeCharacterId, currentSession?.id, currentSession?.foldTags, messages, isGenerating]);
+  }, [ready, activeCharacterId, currentSession?.id, currentSession?.foldTags, messages, isGenerating, isReadOnly, mergingPage]);
 
   function applySessionUpdates(updates: Partial<StorySession>) {
-    if (!currentSession) return;
+    if (!currentSession || isReadOnly || mergingPageRef.current) return;
     const next = updateStorySession(currentSession.id, updates);
     if (!next) return;
     setCustomCssDraft(next.customCSS || "");
@@ -1180,6 +1184,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }
 
   function handleStoryGroupDelete(groupId: string) {
+    if (mergingPageRef.current) return;
     const deletingActive = activeGroupId === groupId;
     deleteStoryGroup(groupId);
     if (deletingActive && activeCharacterId) {
@@ -1212,7 +1217,38 @@ export function StoryApp({ onClose }: StoryAppProps) {
     activateStorySession(session);
   }
 
+  async function handleStoryBranchMerge(sessionId: string) {
+    if (mergingPageRef.current) return;
+    if (activeStoryGenerationRuns.size || floatingChatGenerating) {
+      alert("请先等待剧情和悬浮聊天生成结束，再合并分页。");
+      return;
+    }
+    const page = loadStorySessions().find(item => item.id === sessionId);
+    if (!page || page.mergedIntoSessionId || page.independentStory) return;
+    const records = loadStoryMessages(sessionId);
+    if (!records.length) { alert("这个分页没有可合并的记录。"); return; }
+    const range = `${new Date(records[0].createdAt).toLocaleString()} — ${new Date(records[records.length - 1].createdAt).toLocaleString()}`;
+    if (!window.confirm(`将「${page.branchName || "分线剧情"}」的 ${records.length} 条记录合并进同一角色／多人组的主线？\n\n记录时间：${range}\n\n正文和摘要按原发送时间插入，不覆盖主线，不重复生成记忆。原分页将变为只读归档，内容随主线对应记录同步。此操作没有一键撤销，请先备份；请确认这些内容属于同一段连续经历。`)) return;
+    mergingPageRef.current = true;
+    setMergingPage(true);
+    try {
+      const main = await mergeStoryPageIntoMain(sessionId);
+      setActiveMessageId(null);
+      setEditingMessageId(null);
+      setActionRequest(null);
+      activateStorySession(main);
+      setSettingsOpen(false);
+      setStorageVersion(value => value + 1);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "合并失败，请重试。");
+    } finally {
+      mergingPageRef.current = false;
+      setMergingPage(false);
+    }
+  }
+
   function handleStoryBranchDelete(sessionIds: string[]) {
+    if (mergingPageRef.current) return;
     const deletingActive = sessionIds.includes(activeSessionId);
     deleteStorySessions(sessionIds);
     if (deletingActive) {
@@ -1224,6 +1260,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }
 
   function handleStorySessionUpdate(sessionId: string, updates: Partial<StorySession>) {
+    if (mergingPageRef.current || loadStorySessions().find(item => item.id === sessionId)?.mergedIntoSessionId) return;
     const next = updateStorySession(sessionId, updates);
     if (!next) return;
     if (next.id === activeSessionId) {
@@ -1275,7 +1312,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }
 
   function handleExportAllStories() {
-    const sessions = loadStorySessionsForOwner(activeOwnerType, activeOwnerId);
+    const sessions = loadStorySessionsForOwner(activeOwnerType, activeOwnerId).filter(item => !item.mergedIntoSessionId);
     let branchIndex = 0;
     const chapters = sessions.map((session) => {
       if ((session.branchId || "main") !== "main") branchIndex += 1;
@@ -1290,11 +1327,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }
 
   function handleQuickStoryCreate() {
+    if (mergingPageRef.current) return;
     if (!activeOwnerId || !activeCharacterId) return;
     const now = new Date();
     const branchName = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
     const baseSession = ownerMainSession || currentSession || undefined;
-    if (currentSession) updateStorySession(currentSession.id, { endedAt: now.toISOString() });
+    if (currentSession && !isReadOnly) updateStorySession(currentSession.id, { endedAt: now.toISOString() });
     const session = createOrGetStorySession(activeCharacterId, {
       ownerType: activeOwnerType,
       ownerId: activeOwnerId,
@@ -1434,7 +1472,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
 
   async function handleSend(userTextInput: string, kind?: "director") {
     const userText = userTextInput.trim();
-    if (!activeSessionId || !userText || isGenerating) return;
+    if (!activeSessionId || !userText || isGenerating || isReadOnly || mergingPageRef.current) return;
     const sessionId = activeSessionId;
     const characterId = activeCharacterId;
 
@@ -1523,7 +1561,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   useEffect(() => {
     const session = currentSession;
     const prompt = session?.autoStartPrompt?.trim();
-    if (!ready || !session || !prompt || !activeCharacterId || isGenerating) return;
+    if (!ready || !session || !prompt || !activeCharacterId || isGenerating || session.mergedIntoSessionId || mergingPageRef.current) return;
     if (autoStartedSessionIdsRef.current.has(session.id)) return;
     autoStartedSessionIdsRef.current.add(session.id);
     updateStorySession(session.id, { autoStartPrompt: undefined, autoStartRequestedAt: undefined });
@@ -1747,28 +1785,28 @@ export function StoryApp({ onClose }: StoryAppProps) {
   }
 
   function handleStoryDelete(msgId: string) {
-    if (isGenerating) return;
+    if (isGenerating || isReadOnly || mergingPageRef.current) return;
     deleteStoryMessage(msgId);
     setMessages(prev => prev.filter(m => m.id !== msgId));
     setActiveMessageId(null);
     setStorageVersion(v => v + 1);
   }
   function handleStoryDeleteFrom(msgId: string) {
-    if (isGenerating) return;
+    if (isGenerating || isReadOnly || mergingPageRef.current) return;
     deleteStoryMessagesFrom(activeSessionId, msgId);
     setMessages(prev => { const idx = prev.findIndex(m => m.id === msgId); return idx >= 0 ? prev.slice(0, idx) : prev; });
     setActiveMessageId(null);
     setStorageVersion(v => v + 1);
   }
   function handleStoryEditStart(msg: StoryMessage) {
-    if (isGenerating) return;
+    if (isGenerating || isReadOnly || mergingPageRef.current) return;
     setEditingMessageId(msg.id);
     setEditingContent(msg.rawContent); // 仅作为非受控 textarea 的初始值
     editingDraftRef.current = msg.rawContent;
     setActiveMessageId(null);
   }
   function handleStoryEditSave() {
-    if (isGenerating) return;
+    if (isGenerating || isReadOnly || mergingPageRef.current) return;
     const draft = editingDraftRef.current;
     if (!editingMessageId || !draft.trim()) { setEditingMessageId(null); setEditingContent(""); return; }
     let newRawContent = draft.trim();
@@ -1805,7 +1843,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     setActiveMessageId(null);
   }
   async function handleStoryRetry(msgId: string, retryInstruction = "") {
-    if (isGenerating) return;
+    if (isGenerating || isReadOnly || mergingPageRef.current) return;
     const msgIndex = messages.findIndex(m => m.id === msgId);
     if (msgIndex === -1) return;
     const retryMessage = messages[msgIndex];
@@ -1939,6 +1977,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
           onSessionSelect={handleStorySessionSelect}
           onBranchCreate={handleStoryBranchCreate}
           onBranchDelete={handleStoryBranchDelete}
+          onBranchMerge={(sessionId) => { void handleStoryBranchMerge(sessionId); }}
+          mergeBusy={mergingPage || generatingSessionIds.size > 0}
           onSessionUpdate={handleStorySessionUpdate}
           onExportSession={handleExportStorySession}
           onExportAll={handleExportAllStories}
@@ -2168,8 +2208,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
                             >
                               <div style={{ display: "flex" }}>
                                 <button onClick={() => handleStoryCopy(message.rawContent)} className="story-ctx-btn">复制</button>
-                                <button onClick={() => handleStoryEditStart(message)} className="story-ctx-btn">编辑</button>
-                                {(message.role === "assistant" || message.role === "user") && (
+                                {!isReadOnly && <button onClick={() => handleStoryEditStart(message)} className="story-ctx-btn">编辑</button>}
+                                {!isReadOnly && (message.role === "assistant" || message.role === "user") && (
                                   <button disabled={isGenerating} onClick={() => {
                                     setActiveMessageId(null);
                                     const context = getStoryRetryContext(messages, message.id);
@@ -2177,10 +2217,10 @@ export function StoryApp({ onClose }: StoryAppProps) {
                                   }} className="story-ctx-btn story-ctx-btn-danger">重试</button>
                                 )}
                               </div>
-                              <div style={{ display: "flex" }}>
+                              {!isReadOnly && <div style={{ display: "flex" }}>
                                 <button onClick={() => handleStoryDelete(message.id)} className="story-ctx-btn story-ctx-btn-danger">删除</button>
                                 <button onClick={() => handleStoryDeleteFrom(message.id)} className="story-ctx-btn story-ctx-btn-danger">删除以下</button>
-                              </div>
+                              </div>}
                               <div className="story-ctx-triangle" />
                             </div>
                           );
@@ -2206,7 +2246,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
         <div className="story-voice-notice" role="status">{voiceNotice}</div>
       ) : null}
 
-      <StoryComposer
+      {isReadOnly ? (
+        <div className="story-archive-notice" role="status">
+          <span>已并入主线 · 此页只读，内容随主线对应记录同步</span>
+          <button type="button" className="story-load-more-btn" onClick={() => handleStorySessionSelect(currentSession.mergedIntoSessionId!)}>前往主线继续</button>
+        </div>
+      ) : <StoryComposer
         key={activeSessionId}
         isGenerating={isGenerating}
         appendRequest={composerAppendRequest}
@@ -2240,9 +2285,9 @@ export function StoryApp({ onClose }: StoryAppProps) {
         quickInputEnabled={Boolean(uiPrefs.quickInputEnabled)}
         quickInputOptions={quickInputOptions}
         quickInputCursor={quickInputCursor}
-      />
+      />}
 
-      {storySettings.floatingPhoneEnabled ? (
+      {!isReadOnly && storySettings.floatingPhoneEnabled ? (
         <button className="story-floating-phone-ball" type="button" onClick={() => { setFloatingChatVersion((value) => value + 1); setFloatingPhoneOpen(true); }} aria-label="打开悬浮小手机"><MiniPhoneIcon size={18} /></button>
       ) : null}
       {floatingPhoneOpen ? (

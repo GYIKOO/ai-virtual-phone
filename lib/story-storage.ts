@@ -375,6 +375,10 @@ export type StorySession = {
   /** 独立剧情结束后可显式并入角色记忆。 */
   endedAt?: string;
   includedInMemoryAt?: string;
+  /** Archived page references canonical messages now owned by the main page. */
+  mergedIntoSessionId?: string;
+  mergedAt?: string;
+  mergedMessageIds?: string[];
   updatedAt: string;
   customCSS?: string;
   foldTags?: string;            // Comma-separated tag names to fold for this session.
@@ -431,6 +435,14 @@ registerKvMigration(STORY_GROUPS_KEY);
 let _hydrated = false;
 let _sessionsCache: StorySession[] = [];
 let _messagesCache: StoryMessage[] = [];
+const mergingStorySessionIds = new Set<string>();
+
+function assertStorySessionWritable(sessionId: string): void {
+  if (mergingStorySessionIds.has(sessionId)) throw new Error("剧情正在合并，请稍后再试。");
+  if (_sessionsCache.find(item => item.id === sessionId)?.mergedIntoSessionId) {
+    throw new Error("该分页已并入主线并只读归档，请在主线继续剧情。");
+  }
+}
 
 function generateId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -590,6 +602,7 @@ async function migrateLegacyStorySchemeData(): Promise<void> {
   const quickNames = new Set(repo.quickInputSchemes.map((item) => item.name));
 
   for (const session of [..._sessionsCache]) {
+    if (session.mergedIntoSessionId) continue;
     const settings = session.settings;
     const prefs = session.uiPrefs;
     let settingsChanged = false;
@@ -689,8 +702,12 @@ export function loadStorySessions(): StorySession[] {
 }
 
 export function loadStoryMessages(sessionId: string): StoryMessage[] {
+  const archive = _sessionsCache.find(item => item.id === sessionId);
+  const archivedIds = archive?.mergedIntoSessionId ? new Set(archive.mergedMessageIds || []) : null;
   return _messagesCache
-    .filter((message) => message.sessionId === sessionId)
+    .filter((message) => archivedIds
+      ? message.sessionId === archive!.mergedIntoSessionId && archivedIds.has(message.id)
+      : message.sessionId === sessionId)
     .sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
 }
 
@@ -776,7 +793,63 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
   return session;
 }
 
+/** Move, never copy: message IDs/times (and therefore memory source IDs) stay stable. */
+export async function mergeStoryPageIntoMain(sessionId: string): Promise<StorySession> {
+  const source = _sessionsCache.find(item => item.id === sessionId);
+  if (!source) throw new Error("找不到要合并的剧情分页。");
+  assertStorySessionWritable(sessionId);
+  if ((source.branchId || "main") === "main" || source.independentStory) {
+    throw new Error("仅普通分线可以合并，主线和独立剧情不支持此操作。");
+  }
+  const target = _sessionsCache.find(item => getStorySessionOwnerKey(item) === getStorySessionOwnerKey(source)
+    && (item.branchId || "main") === "main");
+  if (!target) throw new Error("找不到同一角色或多人组的主线。");
+  assertStorySessionWritable(target.id);
+  const members = (item: StorySession) => [...new Set(item.participantIds || [item.characterId])].sort().join("\u0000");
+  if (members(source) !== members(target)) throw new Error("分页与主线的参与角色不同，暂不能合并。");
+  mergingStorySessionIds.add(source.id);
+  mergingStorySessionIds.add(target.id);
+  try {
+    const result = await storyDb.transaction("rw", storyDb.sessions, storyDb.messages, async () => {
+      const savedSource = await storyDb.sessions.get(source.id);
+      const savedTarget = await storyDb.sessions.get(target.id);
+      if (!savedSource || !savedTarget || savedSource.mergedIntoSessionId || savedTarget.mergedIntoSessionId
+        || savedSource.independentStory || (savedSource.branchId || "main") === "main"
+        || (savedTarget.branchId || "main") !== "main"
+        || getStorySessionOwnerKey(savedSource) !== getStorySessionOwnerKey(savedTarget)
+        || members(savedSource) !== members(savedTarget)) {
+        throw new Error("分页状态已变化，请刷新后重试。");
+      }
+      const sourceMessages = await storyDb.messages.where("sessionId").equals(source.id).toArray();
+      if (!sourceMessages.length) throw new Error("这个分页没有可合并的记录。");
+      const targetMessages = await storyDb.messages.where("sessionId").equals(target.id).toArray();
+      const moved = sourceMessages.map(message => ({ ...message, sessionId: target.id }));
+      const all = [...targetMessages, ...moved].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      const last = all[all.length - 1];
+      const now = new Date().toISOString();
+      const main: StorySession = { ...savedTarget, updatedAt: now, lastMessageId: last.id,
+        lastMessageAt: last.createdAt,
+        lastMessagePreview: (last.kind === "director" ? "导演指令" : last.renderedContent || last.rawContent).replace(/\s+/g, " ").trim().slice(0, 64) };
+      const archive: StorySession = { ...savedSource, mergedIntoSessionId: target.id, mergedAt: now,
+        mergedMessageIds: sourceMessages.map(message => message.id), endedAt: now,
+        autoStartPrompt: undefined, autoStartRequestedAt: undefined };
+      await storyDb.messages.bulkPut(moved);
+      await storyDb.sessions.bulkPut([main, archive]);
+      return { main, archive, all };
+    });
+    // Publish only after commit: failed transactions leave both UI and disk unchanged.
+    _messagesCache = _messagesCache.filter(message => message.sessionId !== source.id && message.sessionId !== target.id);
+    _messagesCache.push(...result.all);
+    _sessionsCache = _sessionsCache.map(item => item.id === source.id ? result.archive : item.id === target.id ? result.main : item);
+    return result.main;
+  } finally {
+    mergingStorySessionIds.delete(source.id);
+    mergingStorySessionIds.delete(target.id);
+  }
+}
+
 export function deleteStorySessions(sessionIds: string[], options?: { allowMain?: boolean }): void {
+  if (sessionIds.some(id => mergingStorySessionIds.has(id))) throw new Error("剧情正在合并，请稍后再试。");
   const requested = new Set(sessionIds);
   const deletable = _sessionsCache
     .filter((session) => requested.has(session.id) && (options?.allowMain || (session.branchId || "main") !== "main"))
@@ -867,6 +940,7 @@ export function deleteStoryGroup(groupId: string): void {
 }
 
 export function updateStorySession(sessionId: string, updates: Partial<StorySession>): StorySession | null {
+  assertStorySessionWritable(sessionId);
   const idx = _sessionsCache.findIndex((session) => session.id === sessionId);
   if (idx === -1) return null;
   const next: StorySession = {
@@ -884,6 +958,7 @@ export function updateStorySession(sessionId: string, updates: Partial<StorySess
 export function pushStoryMessage(
   input: Omit<StoryMessage, "id" | "createdAt">
 ): StoryMessage {
+  assertStorySessionWritable(input.sessionId);
   const message: StoryMessage = {
     ...input,
     id: generateId("story_msg"),
@@ -921,12 +996,15 @@ export function saveStoryLaunchTarget(session: StorySession): void {
 
 /** Delete a single story message */
 export function deleteStoryMessage(messageId: string): void {
+    const message = _messagesCache.find(m => m.id === messageId);
+    if (message) assertStorySessionWritable(message.sessionId);
     _messagesCache = _messagesCache.filter(m => m.id !== messageId);
     storyDb.messages.delete(messageId).catch(() => undefined);
 }
 
 /** Delete a message and all messages after it (by createdAt in same session) */
 export function deleteStoryMessagesFrom(sessionId: string, messageId: string): void {
+    assertStorySessionWritable(sessionId);
     const msg = _messagesCache.find(m => m.id === messageId);
     if (!msg) return;
     const idsToDelete = _messagesCache
@@ -940,6 +1018,7 @@ export function deleteStoryMessagesFrom(sessionId: string, messageId: string): v
 export function editStoryMessage(messageId: string, newRawContent: string): void {
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx === -1) return;
+    assertStorySessionWritable(_messagesCache[idx].sessionId);
     _messagesCache[idx] = {
         ..._messagesCache[idx],
         rawContent: newRawContent,
@@ -952,6 +1031,7 @@ export function editStoryMessage(messageId: string, newRawContent: string): void
 }
 
 export function replaceStoryMessages(sessionId: string, messages: StoryMessage[]): void {
+  assertStorySessionWritable(sessionId);
   _messagesCache = _messagesCache.filter((message) => message.sessionId !== sessionId);
   _messagesCache.push(...messages);
   void storyDb.transaction("rw", storyDb.messages, async () => {
@@ -976,6 +1056,7 @@ export function loadStoryProjectionEntries(
   options?: { afterTimestamp?: string; userName?: string; charName?: string }
 ): StoryProjectionEntry[] {
   const sessions = _sessionsCache.filter((item) => {
+    if (item.mergedIntoSessionId) return false;
     const participants = item.participantIds?.length ? item.participantIds : [item.characterId];
     if (!participants.includes(characterId)) return false;
     return !item.independentStory || Boolean(item.includedInMemoryAt);

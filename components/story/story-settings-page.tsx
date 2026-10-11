@@ -45,6 +45,8 @@ type StorySettingsPageProps = {
   onSessionSelect: (sessionId: string) => void;
   onBranchCreate: (input: StoryBranchCreateInput) => void;
   onBranchDelete: (sessionIds: string[]) => void;
+  onBranchMerge: (sessionId: string) => void;
+  mergeBusy: boolean;
   onSessionUpdate: (sessionId: string, updates: Partial<StorySession>) => void;
   onExportSession: (sessionId: string) => void;
   onExportAll: () => void;
@@ -564,11 +566,17 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           onSessionSelect={props.onSessionSelect}
           onBranchCreate={props.onBranchCreate}
           onBranchDelete={props.onBranchDelete}
+          onBranchMerge={props.onBranchMerge}
+          mergeBusy={props.mergeBusy}
           onSessionUpdate={props.onSessionUpdate}
           onExportSession={props.onExportSession}
           onExportAll={props.onExportAll}
         />
 
+        {props.ownerSessions.find(item => item.id === props.activeSessionId)?.mergedIntoSessionId && (
+          <p className="story-settings-note">此分页已只读归档；请切换到主线调整剧情设置。</p>
+        )}
+        <fieldset disabled={props.mergeBusy || Boolean(props.ownerSessions.find(item => item.id === props.activeSessionId)?.mergedIntoSessionId)} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         <SettingCard title="剧情预设设置" hint="建议给剧情 APP 单独制作专属预设，避免影响其他应用">
           <label className="story-settings-field"><span>当前角色专属预设名称</span><input value={normalized.presetName} onChange={(event) => patchSettings({ presetName: event.target.value })} /></label>
           <label className="story-settings-field"><span>剧情额外要求</span><textarea value={normalized.extraPrompt || ""} onChange={(event) => patchSettings({ extraPrompt: event.target.value })} placeholder="仅在当前角色的剧情生成中使用" /></label>
@@ -754,6 +762,7 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           <button className="story-settings-row-button" type="button" onClick={props.onOpenCss}><span><strong>页面 CSS 样式</strong><small>进入完整样式编辑页面</small></span><ChevronLeftIcon width={17} style={{ transform: "rotate(180deg)" }} /></button>
           <button className="story-settings-row-button" type="button" onClick={props.onRebuildCache}><span><strong>重建剧情渲染缓存</strong><small>方案或标签变化后使用</small></span><ChevronLeftIcon width={17} style={{ transform: "rotate(180deg)" }} /></button>
         </SettingCard>
+        </fieldset>
       </main>
     </div>
   );

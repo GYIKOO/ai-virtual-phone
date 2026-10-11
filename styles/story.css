@@ -1658,3 +1658,9 @@
           .story-branch-memory { padding:6px 5px; font-size:calc(7.5px*var(--app-text-scale,1)); }
           .story-group-picker { grid-template-columns:1fr; }
         }
+.story-archive-notice {
+  padding: 12px 16px;
+  text-align: center;
+  font-size: calc(12px * var(--app-text-scale, 1));
+  color: var(--c-story-heading, #1e293b);
+}

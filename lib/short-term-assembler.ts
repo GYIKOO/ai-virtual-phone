@@ -965,11 +965,17 @@ export function prepareShortTermContext(
     }
     timeline = filterTimelineByAllowedSources(timeline, memConfig.shortTermAllowedSources);
 
-    // Activation context: full timeline for keyword matching (not truncated)
-    const wbActivationContext = timeline.slice(-10).map(e => e.content).join("\n");
     const budget = memConfig.shortTermTokenBudget;
     const currentTag = getFeatureTag(appId);
     const history = (options?.history ?? []).filter(m => options?.historicalAt === undefined || Date.parse(m.createdAt) <= options.historicalAt);
+    const currentStoryProjectionIds = new Set(appId === "story" ? history.map(message => `story_projection_${message.id}`) : []);
+    timeline = timeline.filter(entry => !currentStoryProjectionIds.has(entry.id));
+    // Story prose replaces its own projections for both retrieval and prompting.
+    const activationTimeline = appId === "story"
+        ? [...timeline, ...history.map(message => ({ timestamp: message.createdAt, content: message.content }))]
+            .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
+        : timeline;
+    const wbActivationContext = activationTimeline.slice(-10).map(e => e.content).join("\n");
     const characterName = loadCharacters().find(c => c.id === characterId)?.name ?? "角色";
     const wrapsCurrentHistory = appId === "chat" || appId === "group_chat" || appId === "story" || appId === "vn" || appId === "adventure";
     const skipDirectChatEntries = appId === "chat" && !options?.includeDirectChatEntries;
@@ -983,7 +989,7 @@ export function prepareShortTermContext(
         raw.push({ tag: "recent_moments", order: FEATURE_ORDER.moments, entries: momentsEntries });
     }
 
-    if (appId !== "story") {
+    {
         const storyEntries = timeline.filter(e =>
             e.sourceApp === "story"
             && e.sourceDetail !== "black_market_theater"
