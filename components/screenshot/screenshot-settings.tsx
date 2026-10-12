@@ -227,11 +227,11 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
     onNotice?.("已清空全部截屏记录");
   }, [onNotice, refresh]);
 
-  /** 删单张：连同媒体库里的图一起删，不留下无人引用的图片占存储。 */
+  /** 只移除历史记录，不影响聊天等模块共享的图片。 */
   const doDeleteOne = useCallback(async (id: string) => {
     await deleteScreenshotRecord(id);
     refresh();
-    onNotice?.("已删除这张截屏");
+    onNotice?.("已删除这条截屏记录");
   }, [onNotice, refresh]);
 
   /**
@@ -732,7 +732,7 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
               <div className="menu-label-group">
                 <span className="menu-label">保留最近 {config.keepRecent} 张</span>
                 <span className="menu-desc">
-                  超出后最旧的会被删掉（图片一起删除，不会悄悄占满存储）
+                  超出后移除最旧的记录，不影响聊天中的图片。未使用的图片可在「数据管理 → 扫描残留数据」中清理。
                 </span>
               </div>
               {/* 直接填数值：1~50 张之间任意整数，不再给死档位 */}

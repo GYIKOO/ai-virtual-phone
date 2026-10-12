@@ -12,7 +12,7 @@
 //   · 用户必须知道「刚才截了一张」——所以默认发一条系统通知；
 //   · 截失败就把原生的原因如实带出来，绝不返回一张空白图。
 
-import { deleteMediaRef, storeMediaBase64 } from "../media-cache-storage";
+import { storeMediaBase64 } from "../media-cache-storage";
 import { captureScreenshot, hasScreenshotBridge, readScreenshotCapabilities } from "./bridge";
 import { loadScreenshotConfig, loadScreenshotRecords, saveScreenshotRecords } from "./config";
 import type { ScreenshotCapabilities, ScreenshotRecord } from "./types";
@@ -127,7 +127,7 @@ async function storeScreenshotRecord(captured: {
   // 「最近截屏」列表少一条远不如「图发不出去」严重。
   try {
     const config = loadScreenshotConfig();
-    const kept = await trimRecords([record, ...loadScreenshotRecords()], config.keepRecent);
+    const kept = trimRecords([record, ...loadScreenshotRecords()], config.keepRecent);
     saveScreenshotRecords(kept);
   } catch (err) {
     console.warn("[Screenshot] 记录整理失败", err);
@@ -156,26 +156,25 @@ export async function recordUserShot(captured: {
 }
 
 /**
- * 只保留最近 keep 条，把被挤掉的图片从媒体库删掉。
+ * 只保留最近 keep 条历史索引。
  *
- * 删图这一步很重要：记录列表只是索引，真正的几 MB 图片在媒体库里，
- * 只截索引的链会导致图片永远留着、悄悄把存储占满。
+ * 图片可能已被聊天、草稿或其他模块共享，也可能正在发送途中。
+ * 历史记录不是图片的唯一所有者；实际媒体回收交给 storage-cleanup
+ * 的全库引用扫描、宽限期和删除前复查，不在这里直接删除文件。
  */
-async function trimRecords(records: ScreenshotRecord[], keep: number): Promise<ScreenshotRecord[]> {
-  const kept = records.slice(0, Math.max(1, keep));
-  const evicted = records.slice(kept.length);
-  for (const item of evicted) {
-    await deleteMediaRef(item.ref);
-  }
-  return kept;
+function trimRecords(records: ScreenshotRecord[], keep: number): ScreenshotRecord[] {
+  return records.slice(0, Math.max(1, keep));
 }
 
-/** 清空全部截屏记录与对应图片。 */
-export async function clearAllScreenshots(): Promise<void> {
+/** 删除一条历史索引，保留可能仍在使用的图片。 */
+export async function deleteScreenshotRecord(id: string): Promise<void> {
   const records = loadScreenshotRecords();
-  for (const item of records) {
-    await deleteMediaRef(item.ref);
-  }
+  const kept = records.filter(record => record.id !== id);
+  if (kept.length !== records.length) saveScreenshotRecords(kept);
+}
+
+/** 清空截屏历史索引；媒体文件统一由残留数据清理回收。 */
+export async function clearAllScreenshots(): Promise<void> {
   saveScreenshotRecords([]);
 }
 
