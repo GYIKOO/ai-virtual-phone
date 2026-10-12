@@ -121,7 +121,7 @@ export function pollNewProactive(now: number, legacyBusy: (sessionId: string) =>
         const fresh = loadProactive(session.id);
         const current = fresh && synchronize(session, fresh, Date.now());
         const source = current?.config.enabled && dueProactive(current.state, Date.now());
-        if (current && source && !isWithinPushQuietHours(Date.now()) && !legacyBusy(session.id) && !foregroundBusy(session.id)) await fire(session, current, source);
+        if (current && source && !isWithinPushQuietHours(Date.now()) && !legacyBusy(session.id) && !foregroundBusy(session.id)) await fire(session, current, source, legacyBusy);
     };
     const promise = typeof navigator !== "undefined" && navigator.locks
         ? navigator.locks.request("float-proactive-generation", { ifAvailable: true }, lock => lock ? run() : undefined)
@@ -132,7 +132,7 @@ export function pollNewProactive(now: number, legacyBusy: (sessionId: string) =>
     });
 }
 
-async function fire(session: ChatSession, record: ProactiveRecord, source: ProactiveSource): Promise<void> {
+async function fire(session: ChatSession, record: ProactiveRecord, source: ProactiveSource, isBusy: (sessionId: string) => boolean): Promise<void> {
     const controller = new AbortController();
     const { config } = record;
     const anchor = lastMessage(session.id);
@@ -153,6 +153,7 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
     active.set(session.id, controller);
     window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
     const valid = () => !controller.signal.aborted && loadProactive(session.id)?.state.revision === state.revision
+        && !isBusy(session.id)
         && (historicalAt === undefined || replayTime(record.state, source, Date.now(), getProactiveAbsence()) === historicalAt)
         && !isWithinPushQuietHours(Date.now())
         && !foregroundBusy(session.id)

@@ -14,6 +14,7 @@ import {
   timeToMinutes,
 } from "./calendar-utils";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { getSystemTimeZone } from "./character-time";
 
 const STORAGE_KEY = "ai_phone_calendar_plans_v1";
 const CALENDAR_CONFIG_KEY = "ai_phone_calendar_config_v1";
@@ -265,6 +266,26 @@ export function getCurrentCalendarScheduleForPrompt(
 
   if (activeItems.length === 0) return "无";
   return activeItems.map(formatCalendarScheduleItemForPrompt).join("；");
+}
+
+/** Nearby plans, including adjacent weeks. Calendar dates currently use the device timezone. */
+export function buildNearbyCalendarScheduleForPrompt(
+  ownerType: CalendarOwnerType, ownerId: string, now = new Date(),
+): string {
+  const at = now.getTime();
+  const rows = loadOwnerCalendarPlans(ownerType, ownerId).flatMap(plan => plan.items)
+    .map(item => ({ item, start: Date.parse(`${item.date}T${item.startTime}:00`), end: Date.parse(`${item.date}T${item.endTime}:00`) }))
+    .filter(row => Number.isFinite(row.start) && Number.isFinite(row.end) && row.end > row.start
+      && row.end >= at - 24 * 3600000 && row.start <= at + 12 * 3600000);
+  const groups = [
+    { label: "按日程当前进行中", items: rows.filter(r => r.start <= at && r.end > at).sort((a, b) => a.start - b.start) },
+    { label: "过去24小时内按计划已结束", items: rows.filter(r => r.end <= at).sort((a, b) => b.end - a.end) },
+    { label: "未来12小时内的计划", items: rows.filter(r => r.start > at).sort((a, b) => a.start - b.start) },
+  ];
+  return [
+    `附近日程（时区：${getSystemTimeZone()}；日历中的安排，实际进展以经历记录为准）：`,
+    ...groups.map(group => `${group.label}：\n${group.items.length ? group.items.slice(0, 10).map(({ item }) => `${item.date} ${formatCalendarScheduleItemForPrompt(item)}`).join("\n") : "暂无安排"}`),
+  ].join("\n");
 }
 
 /**

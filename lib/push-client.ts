@@ -2,6 +2,7 @@
 // 前提：主屏幕 PWA（iOS 16.4+）或支持 Push API 的浏览器，且已登录账号。
 
 import { requestNotificationPermission } from "./browser-notification";
+import { getAndroidNative } from "./android-native";
 import { connectShellPersonalPush, disconnectShellPersonalPush, reconcileShellPersonalPush, shellPushStatus } from "./shell-personal-push";
 import { kvGet, kvRemove, kvSet } from "./kv-db";
 import {
@@ -99,10 +100,17 @@ export async function hasAccountPushSubscription(): Promise<boolean> {
     }
 }
 
-/** 是否运行在安卓壳（FloatShell App）的 WebView 里。壳自带长连接推送通道，不走 Web Push。 */
-export function isShellEnvironment(): boolean {
-    return typeof navigator !== "undefined" && navigator.userAgent.includes("FloatShell/");
-}
+/**
+ * 是否运行在安卓壳（FloatShell App）的 WebView 里。壳自带长连接推送通道，不走 Web Push。
+ *
+ * 实现放在 lib/shell-detect.ts，这里既要转出给其它模块，也要在本文件内部使用。
+ * 注意：只写 `export { x } from "..."` 是「重导出」，它不会在本模块作用域创建
+ * 绑定——本文件内继续调用 isShellEnvironment() 会抛 ReferenceError
+ * （曾表现为创建主动消息时报「isShellEnvironment is not defined」）。
+ * 必须先 import 再用 export 转出。
+ */
+import { isShellEnvironment } from "./shell-detect";
+export { isShellEnvironment };
 
 function isPushSupported(): boolean {
     return typeof window !== "undefined"
@@ -164,7 +172,10 @@ async function getPersonalPushRegistration(create: boolean): Promise<ServiceWork
 async function subscribeRegistration(
     registration: ServiceWorkerRegistration,
     publicKey: string,
-): Promise<PushSubscription | null> {
+) : Promise<PushSubscription | null> {
+    // WebView（壳）或受限浏览器里 pushManager 可能不存在，直接给出可读原因，
+    // 而不是抛 "Cannot read properties of undefined"。
+    if (!registration.pushManager) return null;
     const applicationServerKey = urlBase64ToUint8Array(publicKey);
     let subscription = await registration.pushManager.getSubscription().catch(() => null);
     if (subscription) {
@@ -235,6 +246,67 @@ export async function getOfflinePushState(): Promise<OfflinePushState> {
         return subscription ? "on" : "off";
     } catch {
         return "off";
+    }
+}
+
+/**
+ * 在壳里发一条真实的测试推送：直接打站点的 /api/push/test。
+ *
+ * 原按钮调的是 enableOfflinePush()，而它在 App 环境里第一步就返回失败
+ * （「App 版自带推送通道，无需在此开启」），根本不会发出任何推送——
+ * 于是用户点多少次测试都没反应，也无从判断链路到底通不通。
+ */
+export async function sendShellTestPush(): Promise<{ ok: boolean; error?: string }> {
+    try {
+        const response = await fetch("/api/push/test", { method: "POST", credentials: "include" });
+        const data = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
+        if (!response.ok || !data.ok) {
+            return { ok: false, error: data.error || `测试推送失败（HTTP ${response.status}）。` };
+        }
+        return { ok: true };
+    } catch {
+        return { ok: false, error: "测试推送请求失败，请检查网络。" };
+    }
+}
+
+/**
+ * 确保站点库里存在「本设备（安卓壳）」的合成订阅（endpoint = shell:<账号 id>）。
+ *
+ * 为什么由网页来做，而不是只靠壳的 PushService：
+ * 壳侧的 registerShellSubscription() 把异常整个吞进 runCatching，注册失败时
+ * 毫无痕迹——实测就会出现「壳显示已连接、订阅表却空空如也」，于是所有离线
+ * 推送都因为查不到接收方而发不出去，且无从排查。网页这里能拿到账号 id、
+ * 能看返回码，注册结果可验证，不依赖壳的原生实现。
+ *
+ * 幂等：服务端按 endpoint 主键 merge-duplicates，重复调用只会覆盖同一行。
+ */
+export async function ensureShellSubscription(): Promise<{ ok: boolean; error?: string }> {
+    if (!isShellEnvironment()) return { ok: false, error: "非壳环境。" };
+    // A managed device must not silently register a second, shared-site channel.
+    if (getAndroidNative()) {
+        const connected = await reconcileShellPersonalPush().catch(() => false);
+        return connected ? { ok: true } : { ok: false, error: "本设备尚未开启个人云推送。" };
+    }
+    try {
+        const meResponse = await fetch("/api/auth/me", { credentials: "include" });
+        const meData = await meResponse.json().catch(() => ({})) as { account?: { id?: string } | null };
+        const accountId = meData.account?.id || "";
+        if (!accountId) return { ok: false, error: "未取得账号身份。" };
+        // p256dh/auth 只是占位：壳通道不经 Web Push 加密，服务端凭 endpoint
+        // 前缀分流，不会把它送去 webpush 网关。
+        const response = await fetch("/api/push/subscribe", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ endpoint: `shell:${accountId}`, keys: { p256dh: "shell", auth: "shell" } }),
+        });
+        const data = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
+        if (!response.ok || !data.ok) {
+            return { ok: false, error: data.error || `订阅注册失败（HTTP ${response.status}）。` };
+        }
+        return { ok: true };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : "订阅注册请求失败。" };
     }
 }
 

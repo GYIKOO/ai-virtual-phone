@@ -6,12 +6,16 @@ import { ArrowRight } from "lucide-react";
 import { AccountGate } from "@/components/auth/account-gate";
 import { CloudBackupScheduler } from "@/components/cloud-backup-scheduler";
 import { RealityBridgeScheduler } from "@/components/reality-bridge-scheduler";
+import { WidgetScheduler } from "@/components/widget/widget-scheduler";
+import { CheckInScheduler } from "@/components/screenshot/checkin-scheduler";
 import { MediaMaintenanceScheduler } from "@/components/media-maintenance-scheduler";
+import { ShellPushRegistrar } from "@/components/shell-push-registrar";
 import { DesktopShell } from "./desktop-shell";
 import { OfflinePushRevampAnnouncement } from "./offline-push-revamp-announcement";
 import { SplashAnimation } from "./splash-animation";
 import { MusicProvider } from "@/lib/music-context";
 import { hydrateKvDb, isKvHydrated } from "@/lib/kv-db";
+import { installNativeBridgePolicySync, syncNativeBridgePolicy } from "@/lib/shell-bridge-security";
 import { getThemeAssetMap, readThemeProfile } from "@/lib/theme-storage";
 import { resolveActiveIconSkins, type ThemeProfile } from "@/lib/theme-types";
 import { hasPendingMcpOAuthCallback } from "@/lib/tool-executor";
@@ -233,6 +237,8 @@ export function MainApp() {
   const [kvHydrateFailed, setKvHydrateFailed] = useState(false);
   const [initAttempt, setInitAttempt] = useState(0);
 
+  useEffect(() => installNativeBridgePolicySync(), []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -250,6 +256,7 @@ export function MainApp() {
         return;
       }
       setKvHydrateFailed(false);
+      syncNativeBridgePolicy();
 
       if (process.env.NODE_ENV === "development" && process.env.NEXT_PUBLIC_LOCAL_TEST_FIXTURES === "true") {
         try {
@@ -329,7 +336,13 @@ export function MainApp() {
             <OfflinePushRevampAnnouncement />
             <CloudBackupScheduler />
             <RealityBridgeScheduler />
+            <WidgetScheduler />
+            {/* 查岗轮询 + 主动截屏接收端。必须挂在桌面壳这种「一直在跑」的地方：
+                角色查岗时用户多半正在别的 App 里，设置页根本没开着。 */}
+            <CheckInScheduler />
             <MediaMaintenanceScheduler />
+            {/* 壳推送订阅的兜底注册：壳原生那次失败是静默的，这里可验证地补一次 */}
+            <ShellPushRegistrar />
           </MusicProvider>
         </main>
       )}

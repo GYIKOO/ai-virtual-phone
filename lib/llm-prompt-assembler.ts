@@ -17,6 +17,7 @@ import { formatCharacterRelationsForPrompt } from "./character-world-storage";
 import { buildCharacterTimeContext, buildGroupTimeContext, type CharacterTimeContext } from "./character-time";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
 import { buildGroupAdminBracketText } from "./group-admin";
+import { buildRecentTimeContext } from "./recent-time-context";
 
 export type LLMMessageRole = "system" | "user" | "assistant" | "tool";
 export type LLMToolCallPayload = { id: string; name: string; args: Record<string, unknown>; thoughtSignature?: string };
@@ -298,6 +299,7 @@ function resolveTimeAware(value?: boolean): boolean {
 }
 
 function applyTimeContextToMacroEngine(engine: MacroEngine, timeContext: CharacterTimeContext): void {
+    engine.referenceTime = timeContext.referenceTime;
     engine.timeContext = timeContext.timeContext;
     engine.systemTimeZone = timeContext.systemTimeZone;
     engine.characterTime = timeContext.characterTime;
@@ -895,6 +897,15 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
         || (historyMarkerPrompt ? isPromptEnabled(historyMarkerPrompt, preset.prompt_order) : false);
     const useChronologicalShortTerm = Boolean(input.unifiedRecentItems && input.unifiedRecentItems.length > 0);
 
+    if (historyInjectionEnabled && timeAware) {
+        const records = [
+            ...history.filter(m => !m.isRetracted && (m.role === "user" || m.role === "assistant")).map(m => ({ source: m.role === "user" ? "当前会话·用户" : "当前会话·角色", timestamp: m.createdAt })),
+            ...(input.unifiedRecentItems ?? []).filter(item => item.kind === "event").map(item => ({ source: item.sourceTag, timestamp: item.timestamp })),
+        ];
+        const text = buildRecentTimeContext(records, promptTimeContext.referenceTime ?? Date.now(), promptTimeContext.characterTimeZone || promptTimeContext.systemTimeZone);
+        if (text) blocks.push({ text, role: "system", depth: 0, order: 998, marker: "recent-time-context" });
+    }
+
     if (!historyInjectionEnabled) {
         // 历史注入被关闭：不输出 <shortTermMemory>、近期动态与聊天记录
     } else if (useChronologicalShortTerm) {
@@ -1084,11 +1095,21 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                !finalPayload[finalPayload.length - 1].toolCalls?.length &&
                finalPayload[finalPayload.length - 1].role !== "tool");
 
-        if (b.imageUrl) {
+        // 防御性校验：只放行真正合法的图片地址。
+        //
+        // 为什么必须有它：用户清理媒体库（或换设备导档）之后，历史里的图片消息会留下
+        // 一个读不出来的引用——media-store://… 指向的 blob 已经不在了。把它原样塞进请求，
+        // 会让**整个请求**被 API 拒绝：
+        //   API Error 400: Unsupported image_url format
+        // 表现是「整个会话突然发不出消息」，而用户完全想不到跟自己删图有关（实测反馈）。
+        // 宁可这一轮少送一张图，也不能让会话哑火。
+        const imageUrlForApi = typeof b.imageUrl === "string" ? b.imageUrl.trim() : "";
+        const usableImageUrl = /^data:image\//i.test(imageUrlForApi) || /^https?:\/\//i.test(imageUrlForApi);
+        if (usableImageUrl) {
             // Vision message: build multi-part content with image (never merged)
             const parts: LLMContentPart[] = [];
             if (processedText) parts.push({ type: "text", text: processedText });
-            parts.push({ type: "image_url", image_url: { url: b.imageUrl, detail: "low" } });
+            parts.push({ type: "image_url", image_url: { url: imageUrlForApi, detail: "low" } });
             finalPayload.push({
                 role: b.role,
                 content: parts,
@@ -2095,6 +2116,15 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     const historyInjectionEnabled = !preset
         || (groupHistoryMarkerPrompt ? isPromptEnabled(groupHistoryMarkerPrompt, preset.prompt_order) : false);
 
+    if (historyInjectionEnabled && timeAware) {
+        const records = [
+            ...history.filter(m => !m.isRetracted && (m.role === "user" || m.role === "assistant")).map(m => ({ source: m.role === "user" ? "当前会话·用户" : "当前会话·角色", timestamp: m.createdAt })),
+            ...(unifiedRecentItems ?? []).filter(item => item.kind === "event").map(item => ({ source: item.sourceTag, timestamp: item.timestamp })),
+        ];
+        const text = buildRecentTimeContext(records, groupTimeContext.referenceTime ?? Date.now(), groupTimeContext.systemTimeZone);
+        if (text) blocks.push({ text, role: "system", depth: 0, order: 998, marker: "recent-time-context" });
+    }
+
     // 4. Short-term memory / chat history
     if (!historyInjectionEnabled) {
         // 历史注入被关闭：不输出 <shortTermMemory>、近期动态与聊天记录
@@ -2246,11 +2276,21 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
             !finalPayload[finalPayload.length - 1].toolCalls?.length &&
             finalPayload[finalPayload.length - 1].role !== "tool";
 
-        if (b.imageUrl) {
+        // 防御性校验：只放行真正合法的图片地址。
+        //
+        // 为什么必须有它：用户清理媒体库（或换设备导档）之后，历史里的图片消息会留下
+        // 一个读不出来的引用——media-store://… 指向的 blob 已经不在了。把它原样塞进请求，
+        // 会让**整个请求**被 API 拒绝：
+        //   API Error 400: Unsupported image_url format
+        // 表现是「整个会话突然发不出消息」，而用户完全想不到跟自己删图有关（实测反馈）。
+        // 宁可这一轮少送一张图，也不能让会话哑火。
+        const imageUrlForApi = typeof b.imageUrl === "string" ? b.imageUrl.trim() : "";
+        const usableImageUrl = /^data:image\//i.test(imageUrlForApi) || /^https?:\/\//i.test(imageUrlForApi);
+        if (usableImageUrl) {
             // Vision message: build multi-part content with image (never merged)
             const parts: LLMContentPart[] = [];
             if (processedText) parts.push({ type: "text", text: processedText });
-            parts.push({ type: "image_url", image_url: { url: b.imageUrl, detail: "low" } });
+            parts.push({ type: "image_url", image_url: { url: imageUrlForApi, detail: "low" } });
             finalPayload.push({
                 role: b.role,
                 content: parts,

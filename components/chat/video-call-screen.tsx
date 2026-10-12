@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues, resolveChatUserAvatar } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, updateChatMessage, deleteChatMessage, getLatestCharacterStateValues, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
@@ -9,6 +9,8 @@ import { parseAIResponse } from "@/lib/rich-message-parser";
 import { generateChatCompletion, flattenCompletionResult } from "@/lib/chat-engine";
 import { resolveUserIdentity } from "@/lib/settings-storage";
 import { cancelFollowUp } from "@/lib/follow-up-service";
+import { persistCallAudio, releaseCallAudioRef } from "@/lib/call-audio-storage";
+import { suspendBailoutsForCall } from "@/lib/push-bailout-client";
 import { createSTTSession, type STTSession } from "@/lib/stt-service";
 import { resolveVoiceConfig, synthesizeSpeech, playAudioBlob, playAudioBlobViaMediaElement, setCallAudioSessionActive } from "@/lib/tts-service";
 import { isCallRecordingSupported, resolveCloudSttConfig } from "@/lib/stt-cloud";
@@ -23,6 +25,13 @@ import { isAndroidBrowser, isIOSDevice } from "./voice-input-platform";
 import { CallVolumeControl } from "./call-volume-control";
 import { startIncomingCallVibration } from "@/lib/call-vibration";
 import { useCallScreenSounds } from "@/lib/chat-sound";
+import { CallMiniWindow } from "./call-mini-window";
+import { useShellCallOverlay } from "./use-shell-call-overlay";
+import { CallAutoChatControl } from "./call-auto-chat-control";
+import { useCallAutoChat } from "./use-call-auto-chat";
+import { useCallReplyQueue } from "./use-call-reply-queue";
+import { CallSubtitleItem, type CallSubtitleAction } from "./call-subtitle-item";
+import { stopShellCallOverlay } from "@/lib/shell-call-overlay";
 
 // ── Types ───────────────────────────────────────────
 
@@ -38,6 +47,10 @@ type SubtitleEntry = {
     id: string;
     role: "user" | "assistant";
     text: string;
+    /** 这条字幕对应的聊天消息 id。编辑 / 删除 / 重新生成都要落到真实记录上 */
+    messageIds?: string[];
+    /** 实际送去合成语音的文本；重听时用它重新合成 */
+    speechText?: string;
 };
 
 type VideoCallScreenProps = {
@@ -46,9 +59,9 @@ type VideoCallScreenProps = {
     onEnd: () => void;
     onConnect?: () => void;
     initiator?: "user" | "character";
-    /** 通话是否处于缩小的悬浮窗状态：暂停麦克风监听/计时/语音播放，仅显示背景+名字 */
+    /** 通话是否处于缩小的悬浮窗状态：通话继续（识别/播放/计时不停），界面缩为小窗 */
     minimized?: boolean;
-    /** 点击左上角返回键：请求缩小为悬浮窗（通话逻辑冻结，不挂断） */
+    /** 点击左上角返回键：请求缩小为悬浮窗（通话继续，不挂断） */
     onMinimize?: () => void;
     /** 点击悬浮窗：请求恢复为全屏通话界面 */
     onRestore?: () => void;
@@ -91,6 +104,20 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const [cameraError, setCameraError] = useState<string | null>(null);
     const [pipSwapped, setPipSwapped] = useState(false);
     const [showSttWarning, setShowSttWarning] = useState(false);
+    // 重听缓存：一句合成过就不再重复调 TTS（既慢又费额度）。
+    // 与语音通话屏同一套：容量上限，编辑/删除/重生成时作废对应条目。
+    const audioCacheRef = useRef<Map<string, Blob>>(new Map());
+    const [replayingId, setReplayingId] = useState<string | null>(null);
+    const cacheAudio = useCallback((id: string, blob: Blob) => {
+        const cache = audioCacheRef.current;
+        cache.set(id, blob);
+        const max = 12;
+        while (cache.size > max) {
+            const oldest = cache.keys().next().value;
+            if (oldest === undefined) break;
+            cache.delete(oldest);
+        }
+    }, []);
 
     const sttRef = useRef<STTSession | null>(null);
     const audioAbortRef = useRef<(() => void) | null>(null);
@@ -107,20 +134,28 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     const cameraEnabledRef = useRef<boolean>(false);
     const videoElRef = useRef<HTMLVideoElement | null>(null);
     const isSpeakerMutedRef = useRef<boolean>(false);
+    // 时长的 ref 快照：同步给原生浮窗时读，避免把每秒变化的 callDuration 塞进 effect 依赖
+    const callDurationRef = useRef(0);
+    // 自动搭话的通知口：runConversationTurn 定义在 useCallAutoChat 之前，
+    // 用 ref 转发避开循环依赖（hook 在下面登记，不参与渲染）
+    const autoChatNotifyRef = useRef<{ userSpoke: () => void; assistantSpoke: (produced: boolean) => void } | null>(null);
     const _initUi = resolveUserIdentity(session.contactId, "chat");
     const userNameRef = useRef<string>(_initUi?.name || "你");
     const userAvatarRef = useRef<string | null>(resolveChatUserAvatar(session, _initUi?.avatarUrl) || null);
 
     useEffect(() => { stateRef.current = callState; }, [callState]);
     useEffect(() => { minimizedRef.current = minimized; }, [minimized]);
+    useEffect(() => { callDurationRef.current = callDuration; }, [callDuration]);
 
-    // 缩小为悬浮窗：冻结通话——停止监听、打断在播放的语音（摄像头继续保留，方便恢复时不用重新申请权限）
+    // 缩小为悬浮窗：通话继续，不再「冻结」。
+    //
+    // 与 voice-call-screen 同一处修正：旧实现把缩小当成挂起——中止识别、打断正在
+    // 播放的语音，于是悬浮窗成了空壳，角色正说的那句被硬切、之后也没声音。
+    // 真机上通话缩成小窗是继续通话的。摄像头照旧保留，恢复时不用重新申请权限。
     useEffect(() => {
         if (!minimized) return;
-        if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+        // 只清掉界面上的临时字幕；通话本身（播放 / 识别 / 计时）保持运行。
         setInterimText("");
-        if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
     }, [minimized]);
 
     // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
@@ -290,11 +325,12 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         if (callState === "CONNECTING" || callState === "ENDED") return;
         if (!callStartRef.current) callStartRef.current = Date.now();
 
-        // 缩小为悬浮窗：冻结计时显示，不再推进
-        if (minimized) {
-            if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-            if (pausedAtRef.current === null) pausedAtRef.current = Date.now();
-            return;
+        // 悬浮窗不再冻结计时：通话在后台继续，时长就该继续走。
+        // pausedAtRef 的补偿保留着——若某次会话在旧版逻辑下进入过冻结态，
+        // 恢复时仍能把那段时长补回起点，不会出现时长跳变。
+        if (pausedAtRef.current !== null) {
+            callStartRef.current += Date.now() - pausedAtRef.current;
+            pausedAtRef.current = null;
         }
         // 从悬浮窗恢复：把冻结期间流逝的时间补回起点，避免时长跳变
         if (pausedAtRef.current !== null) {
@@ -313,6 +349,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     useEffect(() => {
         cancelFollowUp(session.id);
+        // 通话期间不打扰：撤掉已挂在服务端的离线预约（详见 voice-call-screen）
+        void suspendBailoutsForCall(session.id);
 
         const ui = resolveUserIdentity(session.contactId, "chat");
         userNameRef.current = ui?.name || "你";
@@ -375,7 +413,12 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     // ── AI response processing ──
 
-    const processAIResponse = useCallback((aiResponseText: string): { cleanParts: string[]; stateValues: StateValue[] } => {
+    const processAIResponse = useCallback((aiResponseText: string): { cleanParts: string[]; stateValues: StateValue[]; messageIds: string[]; speechMessageIds: string[] } => {
+        // 本回落进聊天记录的消息 id：字幕带着它们，编辑 / 删除 / 重新生成
+        // 才能定位到真实记录——只改屏幕会被下次重渲染覆盖。
+        const createdMessageIds: string[] = [];
+        // 本轮真正「被朗读」的消息 id：原音留档只挂在这些消息上（贴纸红包这类没台词的不挂）。
+        const speechMessageIds: string[] = [];
         const previousState = getLatestCharacterStateValues(session.contactId);
 
         const { parts, stateValues, freshStateValues, statusPanel, innerMonologue } = parseAIResponse(aiResponseText, previousState);
@@ -397,14 +440,18 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 statusRegionMode,
                 innerMonologue, stateValues: stateValues.length > 0 ? stateValues : undefined,
                 freshStateValues,
+                origin: "call",
             });
             messagesRef.current = [...messagesRef.current, aiMsg];
+            createdMessageIds.push(aiMsg.id);
         } else {
             const newMsgs = chatParts.map((part, idx) =>
                 pushChatMessage({
                     sessionId: session.id, role: "assistant", content: part.content,
                     mediaType: part.mediaType,
                     mediaData: part.mediaData,
+                    // 标记来源为通话：折叠只收这类消息
+                    origin: "call",
                     statusPanel: idx === 0 && statusPanel ? statusPanel : undefined,
                     statusRegionMode: idx === 0 && statusPanel ? statusRegionMode : undefined,
                     innerMonologue: idx === 0 && innerMonologue ? innerMonologue : undefined,
@@ -413,22 +460,34 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 })
             );
             messagesRef.current = [...messagesRef.current, ...newMsgs];
+            createdMessageIds.push(...newMsgs.map(m => m.id));
+            chatParts.forEach((part, idx) => {
+                if (!part.mediaType && part.content.trim() && newMsgs[idx]) {
+                    speechMessageIds.push(newMsgs[idx].id);
+                }
+            });
         }
+        window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
 
         const cleanParts = chatParts
             .filter(p => !p.mediaType && p.content.trim())
             .map(p => p.content);
 
-        return { cleanParts, stateValues };
+        return { cleanParts, stateValues, messageIds: createdMessageIds, speechMessageIds };
     }, [session.id, session.contactId]);
 
     // ── Full conversation turn ──────────────────────
 
     const runConversationTurn = useCallback(async (userText?: string) => {
         if (userText) {
-            const userMsg = pushChatMessage({ sessionId: session.id, role: "user", content: userText });
+            // 用户开口：自动搭话重新计数（上限按「你开口后」重新算）
+            autoChatNotifyRef.current?.userSpoke();
+            const userMsg = pushChatMessage({ sessionId: session.id, role: "user", content: userText, origin: "call" });
             messagesRef.current = [...messagesRef.current, userMsg];
-            setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText }]);
+            // 通知聊天室刷新（通话屏在聊天室之外，不广播就要等挂断才同步）
+            window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
+            // 带上 messageIds：长按菜单的编辑 / 删除要落到真实记录上
+            setSubtitles(prev => [...prev, { id: userMsg.id, role: "user", text: userText, messageIds: [userMsg.id] }]);
         }
         setCallState("PROCESSING");
         setInterimText("");
@@ -441,20 +500,25 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
             }));
             if (stateRef.current === "ENDED") return;
 
-            const { cleanParts } = processAIResponse(aiResponseText);
+            const { cleanParts, messageIds, speechMessageIds } = processAIResponse(aiResponseText);
             const displayText = cleanParts.join("\n");
             const speechText = stripBilingualForSpeech(displayText);
 
-            if (!displayText) { setCallState("IDLE"); return; }
-
-            setSubtitles(prev => [...prev, { id: `ai-${Date.now()}`, role: "assistant", text: displayText }]);
-
-            // 缩小为悬浮窗期间收到的回复：只静默记录文字，不播放语音
-            if (minimizedRef.current) {
+            if (!displayText) {
+                // 这轮角色没说出内容：通知自动搭话下次等更久，避免空转连发
+                autoChatNotifyRef.current?.assistantSpoke(false);
                 setCallState("IDLE");
                 return;
             }
 
+            // 带上 messageIds 与实际朗读文本：前者让长按菜单能改到真实记录，
+            // 后者让「重听」可以重新合成（不必从渲染后的富文本里再猜一遍）。
+            const subtitleId = `ai-${Date.now()}`;
+            setSubtitles(prev => [...prev, { id: subtitleId, role: "assistant", text: displayText, messageIds, speechText }]);
+
+            // 缩成悬浮窗也照常播语音：用户要的是「通话继续」，
+            // 不是「缩小之后角色变成哑巴」。播放不打断、识别与计时也照常，
+            // 与语音通话屏的处理保持一致。
             setCallState("AI_SPEAKING");
 
             const voiceConfig = resolveVoiceConfig(session.contactId);
@@ -463,6 +527,23 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                     const audioBlob = await synthesizeSpeech(speechText, voiceConfig);
                     if (stateRef.current === "ENDED") return;
                     if (audioBlob && !isSpeakerMutedRef.current) {
+                        // 存一份给「重听」用：不然每次重听都要重新调一次 TTS API
+                        cacheAudio(subtitleId, audioBlob);
+                        // 落库留档：与语音通话屏同一套处理，音频进媒体库、引用写进消息，
+                        // 「通话统计」才能复听原音（宿主代播支持 media-store:// 引用）。
+                        void persistCallAudio(audioBlob, {
+                            sessionId: session.id,
+                            characterId: session.contactId,
+                        }).then(ref => {
+                            if (!ref) return;
+                            const targetId = speechMessageIds[0];
+                            if (!targetId) return;
+                            const target = loadChatMessages(session.id).find(item => item.id === targetId);
+                            if (!target) return;
+                            updateChatMessage(targetId, {
+                                mediaData: { ...(target.mediaData || {}), callAudioRef: ref },
+                            });
+                        });
                         const { promise, abort } = playCallAudio(audioBlob);
                         audioAbortRef.current = abort;
                         await promise;
@@ -471,10 +552,15 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 } catch (e) { console.warn("[VideoCall] TTS failed:", e); }
             }
 
-            if (stateRef.current !== "ENDED") setCallState("IDLE");
+            if (stateRef.current !== "ENDED") {
+                // 说完一轮：安排下一次自动搭话
+                autoChatNotifyRef.current?.assistantSpoke(true);
+                setCallState("IDLE");
+            }
         } catch (error: any) {
             if (stateRef.current !== "ENDED") {
                 setSubtitles(prev => [...prev, { id: `err-${Date.now()}`, role: "assistant", text: `⚠️ ${error?.message || "发送失败"}` }]);
+                autoChatNotifyRef.current?.assistantSpoke(false);
                 setCallState("IDLE");
             }
         }
@@ -600,6 +686,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     // ── Hangup ──────────────────────────────────────
 
     const handleHangup = useCallback(() => {
+        // 挂断时收掉安卓壳的原生浮窗
+        stopShellCallOverlay();
         setCallState("ENDED");
         if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
         if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
@@ -614,6 +702,153 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
         messagesRef.current = [...messagesRef.current, endMsg];
         setTimeout(() => onEnd(), 1500);
     }, [session.id, callDuration, onEnd, stopCameraStream]);
+
+    // ── 字幕操作：重听 / 编辑 / 删除 / 重新生成 ──
+    //
+    // 四项都落到真实聊天记录上（字幕带着 messageIds），不是只改屏幕上那行字：
+    // 只改屏幕会被下次重渲染覆盖，只改记录则通话页与聊天页对不上。
+
+    /** 重听一句。优先放缓存，没有就现场合成。 */
+    const handleReplaySubtitle = useCallback(async (sub: SubtitleEntry) => {
+        const text = (sub.speechText || sub.text).trim();
+        if (!text) return;
+        if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
+        const cached = audioCacheRef.current.get(sub.id);
+        const voiceConfig = cached ? null : resolveVoiceConfig(session.contactId);
+        if (!cached && !voiceConfig) return;
+        setReplayingId(sub.id);
+        try {
+            let blob: Blob | null = cached ?? null;
+            if (!blob && voiceConfig) {
+                blob = await synthesizeSpeech(text, voiceConfig);
+                if (blob) cacheAudio(sub.id, blob);
+            }
+            if (!blob) return;
+            const { promise, abort } = playCallAudio(blob);
+            audioAbortRef.current = abort;
+            await promise;
+            audioAbortRef.current = null;
+        } catch (e) {
+            console.warn("[VideoCall] replay failed:", e);
+        } finally {
+            setReplayingId((current) => (current === sub.id ? null : current));
+        }
+    }, [session.contactId, playCallAudio, cacheAudio]);
+
+    /**
+     * 清掉若干消息上的原音留档（编辑 / 删除 / 重新生成后，音频与文字已经对不上）。
+     * 与语音通话屏同一套处理。
+     */
+    const releaseAudioRefs = useCallback((messageIds: string[] | undefined) => {
+        for (const id of messageIds ?? []) {
+            const msg = messagesRef.current.find(item => item.id === id);
+            const ref = msg?.mediaData?.callAudioRef;
+            if (!ref) continue;
+            void releaseCallAudioRef(ref);
+            updateChatMessage(id, { mediaData: { ...msg.mediaData, callAudioRef: undefined } });
+        }
+    }, []);
+
+    /** 编辑一句：改写真实记录 + 同步字幕文本，并作废这句的音频缓存。 */
+    const handleEditSubtitle = useCallback((sub: SubtitleEntry, next: string) => {
+        releaseAudioRefs(sub.messageIds);
+        const ids = sub.messageIds ?? [];
+        if (ids.length > 0) updateChatMessage(ids[0], { content: next });
+        setSubtitles(prev => prev.map(item => item.id === sub.id
+            ? { ...item, text: next, speechText: item.role === "assistant" ? next : undefined }
+            : item));
+        audioCacheRef.current.delete(sub.id);
+        messagesRef.current = loadChatMessages(session.id);
+        window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
+    }, [session.id]);
+
+    /** 删除一句：先删真实记录，再摘掉字幕。 */
+    const handleDeleteSubtitle = useCallback((sub: SubtitleEntry) => {
+        releaseAudioRefs(sub.messageIds);
+        for (const id of sub.messageIds ?? []) deleteChatMessage(id);
+        setSubtitles(prev => prev.filter(item => item.id !== sub.id));
+        audioCacheRef.current.delete(sub.id);
+        messagesRef.current = loadChatMessages(session.id);
+        window.dispatchEvent(new CustomEvent("chat-messages-updated", { detail: { sessionId: session.id } }));
+    }, [session.id]);
+
+    /**
+     * 重新生成一句：删掉这句对应的记录，再让角色基于当前上下文重说一轮。
+     * 只在空闲时可用，且只对最后一条角色字幕开放：它要删掉这句之后的记录，
+     * 对中间句开放会把用户后面说的话一起级联删掉。
+     */
+    const handleRegenerateSubtitle = useCallback((sub: SubtitleEntry) => {
+        if (stateRef.current !== "IDLE") return;
+        releaseAudioRefs(sub.messageIds);
+        for (const id of sub.messageIds ?? []) deleteChatMessage(id);
+        setSubtitles(prev => prev.filter(item => item.id !== sub.id));
+        audioCacheRef.current.delete(sub.id);
+        messagesRef.current = loadChatMessages(session.id);
+        void runConversationTurn();
+    }, [session.id, runConversationTurn]);
+
+    // ── 待发送队列 ──
+    //
+    // 与语音通话屏同一套：角色正在说话/思考时，从浮窗回复条发来的消息先排队，
+    // 回到 IDLE 自动补发，不再「忙就丢掉」。
+    //
+    // 此前本文件只 import 了 useCallReplyQueue 却从未调用，replyQueue 根本没定义：
+    // 只要渲染到引用它的分支（缩成悬浮小窗、挂安卓壳原生浮窗）就抛
+    // ReferenceError，整个通话页白屏（用户实报）。这里补上定义。
+    const replyQueue = useCallReplyQueue({
+        callState,
+        callStateRef: stateRef,
+        runTurn: (text) => { void runConversationTurn(text); },
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+    });
+
+    // 安卓壳原生浮窗：切到别的 App 时挂一个能浮在上层的小窗。
+    // 三个通话屏共用同一个 hook；放在 handleHangup 之后，避免 const 的暂时性死区。
+    useShellCallOverlay({
+        active: callState !== "ENDED" && callState !== "CONNECTING",
+        label: "视频通话",
+        name: character.name,
+        avatar: bgImageResolved || character.avatar || null,
+        getDuration: () => callDurationRef.current,
+        onReply: (text) => {
+            // 与界面里手动输入走同一条通路，并且一律进队列。
+            // 原先这里是 `if (IDLE) runConversationTurn(text)`——角色说话/思考时
+            // 从浮窗回复条发出的消息被静默丢弃（语音屏早已修掉，视频屏漏改了）。
+            // 走 replyQueue：忙时排队、空闲自动补发，用户不会「空发」。
+            replyQueue.submit(text);
+        },
+        onHangup: () => handleHangup(),
+        onRestore,
+        onTick: (seconds) => {
+            // 只前进、不后退：避免时长来回跳、挂断写进记录的时长跟着乱
+            if (seconds > callDurationRef.current) {
+                callStartRef.current = Date.now() - seconds * 1000;
+                callDurationRef.current = seconds;
+                setCallDuration(seconds);
+            }
+        },
+    });
+
+    // 自动搭话：我不出声时让角色主动找话说（与语音通话同一套配置与节拍）。
+    // 放在 runConversationTurn / handleHangup 之后，避免 const 的暂时性死区。
+    const autoChat = useCallAutoChat({
+        active: callState !== "CONNECTING" && callState !== "ENDED",
+        callStateRef: stateRef,
+        runTurn: () => { void runConversationTurn(); },
+        beforeTrigger: () => {
+            // 触发前先停掉在听的识别，免得把角色自己的声音录进去
+            if (sttRef.current) {
+                sttRef.current.abort();
+                sttRef.current = null;
+            }
+            setInterimText("");
+        },
+    });
+    // 把通知口交给 runConversationTurn 使用
+    autoChatNotifyRef.current = {
+        userSpoke: autoChat.notifyUserSpoke,
+        assistantSpoke: autoChat.notifyAssistantSpoke,
+    };
 
     // 通话音频会话 + 卸载兜底：不经挂断键退出时释放识别与在途播放，
     // 防止识别自动重启循环在后台无限自我重启、麦克风永不归还（详见 voice-call-screen）。
@@ -631,17 +866,16 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
 
     if (minimized) {
         return (
-            <button
-                type="button"
-                className="call-mini-window"
-                style={{ backgroundImage: `url(${bgImageResolved || character.avatar || ""})` }}
-                onClick={onRestore}
-                aria-label={`返回与${character.name}的视频通话`}
-                title="点击返回通话"
-            >
-                <span className="call-mini-window-overlay" />
-                <span className="call-mini-window-name">{character.name}</span>
-            </button>
+            <CallMiniWindow
+                imageUrl={bgImageResolved || character.avatar || null}
+                title={character.name}
+                meta={["视频通话", formatTime(callDuration)]}
+                ariaLabel={`返回与${character.name}的视频通话`}
+                onRestore={onRestore}
+                // 长按小窗就地回复，不必先跳回通话界面
+                onReply={(text) => replyQueue.submit(text) !== "rejected"}
+                pendingCount={replyQueue.pending}
+            />
         );
     }
 
@@ -662,6 +896,11 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                     </svg>
                 </button>
             )}
+            {/* 自动搭话：我不出声时让角色主动找话说（煲电话粥用） */}
+            {callState !== "CONNECTING" && callState !== "ENDED" && (
+                <CallAutoChatControl config={autoChat.config} onUpdate={autoChat.update} />
+            )}
+
             {/* Full-screen blurred background (character avatar) */}
             <div
                 className="videocall-bg-blur"
@@ -765,15 +1004,40 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 ref={subtitlesScrollRef}
                 className="call-subtitles-log"
             >
-                {subtitles.map((sub) => (
-                    <div
-                        key={sub.id}
-                        className="call-subtitle"
-                        data-role={sub.role}
-                    >
-                        <BilingualTextBlock text={sub.text} mode="plain" className="call-subtitle-bilingual" defaultExpanded={session.collapseBilingualTranslation !== false ? false : true} />
-                    </div>
-                ))}
+                {subtitles.map((sub, index) => {
+                    const isAssistant = sub.role === "assistant";
+                    // 「重新生成」只给最后一条角色字幕：它要删掉这句及之后的记录重说，
+                    // 对中间句开放会把用户后面说的话一起级联删掉。
+                    const isLastAssistant = isAssistant
+                        && !subtitles.slice(index + 1).some(item => item.role === "assistant");
+                    const actions: CallSubtitleAction[] = [];
+                    if (isLastAssistant) {
+                        actions.push({
+                            key: "regenerate",
+                            label: "重新生成这一句",
+                            onSelect: () => handleRegenerateSubtitle(sub),
+                        });
+                    }
+                    actions.push({
+                        key: "delete",
+                        label: "删除这一句",
+                        danger: true,
+                        onSelect: () => handleDeleteSubtitle(sub),
+                    });
+                    return (
+                        <CallSubtitleItem
+                            key={sub.id}
+                            role={sub.role}
+                            text={sub.text}
+                            bilingualClassName="call-subtitle-bilingual"
+                            defaultExpanded={session.collapseBilingualTranslation !== false ? false : true}
+                            onReplay={isAssistant ? () => { void handleReplaySubtitle(sub); } : undefined}
+                            replaying={replayingId === sub.id}
+                            actions={actions}
+                            onEditSubmit={(next) => handleEditSubtitle(sub, next)}
+                        />
+                    );
+                })}
                 {interimText && callState === "USER_SPEAKING" && (
                     <div
                         className="call-subtitle"

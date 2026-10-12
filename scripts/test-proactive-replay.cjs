@@ -40,6 +40,8 @@ const service = load('lib/memory-service.ts', {
   const parser = fs.readFileSync('lib/follow-up-service.ts', 'utf8');
   assert.ok(parser.indexOf('if (options?.historicalReplay && p.mediaType) continue;') < parser.indexOf('if (p.mediaType === "voice_call")'), 'replay media filtered before side effects');
   assert.ok(parser.includes('proactiveTiming: options?.proactiveTiming'));
+  const chatSource = fs.readFileSync('lib/chat-engine.ts', 'utf8');
+  assert.match(chatSource, /if \(!isOfflineMode && options\?\.historicalAt === undefined\) \{\s*const perceptionInjection = maybeBuildStatusInjection\(\);/, 'historical replay must not receive present-day device status');
   for (const file of ['lib/chat-engine.ts', 'lib/group-chat-engine.ts']) {
     const source = fs.readFileSync(file, 'utf8');
     assert.ok(source.includes('new Date(options?.historicalAt ?? Date.now())'));

@@ -128,6 +128,7 @@ export async function setPersonalPushCloudScheduled(enabled: boolean): Promise<v
 }
 
 export function pushJobsFetch(init: RequestInit): Promise<Response> {
+  // Personal cloud tasks and outbox must use the same project and owner identity.
   if (isPersonalPushCloudActive()) return personalPushFetch("jobs", init);
   return fetch("/api/push/jobs", { ...init, credentials: "include" });
 }

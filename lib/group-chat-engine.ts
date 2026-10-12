@@ -83,6 +83,7 @@ import type { DebugPromptSnapshot } from "./debug-store";
 import { throwIfAborted } from "./abort-utils";
 import { buildCharacterTimeContext, buildGroupTimeContext } from "./character-time";
 import { getPromptTimestampOptionsForTimeContext } from "./prompt-time";
+import { isAutomaticChatGeneration } from "./chat-generation-context";
 
 function stripGroupFinancialActionsForMetadataRepair(text: string): string {
     return stripStateAndInnerForPrompt(text)
@@ -281,6 +282,7 @@ function scheduleGroupMemorySummarization(
  * Shared prompt builder for group chat — used by both generate and preview.
  */
 export type GroupChatPromptBuildOptions = {
+    automatic?: boolean;
     historicalAt?: number;
     appTags?: string[];
     excludeOfflineSessionId?: string;
@@ -507,7 +509,7 @@ export async function buildGroupChatPromptMessages(
             content: "本次自定义 APP AI 任务只输出严格 JSON。不要输出 Markdown 代码块、解释文字或聊天富媒体指令。",
         });
     }
-    if (!options?.appTags?.includes("proactive")) appendEmptyGenerateGuardMessage(llmMessages, config, history);
+    if (!isAutomaticChatGeneration(options)) appendEmptyGenerateGuardMessage(llmMessages, config, history);
 
     return { llmMessages, config, preset, regexes, nameToId, memberNames, enabledTools, userName, appTags: activeAppTags };
 }
@@ -803,6 +805,7 @@ export async function generateGroupChatCompletion(
     options?: GroupChatPromptBuildOptions & { signal?: AbortSignal; skipMemorySummarization?: boolean },
 ): Promise<{ characterId: string; characterName: string; responseText: string }[]> {
     const { llmMessages, config, preset, regexes, nameToId, memberNames, enabledTools, userName, appTags } = await buildGroupChatPromptMessages(session, history, {
+        automatic: options?.automatic,
         appTags: options?.appTags,
         disableTools: options?.disableTools,
         promptProfile: options?.promptProfile,

@@ -5,6 +5,7 @@
 import type { PresetConfig } from "./settings-types";
 import { getCheckPhonePromptTags } from "./checkphone-config";
 import { DEFAULT_STORY_OUTPUT_PROMPT } from "./story-default-prompt";
+import { DEFAULT_MOMENTS_OPTIONAL_ACTIONS } from "./moments-default-prompt";
 
 export const BUILTIN_PRESET_ID = "builtin_default_v1";
 export const BUILTIN_PRESET_VERSION = 265; // 升版本会用出厂内容重写用户的内置预设副本（自定义会丢），非必要不升
@@ -918,38 +919,7 @@ export function createBuiltinPreset(): PresetConfig {
                 identifier: "moments_optional_actions",
                 name: "▸ 朋友圈可选动作",
                 role: "system",
-                content: [
-                    '<optional_actions>',
-                    '你也可以在回复中附带给{{user}}发私信，或是在群聊中发言，以下是具体规范：',
-                    '#发消息/私信:',
-                    '【格式】',
-                    '[消息]消息内容[/消息]',
-                    '',
-                    '【示例】（像真人发微信：拆成多条短消息，每条都用一对 [消息][/消息] 单独包裹）',
-                    '[消息]刚才看到你发的朋友圈了，你在杭州？[/消息]',
-                    '[消息]怎么不提前跟我说一声。[/消息]',
-                    '[消息]晚上想吃什么，我查查附近。[/消息]',
-                    '',
-                    '【要求】',
-                    '- 一条消息只说一件事；超过一两句就拆成多条，每条独立包裹，禁止把一大段话塞进同一个 [消息] 块',
-                    '- 只在有合理理由时才发，不要刻意',
-                    '',
-                    '',
-                    '#发送群聊消息:',
-                    '【格式】',
-                    '[群消息 "群聊名称"]消息内容[/群消息]',
-                    '',
-                    '【示例】',
-                    '[群消息 "好友群"]大家晚上有空吗？[/群消息]',
-                    '',
-                    '【要求】',
-                    '- 群聊名称必须是你所在的群聊名',
-                    '- 只在有合理理由时才发，不要刻意',
-                    '',
-                    '',
-                    '这是可选动作，只在情境自然时使用。',
-                    '</optional_actions>',
-                ].join('\n'),
+                content: DEFAULT_MOMENTS_OPTIONAL_ACTIONS,
                 injection_position: 0,
                 injection_depth: 0,
                 enabled: true,

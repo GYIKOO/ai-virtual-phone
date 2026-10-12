@@ -280,7 +280,7 @@ type JobPayload = {
     imageMarker?: string;
     style: "text" | "native";
   };
-  notify?: { title?: string; url?: string };
+  notify?: { title?: string; url?: string; avatar?: string };
   /** 角色绑定的微信 bot：force 用于真实微信快捷动作结果续跑，保证第二轮仍回到微信。 */
   weixin?: { botId?: string; force?: boolean };
   /** 离线快捷动作的结果续跑快照：客户端预挂，AI 调用需回传的动作时武装 shortcut_resume */
@@ -304,6 +304,65 @@ type ShortcutCommandRow = {
   error: string | null;
   expires_at: string;
 };
+
+/** Keep the provider's wire format and any shortcut continuation placeholders. */
+function appendIdleTurn(
+  request: JobPayload["request"], role: "assistant" | "context", text: string, beforeMarker?: string,
+): JobPayload["request"] {
+  const body = structuredClone(request.body);
+  const key = request.providerKind === "gemini" ? "contents" : "messages";
+  const turns = body[key];
+  if (!Array.isArray(turns)) throw new Error("Invalid idle request history");
+  const index = beforeMarker ? turns.findIndex(turn => JSON.stringify(turn).includes(beforeMarker)) : turns.length;
+  if (index < 0) throw new Error("Missing idle shortcut continuation marker");
+  const turn = request.providerKind === "gemini"
+    ? { role: role === "assistant" ? "model" : "user", parts: [{ text }] }
+    : request.providerKind === "anthropic"
+      ? { role: role === "assistant" ? "assistant" : "user", content: [{ type: "text", text }] }
+      : { role: role === "assistant" ? "assistant" : "system", content: text };
+  turns.splice(index, 0, turn);
+  return { ...request, body };
+}
+
+function idleGenerationContext(payload: JobPayload, now: number): string {
+  const meta = payload.merge ?? {};
+  const clock = meta.idleClock as { snapshotAt?: string; characterTimeZone?: string; userTimeZone?: string; lastMessageAt?: string } | undefined;
+  const format = (zone?: string) => {
+    try {
+      const timeZone = zone || "UTC";
+      return `${new Intl.DateTimeFormat("zh-CN", { timeZone, dateStyle: "full", timeStyle: "long", hour12: false }).format(new Date(now))}（${timeZone}）`;
+    } catch { return `${new Date(now).toISOString()}（UTC）`; }
+  };
+  const last = typeof meta.idleLastReplyAt === "string" ? meta.idleLastReplyAt : clock?.lastMessageAt;
+  const lastAt = last ? Date.parse(last) : NaN;
+  const minutes = Math.max(0, Math.floor((now - lastAt) / 60000));
+  return [
+    "【本轮自主联系】",
+    `本轮实际时间 UTC：${new Date(now).toISOString()}`,
+    `角色当地时间：${format(clock?.characterTimeZone)}`,
+    ...(clock?.userTimeZone ? [`用户当地时间：${format(clock.userTimeZone)}`] : []),
+    ...(clock?.snapshotAt ? [`背景快照采集时间 UTC：${clock.snapshotAt}`] : []),
+    ...(Number.isFinite(lastAt) ? [`最近已记录交流 UTC：${new Date(lastAt).toISOString()}；距本轮 ${Math.floor(minutes / 1440)}天${Math.floor(minutes % 1440 / 60)}小时${minutes % 60}分钟。`] : []),
+    "本轮是自主联系机会。历史交流与日程保留其原记录时刻，当前时刻以上述时间为准。",
+  ].join("\n");
+}
+
+function prepareIdleGeneration(payload: JobPayload, now: number): JobPayload {
+  const context = idleGenerationContext(payload, now);
+  return { ...payload, request: appendIdleTurn(payload.request, "context", context),
+    ...(payload.shortcutContinuation ? { shortcutContinuation: { ...payload.shortcutContinuation,
+      request: appendIdleTurn(payload.shortcutContinuation.request, "context", context, payload.shortcutContinuation.replyMarker),
+    } } : {}) };
+}
+
+function advanceIdlePayload(payload: JobPayload, reply: string, at: number, merge: JobPayload["merge"]): JobPayload {
+  const text = `(消息发送时间 UTC：${new Date(at).toISOString()})\n${reply}`;
+  return { ...payload, merge: { ...merge, idleLastReplyAt: new Date(at).toISOString() },
+    request: appendIdleTurn(payload.request, "assistant", text),
+    ...(payload.shortcutContinuation ? { shortcutContinuation: { ...payload.shortcutContinuation,
+      request: appendIdleTurn(payload.shortcutContinuation.request, "assistant", text, payload.shortcutContinuation.replyMarker),
+    } } : {}) };
+}
 
 // 【快捷动作：名称】与带参数的【快捷动作：名称({...})】都要认。参数允许换行
 // （模型爱把 JSON 展开写），所以参数段用 [\s\S] 而不是 [^\n]。
@@ -498,6 +557,24 @@ Deno.serve(async (req: Request) => {
     body: JSON.stringify({ status, result_note: note.slice(0, 300), updated_at: new Date().toISOString() }),
   }).catch(() => undefined);
 
+  /**
+   * 这一单是否已被客户端撤销。
+   *
+   * 用户关掉/删掉主动消息时，站点接口会把该规则相关的任务改成 cancelled（pending
+   * 的直接删除）。但本函数往往已经把它领取成 running 并在跑 LLM——那时它自己这份
+   * 快照不受影响。不查一次的话，规则删了它照样生成、照样弹通知，还会继续续排下一发，
+   * 用户看到的就是「根本没关上」。
+   * 查不到（网络抖动等）按「未被撤销」处理，宁可多发一次也不误杀正常消息。
+   */
+  const isCancelled = async (): Promise<boolean> => {
+    const response = await rest(
+      `push_jobs?id=eq.${encodeURIComponent(job.id)}&select=status&limit=1`,
+    ).catch(() => null);
+    if (!response || !response.ok) return false;
+    const rows = await response.json().catch(() => []) as { status?: string }[];
+    return rows[0]?.status === "cancelled";
+  };
+
   // 分段进度：卡死时 result_note 会停在最后完成的一步，精确定位死点
   const startedAt = Date.now();
   const progress = (note: string) => rest(`push_jobs?id=eq.${encodeURIComponent(job.id)}`, {
@@ -512,7 +589,7 @@ Deno.serve(async (req: Request) => {
       await finish("failed", "payload_key missing (open push settings once to bootstrap)");
       return;
     }
-    const payload = JSON.parse(await decryptPayload(job.payload, payloadKey)) as JobPayload;
+    let payload = JSON.parse(await decryptPayload(job.payload, payloadKey)) as JobPayload;
     let shortcutStoragePath = "";
 
     if (job.kind === "shortcut_resume" && payload.shortcut) {
@@ -582,6 +659,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // 个人云和站点订阅各自归属任务所有者；设备通道来自同一所有者的订阅。
     const subsResponse = await rest(`push_subscriptions?user_id=eq.${encodeURIComponent(job.user_id)}&select=endpoint,p256dh,auth`);
     const subs = subsResponse.ok ? await subsResponse.json() as SubscriptionRow[] : [];
     if (subs.length === 0 && payload.weixin?.force !== true) {
@@ -601,6 +679,18 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    // 动模型之前先确认这一单还没被用户撤销——生成一次要烧 token，
+    // 撤了就不该再花这个成本，也不该再弹一条用户已经不要的通知。
+    if (await isCancelled()) {
+      await finish("done", "cancelled before generate");
+      return;
+    }
+
+    // Only ambient repeat jobs use this clock; explicit appointments and reply
+    // insurance retain their existing request contracts.
+    if (job.kind === "timed_task" && job.trigger_key.startsWith("idle:")) {
+      payload = prepareIdleGeneration(payload, Date.now());
+    }
     await progress("llm request started");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 300_000);
@@ -1085,7 +1175,9 @@ Deno.serve(async (req: Request) => {
     // 安卓壳（FloatShell App）的合成订阅（endpoint 以 shell: 开头）不走 Web Push，
     // 改由 Supabase Realtime 广播送达壳内长连接。
     const webSubs = subs.filter(sub => !sub.endpoint.startsWith("shell:"));
-    const hasShellSub = webSubs.length < subs.length;
+    // `subs` is already scoped to this job's owner. Never broadcast to other accounts.
+    const shellTopics = shellPushChannels(subs, job.user_id).map(channelId => `shellpush:${channelId}`);
+    const hasShellSub = shellTopics.length > 0;
     const vapid = vapidRow
       ? { publicKey: vapidRow.vapid_public_key, privateKey: vapidRow.vapid_private_key, subject: siteOrigin || "mailto:push@ai-phone.local" }
       : null;
@@ -1103,7 +1195,11 @@ Deno.serve(async (req: Request) => {
 
     for (let index = 0; index < parts.length; index += 1) {
       if (index > 0) await sleep(500);
-      const partBody = parts[index].slice(0, 80);
+      // 单条截断从 80 放宽到 200：分条规则与聊天记录同口径（都按双空行拆），
+      // 一一对应才是「同步」；真正让两处看起来不一致的是截断——过去稍长的消息
+      // 在通知里只剩开头一句，聊天里却是完整的。正常聊天单条远不到 200 字，
+      // 几乎不会触发截断。
+      const partBody = parts[index].slice(0, 200);
       const message = JSON.stringify({
         type: deliverAsCall ? "incoming_call" : "chat_outbox",
         title: deliverAsCall ? `📞 ${title}` : title,
@@ -1134,15 +1230,21 @@ Deno.serve(async (req: Request) => {
             method: "POST",
             headers: restHeaders,
             body: JSON.stringify({
-              messages: shellPushChannels(subs, job.user_id).map(channelId => ({
-                topic: `shellpush:${channelId}`,
+              messages: shellTopics.map(topic => ({
+                topic,
                 event: "notify",
                 payload: {
                   title: deliverAsCall ? `📞 ${title}` : title,
                   body: partBody,
                   url: targetUrl,
-                  // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容
-                  ...(deliverAsCall ? { kind: "call", characterName: title, sessionId: callSessionId, callTs: Date.now() } : {}),
+                  // 老壳不认识这些字段 → 照常显示普通通知，自然向下兼容。
+                  // sessionId 让壳点击通知直达对应会话（普通消息原先没有，点开只回桌面）；
+                  // avatar 是角色头像（data URL 或直链），有就当通知大图标，没有壳用默认图。
+                  ...(callSessionId ? { sessionId: callSessionId } : {}),
+                  ...(typeof payload.notify?.avatar === "string" && payload.notify.avatar
+                    ? { avatar: payload.notify.avatar }
+                    : {}),
+                  ...(deliverAsCall ? { kind: "call", characterName: title, callTs: Date.now() } : {}),
                 },
               })),
             }),
@@ -1164,10 +1266,17 @@ Deno.serve(async (req: Request) => {
     await writeShortcutDeliveryDiagnostic();
 
     // 冷场重连的下一发：连发上限内自动排队（用户回来后客户端会撤销并按新周期重挂）
+    // 用户已撤销这条链时绝不再续排——否则规则删了，新单还会源源不断地冒出来。
+    if (await isCancelled()) {
+      await finish("done", `generated, pushed ${pushed}, cancelled before repeat`);
+      return;
+    }
     const idleRepeat = payload.merge?.idleRepeat as
       | { intervalMs?: number; remaining?: number; quietWin?: { startMin: number; endMin: number; tzOffsetMin: number } | null }
       | undefined;
-    if (idleRepeat && Number(idleRepeat.remaining) > 0 && Number(idleRepeat.intervalMs) > 0) {
+    // Shortcut result continuations inherit merge metadata, but must not fork a
+    // second repeat chain. Only the originating idle task owns repeat scheduling.
+    if (job.kind === "timed_task" && job.trigger_key.startsWith("idle:") && idleRepeat && Number(idleRepeat.remaining) > 0 && Number(idleRepeat.intervalMs) > 0) {
       const intervalMs = Number(idleRepeat.intervalMs);
       let nextFire = Date.now() + intervalMs;
       // 落在安静时段内则顺延到时段结束
@@ -1190,19 +1299,41 @@ Deno.serve(async (req: Request) => {
           ? { ...idleRepeat, remaining: Number(idleRepeat.remaining) - 1 }
           : undefined,
       };
-      const nextPayload = { ...payload, merge: nextMerge };
+      const nextPayload = advanceIdlePayload(payload, rawText, Date.now(), nextMerge);
+      const nextTriggerKey = `${job.trigger_key}+`;
       await rest("push_jobs", {
         method: "POST",
         body: JSON.stringify([{
           id: `job_${crypto.randomUUID()}`,
           user_id: job.user_id,
-          trigger_key: `${job.trigger_key}+`,
+          trigger_key: nextTriggerKey,
           kind: "timed_task",
           execute_at: new Date(nextFire + 15_000).toISOString(),
           status: "pending",
           payload: await encryptPayload(JSON.stringify(nextPayload), payloadKey),
         }]),
       }).catch(() => undefined);
+      // 同规则去重（服务端兜底）：冷场重连的下一发既可能由这里续排，也可能由
+      // 客户端重挂（切后台/回前台都会重新挂单）。两边并行时旧链不会消失——
+      // 曾出现同一条「长时间没消息」规则 2 分半内跑出 6 单（:0 / :0+ / :0++ /
+      // :1 / :1+ / :2），用户被连弹好几条通知。客户端虽有延迟清理，但依赖
+      // 页面还活着，App 被杀或长时间后台时根本不执行。
+      // 这里以规则为界清掉其它还挂着的 pending，只留刚挂上的这一单。
+      // 仅在本链还会继续（nextMerge.idleRepeat 仍在）时清理：若是最后一发，
+      // 服务端链到此结束，此时再删客户端的单会让这条规则彻底没有后续。
+      // trigger_key 形如 idle:<ruleId>:<n>，ruleId 内不含冒号，取最后一个冒号及之前即前缀。
+      if (nextMerge.idleRepeat && job.trigger_key.startsWith("idle:")) {
+        const rulePrefix = job.trigger_key.slice(0, job.trigger_key.lastIndexOf(":") + 1);
+        if (rulePrefix.length > "idle:".length) {
+          await rest(
+            `push_jobs?user_id=eq.${encodeURIComponent(job.user_id)}`
+            + `&trigger_key=like.${encodeURIComponent(`${rulePrefix}%`)}`
+            + `&trigger_key=neq.${encodeURIComponent(nextTriggerKey)}`
+            + "&status=eq.pending",
+            { method: "DELETE" },
+          ).catch(() => undefined);
+        }
+      }
     }
 
     await finish("done", `generated, pushed ${pushed}${shortcutActionNote ? `, ${shortcutActionNote}` : ""}${pushErrors.length ? `, errors: ${pushErrors.slice(0, 3).join(" | ")}` : ""}`);

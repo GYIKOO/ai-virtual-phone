@@ -142,6 +142,14 @@
 
 审查涉及：`lib/story-engine.ts`、`lib/story-parser.ts`、`lib/llm-prompt-assembler.ts`、`lib/llm-provider-adapter.ts`、`lib/chat-engine.ts`、`lib/settings-storage.ts`、`lib/builtin-preset.ts`、`components/settings/preset-manager.tsx`、`components/debug-prompt-panel.tsx` 与 `components/story/story-app-base.tsx`。
 
+## 后续：低成本后台生活系统（暂不实现）
+
+- [ ] 设计全局时间推进与世界级大事件，明确各世界、角色的知情范围。
+- [ ] 评估用户长时间离线（例如超过 24 小时）后一次性批量推演角色近况，而非持续逐角色调用模型。
+- [ ] 设置成本预算、批次上限、失败续传与去重；多次打开应用不重复推演同一时段。
+- [ ] 区分日程计划、推演候选和正式经历；明确跨应用共享与用户可修改的边界。
+- [ ] 本阶段仅在正常聊天／朋友圈生成时补足普通日常，实际发布后沿用原有记忆链路，不新增后台模型调用。
+
 ## 第一版总验收
 
 - [ ] 同一角色从聊天进入主线剧情，能承接已有经历。

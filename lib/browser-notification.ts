@@ -1,8 +1,12 @@
 // lib/browser-notification.ts
 // Browser Notification API wrapper for background alerts.
+//
+// 浏览器使用 Notification API，安卓壳使用原生桥。
+// 已交给桌面消息提醒事件处理的聊天通知在此跳过；朋友圈等其他通知仍走本入口。
 
 import { loadChatAppSettings } from "./chat-storage";
 import { getAndroidNative } from "./android-native";
+import { canSendShellNotification, sendShellNotification } from "./shell-notify";
 
 export function isNotificationPermissionGranted(): boolean {
     const native = getAndroidNative();
@@ -76,10 +80,16 @@ function constructNotification(title: string, payload: NotificationOptions): voi
  */
 export function sendBrowserNotification(
     title: string,
-    options?: { body?: string; icon?: string },
+    options?: { body?: string; icon?: string; chatNoticeHandled?: boolean },
 ): void {
+    // Chat notices are already routed by DesktopShell. Other apps still need delivery.
+    if (canSendShellNotification() && options?.chatNoticeHandled) return;
     if (!isNotificationEnabled()) return;
     if (!document.hidden) return;
+    if (canSendShellNotification()) {
+        sendShellNotification(title, options?.body || "", options?.icon);
+        return;
+    }
 
     const native = getAndroidNative();
     if (native) {

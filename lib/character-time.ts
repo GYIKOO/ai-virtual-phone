@@ -1,4 +1,5 @@
 export type CharacterTimeContext = {
+  referenceTime?: number;
   systemTime: string;
   systemWeekday: string;
   systemTimeZone: string;
@@ -121,6 +122,7 @@ export function buildCharacterTimeContext(timeZone?: string | null, now = new Da
 
   if (!normalizedTimeZone || !hasDifference) {
     return {
+      referenceTime: now.getTime(),
       systemTime,
       systemWeekday,
       systemTimeZone,
@@ -135,6 +137,7 @@ export function buildCharacterTimeContext(timeZone?: string | null, now = new Da
   const characterTime = formatZonedChineseDateTime(now, normalizedTimeZone);
   const characterWeekday = getZonedWeekday(now, normalizedTimeZone);
   return {
+    referenceTime: now.getTime(),
     systemTime,
     systemWeekday,
     systemTimeZone,
@@ -164,6 +167,7 @@ export function buildGroupTimeContext(members: GroupTimeMember[], now = new Date
 
   if (rows.length === 0) {
     return {
+      referenceTime: now.getTime(),
       systemTime,
       systemWeekday,
       systemTimeZone,
@@ -176,6 +180,7 @@ export function buildGroupTimeContext(members: GroupTimeMember[], now = new Date
   }
 
   return {
+    referenceTime: now.getTime(),
     systemTime,
     systemWeekday,
     systemTimeZone,
