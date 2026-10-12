@@ -305,6 +305,65 @@ type ShortcutCommandRow = {
   expires_at: string;
 };
 
+/** Keep the provider's wire format and any shortcut continuation placeholders. */
+function appendIdleTurn(
+  request: JobPayload["request"], role: "assistant" | "context", text: string, beforeMarker?: string,
+): JobPayload["request"] {
+  const body = structuredClone(request.body);
+  const key = request.providerKind === "gemini" ? "contents" : "messages";
+  const turns = body[key];
+  if (!Array.isArray(turns)) throw new Error("Invalid idle request history");
+  const index = beforeMarker ? turns.findIndex(turn => JSON.stringify(turn).includes(beforeMarker)) : turns.length;
+  if (index < 0) throw new Error("Missing idle shortcut continuation marker");
+  const turn = request.providerKind === "gemini"
+    ? { role: role === "assistant" ? "model" : "user", parts: [{ text }] }
+    : request.providerKind === "anthropic"
+      ? { role: role === "assistant" ? "assistant" : "user", content: [{ type: "text", text }] }
+      : { role: role === "assistant" ? "assistant" : "system", content: text };
+  turns.splice(index, 0, turn);
+  return { ...request, body };
+}
+
+function idleGenerationContext(payload: JobPayload, now: number): string {
+  const meta = payload.merge ?? {};
+  const clock = meta.idleClock as { snapshotAt?: string; characterTimeZone?: string; userTimeZone?: string; lastMessageAt?: string } | undefined;
+  const format = (zone?: string) => {
+    try {
+      const timeZone = zone || "UTC";
+      return `${new Intl.DateTimeFormat("zh-CN", { timeZone, dateStyle: "full", timeStyle: "long", hour12: false }).format(new Date(now))}（${timeZone}）`;
+    } catch { return `${new Date(now).toISOString()}（UTC）`; }
+  };
+  const last = typeof meta.idleLastReplyAt === "string" ? meta.idleLastReplyAt : clock?.lastMessageAt;
+  const lastAt = last ? Date.parse(last) : NaN;
+  const minutes = Math.max(0, Math.floor((now - lastAt) / 60000));
+  return [
+    "【本轮自主联系】",
+    `本轮实际时间 UTC：${new Date(now).toISOString()}`,
+    `角色当地时间：${format(clock?.characterTimeZone)}`,
+    ...(clock?.userTimeZone ? [`用户当地时间：${format(clock.userTimeZone)}`] : []),
+    ...(clock?.snapshotAt ? [`背景快照采集时间 UTC：${clock.snapshotAt}`] : []),
+    ...(Number.isFinite(lastAt) ? [`最近已记录交流 UTC：${new Date(lastAt).toISOString()}；距本轮 ${Math.floor(minutes / 1440)}天${Math.floor(minutes % 1440 / 60)}小时${minutes % 60}分钟。`] : []),
+    "本轮是自主联系机会。历史交流与日程保留其原记录时刻，当前时刻以上述时间为准。",
+  ].join("\n");
+}
+
+function prepareIdleGeneration(payload: JobPayload, now: number): JobPayload {
+  const context = idleGenerationContext(payload, now);
+  return { ...payload, request: appendIdleTurn(payload.request, "context", context),
+    ...(payload.shortcutContinuation ? { shortcutContinuation: { ...payload.shortcutContinuation,
+      request: appendIdleTurn(payload.shortcutContinuation.request, "context", context, payload.shortcutContinuation.replyMarker),
+    } } : {}) };
+}
+
+function advanceIdlePayload(payload: JobPayload, reply: string, at: number, merge: JobPayload["merge"]): JobPayload {
+  const text = `(消息发送时间 UTC：${new Date(at).toISOString()})\n${reply}`;
+  return { ...payload, merge: { ...merge, idleLastReplyAt: new Date(at).toISOString() },
+    request: appendIdleTurn(payload.request, "assistant", text),
+    ...(payload.shortcutContinuation ? { shortcutContinuation: { ...payload.shortcutContinuation,
+      request: appendIdleTurn(payload.shortcutContinuation.request, "assistant", text, payload.shortcutContinuation.replyMarker),
+    } } : {}) };
+}
+
 // 【快捷动作：名称】与带参数的【快捷动作：名称({...})】都要认。参数允许换行
 // （模型爱把 JSON 展开写），所以参数段用 [\s\S] 而不是 [^\n]。
 /** 识图关着时代替截图进上下文的说明：不留这句话，模型面对的是空白，
@@ -530,7 +589,7 @@ Deno.serve(async (req: Request) => {
       await finish("failed", "payload_key missing (open push settings once to bootstrap)");
       return;
     }
-    const payload = JSON.parse(await decryptPayload(job.payload, payloadKey)) as JobPayload;
+    let payload = JSON.parse(await decryptPayload(job.payload, payloadKey)) as JobPayload;
     let shortcutStoragePath = "";
 
     if (job.kind === "shortcut_resume" && payload.shortcut) {
@@ -627,6 +686,11 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    // Only ambient repeat jobs use this clock; explicit appointments and reply
+    // insurance retain their existing request contracts.
+    if (job.kind === "timed_task" && job.trigger_key.startsWith("idle:")) {
+      payload = prepareIdleGeneration(payload, Date.now());
+    }
     await progress("llm request started");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 300_000);
@@ -1210,7 +1274,9 @@ Deno.serve(async (req: Request) => {
     const idleRepeat = payload.merge?.idleRepeat as
       | { intervalMs?: number; remaining?: number; quietWin?: { startMin: number; endMin: number; tzOffsetMin: number } | null }
       | undefined;
-    if (idleRepeat && Number(idleRepeat.remaining) > 0 && Number(idleRepeat.intervalMs) > 0) {
+    // Shortcut result continuations inherit merge metadata, but must not fork a
+    // second repeat chain. Only the originating idle task owns repeat scheduling.
+    if (job.kind === "timed_task" && job.trigger_key.startsWith("idle:") && idleRepeat && Number(idleRepeat.remaining) > 0 && Number(idleRepeat.intervalMs) > 0) {
       const intervalMs = Number(idleRepeat.intervalMs);
       let nextFire = Date.now() + intervalMs;
       // 落在安静时段内则顺延到时段结束
@@ -1233,7 +1299,7 @@ Deno.serve(async (req: Request) => {
           ? { ...idleRepeat, remaining: Number(idleRepeat.remaining) - 1 }
           : undefined,
       };
-      const nextPayload = { ...payload, merge: nextMerge };
+      const nextPayload = advanceIdlePayload(payload, rawText, Date.now(), nextMerge);
       const nextTriggerKey = `${job.trigger_key}+`;
       await rest("push_jobs", {
         method: "POST",

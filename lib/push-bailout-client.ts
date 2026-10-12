@@ -548,6 +548,12 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
                 appTags: ["chat", "text", "idle_wake"],
                 armAt: new Date(fireAt).toISOString(),
                 idleReconnect: { ruleId: rule.id, firedAt: fireAt },
+                idleClock: {
+                    snapshotAt: new Date().toISOString(),
+                    characterTimeZone: character.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    lastMessageAt: [...history].reverse().find(message => message.role === "user" || message.role === "assistant")?.createdAt,
+                },
                 ...(remaining > 0 ? { idleRepeat: { intervalMs, remaining, quietWin: buildQuietWindowMeta() } } : {}),
             },
         });

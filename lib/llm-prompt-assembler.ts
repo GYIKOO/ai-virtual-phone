@@ -17,6 +17,7 @@ import { formatCharacterRelationsForPrompt } from "./character-world-storage";
 import { buildCharacterTimeContext, buildGroupTimeContext, type CharacterTimeContext } from "./character-time";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
 import { buildGroupAdminBracketText } from "./group-admin";
+import { buildRecentTimeContext } from "./recent-time-context";
 
 export type LLMMessageRole = "system" | "user" | "assistant" | "tool";
 export type LLMToolCallPayload = { id: string; name: string; args: Record<string, unknown>; thoughtSignature?: string };
@@ -298,6 +299,7 @@ function resolveTimeAware(value?: boolean): boolean {
 }
 
 function applyTimeContextToMacroEngine(engine: MacroEngine, timeContext: CharacterTimeContext): void {
+    engine.referenceTime = timeContext.referenceTime;
     engine.timeContext = timeContext.timeContext;
     engine.systemTimeZone = timeContext.systemTimeZone;
     engine.characterTime = timeContext.characterTime;
@@ -894,6 +896,15 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
     const historyInjectionEnabled = !preset
         || (historyMarkerPrompt ? isPromptEnabled(historyMarkerPrompt, preset.prompt_order) : false);
     const useChronologicalShortTerm = Boolean(input.unifiedRecentItems && input.unifiedRecentItems.length > 0);
+
+    if (historyInjectionEnabled && timeAware) {
+        const records = [
+            ...history.filter(m => !m.isRetracted && (m.role === "user" || m.role === "assistant")).map(m => ({ source: m.role === "user" ? "当前会话·用户" : "当前会话·角色", timestamp: m.createdAt })),
+            ...(input.unifiedRecentItems ?? []).filter(item => item.kind === "event").map(item => ({ source: item.sourceTag, timestamp: item.timestamp })),
+        ];
+        const text = buildRecentTimeContext(records, promptTimeContext.referenceTime ?? Date.now(), promptTimeContext.characterTimeZone || promptTimeContext.systemTimeZone);
+        if (text) blocks.push({ text, role: "system", depth: 0, order: 998, marker: "recent-time-context" });
+    }
 
     if (!historyInjectionEnabled) {
         // 历史注入被关闭：不输出 <shortTermMemory>、近期动态与聊天记录
@@ -2104,6 +2115,15 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     // 仅在完全未选择预设时保持注入兜底。
     const historyInjectionEnabled = !preset
         || (groupHistoryMarkerPrompt ? isPromptEnabled(groupHistoryMarkerPrompt, preset.prompt_order) : false);
+
+    if (historyInjectionEnabled && timeAware) {
+        const records = [
+            ...history.filter(m => !m.isRetracted && (m.role === "user" || m.role === "assistant")).map(m => ({ source: m.role === "user" ? "当前会话·用户" : "当前会话·角色", timestamp: m.createdAt })),
+            ...(unifiedRecentItems ?? []).filter(item => item.kind === "event").map(item => ({ source: item.sourceTag, timestamp: item.timestamp })),
+        ];
+        const text = buildRecentTimeContext(records, groupTimeContext.referenceTime ?? Date.now(), groupTimeContext.systemTimeZone);
+        if (text) blocks.push({ text, role: "system", depth: 0, order: 998, marker: "recent-time-context" });
+    }
 
     // 4. Short-term memory / chat history
     if (!historyInjectionEnabled) {

@@ -44,11 +44,12 @@ export type ProactiveState = {
     quietReleased?: Partial<Record<ProactiveSource, boolean>>;
 };
 const LEGACY_PROACTIVE_INSTRUCTION = "这是一次自主交流机会，不是用户发来的新消息。根据角色设定、已有关系、当前生活和对话情境，决定是否有想说的内容。关系不默认是恋爱或亲密关系；未收到回复本身不代表冷落或需要催促。可以分享、讨论、告知或延续有意义的话题，也可以保持沉默。群聊成员可以彼此交流，不必围绕用户或等待用户回复；本次只进行一小轮交流。";
-export const DEFAULT_PROACTIVE_INSTRUCTION = [
+const PREVIOUS_PROACTIVE_INSTRUCTION = [
     "延续角色此刻的生活。结合人设、已有经历与当前情境，想一想TA正在关注什么，是否有一件想与对方交流的事，以及现在是否适合开口。工作、兴趣、牵挂和身边的人事，都可以成为角色行动的来由。",
     "让已有的关系和共同经历决定交流的分寸、情绪与表达方式。角色有话想说时，就按自己的性格自然地联系；正在忙碌、专注于别的事情，或觉得对话已经告一段落时，也可以继续自己的生活。",
     "群聊是一段成员之间的共同生活：有话题的人发起交流，感兴趣的人接话，各自的立场与关系在交谈中自然体现。本次展开一小轮对话，留下后续发展的空间。",
 ].join("\n\n");
+export const DEFAULT_PROACTIVE_INSTRUCTION = PREVIOUS_PROACTIVE_INSTRUCTION + "\n\n依据实际经过的时间与已有日程，构思角色在未聊天期间自然发展的普通生活近况，再从此刻的所见所感决定想聊什么。日程表示计划，已发生的经历以记录为基础；涉及用户的行动与共同事件沿用已有记录。";
 export const DEFAULT_GROUP_FOLLOWUP_INSTRUCTION = "结合当前时间、群内最近的交流与成员各自的近况，让有话想说的成员自然开口。仍有兴致的话题可以接着聊，也可以谈起此刻关注的新事情；交流已经告一段落时，可以保持安静。";
 export function defaultProactiveConfig(): ProactiveConfig {
     return { version: 1, enabled: false, fixedEnabled: true, intervalMinutes: 480,
@@ -69,7 +70,7 @@ export function normalizeProactiveConfig(value?: Partial<ProactiveConfig> | null
         followUpTier: Math.round(finite(value?.followUpTier, 0, 0, 4)),
         groupFollowUpEnabled: value?.groupFollowUpEnabled === true,
         groupFollowUpInstruction: typeof value?.groupFollowUpInstruction === "string" ? value.groupFollowUpInstruction : d.groupFollowUpInstruction,
-        instruction: typeof value?.instruction === "string" && value.instruction !== LEGACY_PROACTIVE_INSTRUCTION ? value.instruction : d.instruction,
+        instruction: typeof value?.instruction === "string" && value.instruction !== LEGACY_PROACTIVE_INSTRUCTION && value.instruction !== PREVIOUS_PROACTIVE_INSTRUCTION ? value.instruction : d.instruction,
         assessment: value?.assessment };
 }
 export function intervalMs(config: ProactiveConfig, source: ProactiveSource): number {

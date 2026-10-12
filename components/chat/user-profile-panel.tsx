@@ -125,6 +125,7 @@ function ProfileSettingsSliderItem({
             </div>
             <input
                 type="range"
+                aria-label={label}
                 min={min}
                 max={max}
                 step={step}
@@ -1029,7 +1030,7 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                         icon={Clock}
                         color={BINDING_ACCENTS.voice}
                         label="最长发帖间隔"
-                        desc="自动发帖等待时间上限"
+                        desc="两次自动发帖机会之间的最长间隔"
                         value={config.postIntervalMaxHours}
                         valueLabel={`${config.postIntervalMaxHours}小时`}
                         min={1}
@@ -1166,6 +1167,14 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                 </div>
 
                 <div className="menu-group">
+                    <details className="menu-item" style={{ display: "block" }}>
+                        <summary className="menu-label">生活近况提示词（可修改）</summary>
+                        <p className="menu-desc">用于自动和手动发帖；留空则仅使用预设。</p>
+                        <textarea className="ui-textarea w-full mt-2" aria-label="朋友圈生活近况提示词" rows={5}
+                            value={config.lifePrompt} onChange={event => update({ lifePrompt: event.target.value })} />
+                    </details>
+                </div>
+                <div className="menu-group">
                     <div className="menu-item" onClick={() => setShowAutoPostList(!showAutoPostList)} style={{ cursor: "pointer" }}>
                         <ProfileSettingsIcon icon={Radio} color={CONTENT_APP_ACCENTS.moments} />
                         <div className="menu-label-group">
@@ -1173,7 +1182,7 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                             <span className="menu-desc">
                                 {disabledContactCount > 0
                                     ? `已关闭 ${disabledContactCount} 个角色的自动发帖`
-                                    : "所有好友角色都会按间隔自动发帖"}
+                                    : "各角色按间隔获得发帖机会，再按各自概率决定是否发布"}
                             </span>
                         </div>
                         <div className="menu-right">
@@ -1181,19 +1190,31 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                         </div>
                     </div>
                     {showAutoPostList && enriched.map(c => (
-                        <div key={c.characterId} className="menu-item" style={{ cursor: "default" }}>
-                            <div className="chat-contact-avatar" style={{ width: 32, height: 32 }}>
-                                {c.char.avatar ? <img src={c.char.avatar} alt="" /> : <ChatFallbackAvatar />}
+                        <div key={c.characterId}>
+                            <div className="menu-item" style={{ cursor: "default" }}>
+                                <div className="chat-contact-avatar" style={{ width: 32, height: 32 }}>
+                                    {c.char.avatar ? <img src={c.char.avatar} alt="" /> : <ChatFallbackAvatar />}
+                                </div>
+                                <div className="menu-label-group">
+                                    <span className="menu-label">{c.char.name}</span>
+                                </div>
+                                <div className="menu-right">
+                                    <Toggle
+                                        checked={!disabledAutoPostIds.has(c.characterId)}
+                                        onChange={checked => toggleAutoPost(c.characterId, checked)}
+                                    />
+                                </div>
                             </div>
-                            <div className="menu-label-group">
-                                <span className="menu-label">{c.char.name}</span>
-                            </div>
-                            <div className="menu-right">
-                                <Toggle
-                                    checked={!disabledAutoPostIds.has(c.characterId)}
-                                    onChange={checked => toggleAutoPost(c.characterId, checked)}
-                                />
-                            </div>
+                            {!disabledAutoPostIds.has(c.characterId) && <ProfileSettingsSliderItem
+                                icon={Radio}
+                                color={CONTENT_APP_ACCENTS.moments}
+                                label={`${c.char.name}的发帖概率`}
+                                desc="每次机会独立抽取；未抽中就等下一轮，不调用模型。手动发帖不受影响。"
+                                value={Math.round((config.autoPostProbabilityByCharacter[c.characterId] ?? 1) * 100)}
+                                valueLabel={`${Math.round((config.autoPostProbabilityByCharacter[c.characterId] ?? 1) * 100)}%`}
+                                min={0} max={100} step={5}
+                                onChange={value => update({ autoPostProbabilityByCharacter: { ...config.autoPostProbabilityByCharacter, [c.characterId]: value / 100 } })}
+                            />}
                         </div>
                     ))}
                     {showAutoPostList && enriched.length === 0 && (

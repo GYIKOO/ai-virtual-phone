@@ -58,6 +58,7 @@ export function findUserAvatarChangeIntent(
     history: ChatMessage[],
     sessionId: string,
     characterId?: string,
+    options?: { allowAnsweredTurn?: boolean },
 ): { image: ChatMessage; intentText: string } | null {
     const sessionMessages = history.filter(message => message.sessionId === sessionId);
     if (sessionMessages.length === 0) return null;
@@ -66,6 +67,9 @@ export function findUserAvatarChangeIntent(
     // 的尾部气泡，才能重新看到触发这次回复的用户输入。
     let endExclusive = sessionMessages.length;
     const trailing = sessionMessages[endExclusive - 1];
+    // Prompt construction needs a new user turn; post-save decision resolution
+    // deliberately retains the default lookback through the assistant's reply.
+    if (options?.allowAnsweredTurn === false && trailing?.role !== "user") return null;
     if (trailing?.role === "assistant") {
         const trailingBatchId = trailing.responseBatchId;
         const trailingRaw = trailing.rawResponseText;

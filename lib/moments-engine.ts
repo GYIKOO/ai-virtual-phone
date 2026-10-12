@@ -23,6 +23,7 @@ import {
     addPendingReaction,
     removePendingReaction,
     loadMomentsConfig,
+    getMomentPostProbability,
     updateMomentPost,
 } from "./moments-storage";
 import type { MomentPost, MomentComment, PendingReaction } from "./moments-types";
@@ -44,8 +45,7 @@ import { assemblePromptPayload, type LLMMessage, type AssemblerInput } from "./l
 import type { RegexConfig } from "./settings-types";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
-import { buildCalendarScheduleMarker } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
+import { buildNearbyCalendarScheduleForPrompt, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
 import { getCustomStickerNames, getCustomStickerExample } from "./custom-sticker-storage";
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { bgSetInterval } from "./bg-timer";
@@ -95,9 +95,10 @@ function staggerOverduePosts() {
     if (contacts.length === 0) return;
 
     const now = Date.now();
-    const allSchedules = loadAIMomentSchedule();
     // Ensure all contacts have a schedule
     for (const c of contacts) getOrCreateSchedule(c.characterId);
+
+    const allSchedules = loadAIMomentSchedule();
 
     const overdue = allSchedules.filter(s => s.nextPostAfter <= now);
     if (overdue.length > 1) {
@@ -114,11 +115,17 @@ function pollScheduledPosts() {
     const now = Date.now();
     const contacts = loadChatContacts();
     // 用户关掉自动发帖的角色：跳过调度（评论/点赞/手动立即发帖不受此开关影响）
-    const disabledIds = new Set(loadMomentsConfig().autoPostDisabledCharacterIds);
+    const config = loadMomentsConfig();
+    const disabledIds = new Set(config.autoPostDisabledCharacterIds);
     for (const contact of contacts) {
         if (disabledIds.has(contact.characterId)) continue;
         const schedule = getOrCreateSchedule(contact.characterId);
         if (schedule.nextPostAfter <= now) {
+            // Consume a missed opportunity once, not a new roll on every 5s poll.
+            if (Math.random() >= getMomentPostProbability(contact.characterId, config)) {
+                updateScheduleAfterPost(contact.characterId, false);
+                continue;
+            }
             isGenerating = true;
             triggerAIPost(contact.characterId)
                 .catch(err => console.error("[Moments] AI post error:", err))
@@ -259,7 +266,7 @@ async function resolveAssemblerInput(
     const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "moments");
 
     // Calendar schedule (NPC doesn't get character's schedule)
-    const scheduleSummary = isNPC ? undefined : buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date()));
+    const scheduleSummary = isNPC ? undefined : buildNearbyCalendarScheduleForPrompt("character", characterId);
 
     const input: AssemblerInput = {
         character,
@@ -273,6 +280,7 @@ async function resolveAssemblerInput(
         coreMemories,
         longTermMemories,
         scheduleSummary,
+        currentSchedule: isNPC ? undefined : getCurrentCalendarScheduleForPrompt("character", characterId),
         worldBookActivationContext: wbActivationContext,
         activateAllWorldBooks: false,
         chatBilingualInstruction,
@@ -307,7 +315,7 @@ async function triggerAIPost(characterId: string): Promise<void> {
         // Append trigger instruction
         llmMessages.push({
             role: "user",
-            content: "请发一条朋友圈。",
+            content: [loadMomentsConfig().lifePrompt, "请发一条朋友圈。"].filter(Boolean).join("\n\n"),
             _debugMeta: { marker: "moments_trigger" },
         });
 

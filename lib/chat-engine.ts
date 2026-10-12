@@ -27,6 +27,7 @@ import {
 } from "./chat-storage";
 import { extractTextToolDirectiveText, stripTextToolDirectives } from "./text-tool-protocol";
 import { applyWithProtectedAvatarDecisionMarkers, findUserAvatarChangeIntent } from "./chat-avatar-intent";
+import { isAutomaticChatGeneration } from "./chat-generation-context";
 import type { ApiConfig, PresetConfig, Prompt, PromptOrderEntry, RegexConfig } from "./settings-types";
 import type { CustomAppPromptProfile } from "./custom-app-types";
 import {
@@ -351,6 +352,7 @@ export type DebugPromptRequestOptions = {
 };
 
 type ChatPromptBuildOptions = {
+    automatic?: boolean;
     historicalAt?: number;
     followUpCount?: number;
     followUpDelay?: number;
@@ -1969,8 +1971,8 @@ export async function buildChatPromptMessages(
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
     });
-    const avatarChangeIntent = !session.isGroup && options?.historicalAt === undefined
-        ? findUserAvatarChangeIntent(historyForPrompt, session.id, character.id)
+    const avatarChangeIntent = !session.isGroup && options?.historicalAt === undefined && !isAutomaticChatGeneration(options)
+        ? findUserAvatarChangeIntent(historyForPrompt, session.id, character.id, { allowAnsweredTurn: false })
         : null;
     // 当前状态用一条直白提示兜底；具体拉黑/解除事件已写入私聊短期记忆。
     if (!session.isGroup && session.isBlacklisted) {
@@ -2031,7 +2033,7 @@ export async function buildChatPromptMessages(
         });
     }
     // A scheduled contact is not the user's manual "continue the last reply" action.
-    if (!options?.appTags?.includes("proactive")) appendEmptyGenerateGuardMessage(llmMessages, config, historyForPrompt);
+    if (!isAutomaticChatGeneration(options)) appendEmptyGenerateGuardMessage(llmMessages, config, historyForPrompt);
 
     // ── 感知状态注入（默认关）──
     // 放在所有系统消息之后、历史之前：让它是「最后一眼背景」，

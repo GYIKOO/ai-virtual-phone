@@ -18,6 +18,7 @@ import type {
 import type { UserIdentity } from "@/components/settings/user-identity";
 import { createBuiltinPreset, BUILTIN_PRESET_VERSION } from "./builtin-preset";
 import { migrateBuiltinStoryNarration } from "./story-default-prompt";
+import { migrateBuiltinMomentsActions } from "./moments-default-prompt";
 import {
     NOVELAI_DEFAULT_MODEL,
     NOVELAI_DEFAULT_NOISE_SCHEDULE,
@@ -184,7 +185,7 @@ export function loadPresets(): PresetConfig[] {
     if (typeof window === "undefined") return [];
     try {
         const cachedPresets = readPresetsCache();
-        const presets: PresetConfig[] = cachedPresets.map(stripDeprecatedPresetFields).map(migrateBuiltinStoryNarration);
+        const presets: PresetConfig[] = cachedPresets.map(stripDeprecatedPresetFields).map(migrateBuiltinStoryNarration).map(migrateBuiltinMomentsActions);
         let shouldPersistCleanup = JSON.stringify(cachedPresets) !== JSON.stringify(presets);
 
         // Ensure built-in preset exists and is up-to-date

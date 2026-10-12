@@ -117,6 +117,11 @@ export function cancelBackgroundGeneration(sessionId: string): void {
 function isBackgroundGenerationCancelled(sessionId: string): boolean {
     return cancelledBackgroundSessions.has(sessionId);
 }
+
+function canPersistAutomaticReply(sessionId: string): boolean {
+    return !isBackgroundGenerationCancelled(sessionId)
+        && loadChatSessions().some(session => session.id === sessionId && !session.proactiveDisabled);
+}
 let lastPeriodCarePollAt = 0;
 let scheduledOutboxGraceUntil = 0;
 let scheduledOutboxVisibilityHandler: (() => void) | null = null;
@@ -391,7 +396,7 @@ async function saveBackgroundCompletionRounds(
     currentCount: number,
     followUpIndex: number | undefined,
     contextMessages: ChatMessage[],
-    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean },
+    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean; canPersist?: () => boolean },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
     let hasVisible = false;
     let newCount = currentCount;
@@ -405,6 +410,7 @@ async function saveBackgroundCompletionRounds(
             contextMessages,
             {
                 ...options,
+                canPersist: () => !isBackgroundGenerationCancelled(sessionId) && (options?.canPersist?.() ?? true),
                 responseBatchId: round.responseBatchId,
                 rawResponseText: round.rawResponseText,
                 reasoningText: round.reasoningText,
@@ -577,7 +583,8 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
             return;
         }
 
-        const { hasVisible, newCount, stateValues } = await saveBackgroundCompletionRounds(rounds, session.id, sched.count, count, latestMessages);
+        const { hasVisible, newCount, stateValues } = await saveBackgroundCompletionRounds(rounds, session.id, sched.count, count, latestMessages,
+            { canPersist: () => canPersistAutomaticReply(session.id) });
         console.log(`[FollowUp] Result: hasVisible=${hasVisible}, newCount=${newCount}`);
 
         // 本地已完成这一轮，撤销服务端对应的兜底预约（只撤本轮的精确键，
@@ -756,6 +763,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             0,
             undefined,
             latestMessages,
+            { canPersist: () => canPersistAutomaticReply(session.id) },
         );
         markIdleReconnectFired(rule.id, Date.now());
         if (hasVisible) scheduleFollowUp(session.id, 0, stateValues);
@@ -828,6 +836,7 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
             0,
             undefined,
             latestMessages,
+            { canPersist: () => canPersistAutomaticReply(session.id) },
         );
         console.log(`[TimedWake] Result: hasVisible=${hasVisible}`);
 
@@ -895,6 +904,7 @@ async function fireMenstrualPeriodCare(input: {
             0,
             undefined,
             latestMessages,
+            { canPersist: () => canPersistAutomaticReply(session.id) },
         );
         saveMenstrualPeriodCareTrigger({
             characterId: input.characterId,

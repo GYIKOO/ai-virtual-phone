@@ -28,6 +28,7 @@ export class MacroEngine {
     timedWakeIntent: string = "";
     periodCareContext: string = "";
     timeContext: string = "";
+    referenceTime?: number;
     systemTimeZone: string = "";
     characterTime: string = "";
     characterTimeZone: string = "";
@@ -102,6 +103,11 @@ export class MacroEngine {
         this.userName = userName;
     }
 
+    private referenceDate(): Date {
+        const date = new Date(this.referenceTime ?? Date.now());
+        return Number.isFinite(date.getTime()) ? date : new Date();
+    }
+
     /** Main entry: iteratively expand all macros (innermost first). */
     expand(text: string): string {
         const MAX_ITERATIONS = 50;
@@ -159,7 +165,7 @@ export class MacroEngine {
         if (body === "timedWakeElapsedMinutes" || body === "timedWakeMinutes") return this.timedWakeElapsedMinutes || "0";
         if (body === "timedWakeIntent") return this.timedWakeIntent || "\x00TRIM\x00";
         if (body === "periodCareContext") return this.periodCareContext || "\x00TRIM\x00";
-        if (body === "timeContext") return this.timeContext || buildCharacterTimeContext().timeContext;
+        if (body === "timeContext") return this.timeContext || buildCharacterTimeContext(undefined, this.referenceDate()).timeContext;
         if (body === "systemTimeZone") return this.systemTimeZone || getSystemTimeZone();
         if (body === "characterTime") return this.characterTime || "\x00TRIM\x00";
         if (body === "characterTimeZone") return this.characterTimeZone || "\x00TRIM\x00";
@@ -326,10 +332,10 @@ export class MacroEngine {
         // timestamp:FORMAT
         if (body.startsWith("timestamp:")) {
             const format = body.substring(10).trim();
-            return formatTimestamp(format);
+            return formatTimestamp(format, this.referenceDate());
         }
         if (body === "timestamp") {
-            return new Date().toISOString();
+            return this.referenceDate().toISOString();
         }
 
         // Unrecognized macro — leave as-is (return with braces so it doesn't loop)
@@ -344,8 +350,7 @@ export function postProcessTrim(text: string): string {
 }
 
 /** Simple timestamp formatter. Supports common tokens: YYYY, MM, DD, HH, mm, ss, etc. */
-function formatTimestamp(format: string): string {
-    const now = new Date();
+function formatTimestamp(format: string, now: Date): string {
     const pad = (n: number, len = 2) => String(n).padStart(len, "0");
 
     return format

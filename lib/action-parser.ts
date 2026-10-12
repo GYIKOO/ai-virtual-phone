@@ -406,7 +406,10 @@ async function dispatchChatMessage(action: ActionTag, context: ActionContext): P
     ensureCharacterChatContact(context.characterId);
     const session = createOrGetSession(context.characterId);
     // 统一后台保存流程：分条、拍一拍、状态栏、生图、横幅+系统弹窗全与聊天一致
-    await parseAndSaveResponse(action.content, session.id, 0, undefined, loadChatMessages(session.id));
+    const saved = await parseAndSaveResponse(action.content, session.id, 0, undefined, loadChatMessages(session.id), {
+        canPersist: () => !context.signal?.aborted,
+    });
+    if (!saved.hasVisible) return;
 
     console.log(`[ActionParser] Sent chat message from ${context.sourceEngine} engine`);
     if (typeof window !== "undefined") {
@@ -415,16 +418,7 @@ async function dispatchChatMessage(action: ActionTag, context: ActionContext): P
 }
 
 async function dispatchPrivateMessage(action: ActionTag, context: ActionContext): Promise<void> {
-    if (!action.content) return;
-
-    ensureCharacterChatContact(context.characterId);
-    const session = createOrGetSession(context.characterId);
-    await parseAndSaveResponse(action.content, session.id, 0, undefined, loadChatMessages(session.id));
-
-    console.log(`[ActionParser] Sent private message from "${action.actor}" via ${context.sourceEngine} engine`);
-    if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
-    }
+    await dispatchChatMessage(action, context);
 }
 
 async function dispatchGroupChatMessage(action: ActionTag, context: ActionContext): Promise<void> {
@@ -444,10 +438,12 @@ async function dispatchGroupChatMessage(action: ActionTag, context: ActionContex
     }
 
     console.log("[ActionParser]", `MATCH: "${groupSession.groupName}" id=${groupSession.id}`);
-    await parseAndSaveResponse(action.content, groupSession.id, 0, undefined, loadChatMessages(groupSession.id), {
+    const saved = await parseAndSaveResponse(action.content, groupSession.id, 0, undefined, loadChatMessages(groupSession.id), {
         senderCharacterId: context.characterId,
         senderName: loadCharacters().find(c => c.id === context.characterId)?.name,
+        canPersist: () => !context.signal?.aborted,
     });
+    if (!saved.hasVisible) return;
 
     console.log("[ActionParser]", `OK: message saved to "${groupSession.groupName}"`);
     if (typeof window !== "undefined") {
