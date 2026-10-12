@@ -7,6 +7,8 @@ plugins {
 // 没有配置时 release 构建产出未签名 APK，debug 构建始终可直接安装测试。
 def ksFile = System.getenv("SHELL_KEYSTORE_FILE")
 def siteUrl = (System.getenv("SHELL_SITE_URL") ?: "https://example.invalid").replaceAll('/+$', '')
+def testBuild = System.getenv("SHELL_TEST_BUILD") == "true"
+def deepLinkScheme = testBuild ? "floatshell-test" : "floatshell"
 
 android {
     namespace 'app.floatphone.shell'
@@ -17,7 +19,7 @@ android {
     compileSdk 36
 
     defaultConfig {
-        applicationId "app.floatphone.shell"
+        applicationId testBuild ? "app.floatphone.shell.test" : "app.floatphone.shell"
         minSdk 26
         targetSdk 34
         // versionCode 必须严格递增，否则 Android 拒绝覆盖安装（表现为「应用未安装」）。
@@ -27,8 +29,10 @@ android {
         // 1.0.11：截屏与主动查岗（含查岗浮层回复框）；通知栏「直接回复」。
         // 1.0.12：截屏可选收件人；位置感知；睡眠（Health Connect）。
         versionCode 11
-        versionName "1.0.12"
+        versionName testBuild ? "1.0.12-test" : "1.0.12"
         buildConfigField "String", "SITE_URL", "\"${siteUrl}\""
+        buildConfigField "String", "DEEP_LINK_SCHEME", "\"${deepLinkScheme}\""
+        manifestPlaceholders = [shellAppLabel: testBuild ? "@string/test_app_name" : "@string/app_name", shellDeepLinkScheme: deepLinkScheme]
     }
 
     buildFeatures { buildConfig true }

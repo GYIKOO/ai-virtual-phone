@@ -21,8 +21,20 @@ jobs:
       SHELL_KEY_ALIAS: ${{ secrets.SHELL_KEY_ALIAS }}
       SHELL_KEY_PASSWORD: ${{ secrets.SHELL_KEY_PASSWORD }}
       SHELL_SITE_URL: ${{ inputs.site_url || vars.SHELL_SITE_URL }}
+      # 非 main 分支始终使用独立安装身份，避免测试包覆盖正式应用。
+      SHELL_TEST_BUILD: ${{ github.ref_name != 'main' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Require explicit test site
+        if: ${{ github.ref_name != 'main' }}
+        env:
+          TEST_SITE_URL: ${{ inputs.site_url }}
+        run: |
+          if [[ "$TEST_SITE_URL" != https://* ]]; then
+            echo 'Test builds require an explicit HTTPS site_url.'
+            exit 1
+          fi
 
       - uses: actions/setup-java@v4
         with:
@@ -47,11 +59,11 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: float-shell-debug
+          name: float-shell${{ github.ref_name != 'main' && '-test' || '' }}-debug
           path: android-shell/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
-          name: float-shell-release
+          name: float-shell${{ github.ref_name != 'main' && '-test' || '' }}-release
           path: android-shell/app/build/outputs/apk/release/*.apk

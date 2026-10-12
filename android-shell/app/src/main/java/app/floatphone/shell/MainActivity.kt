@@ -59,7 +59,7 @@ class MainActivity : AppCompatActivity() {
         /** 来电接听等场景的站内深链（必须以 SITE_URL 开头，否则忽略） */
         const val EXTRA_OPEN_URL = "open_url"
         /** 外部 App（如桌宠）唤起本壳用的自定义 scheme：floatshell://open?url=<站内地址> */
-        const val DEEP_LINK_SCHEME = "floatshell"
+        const val DEEP_LINK_SCHEME = BuildConfig.DEEP_LINK_SCHEME
         /**
          * 网页消息通知用的渠道 id，与 PushService 的「角色消息」渠道刻意同名：
          * 离线推送和网页内提醒最终落到通知栏的同一个分组，用户在系统设置里
