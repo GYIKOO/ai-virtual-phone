@@ -1,5 +1,6 @@
 "use client";
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS } from "@/lib/story-tag-settings";
+import { createStoryGenerationRun, isStoryGenerationRunActive, finishStoryGenerationRun, cancelStoryGenerationRun, getGeneratingStorySessionIds, subscribeStoryGeneration } from "@/lib/story-generation-runs";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
@@ -113,12 +114,6 @@ type StoryAppProps = {
   onClose: () => void;
 };
 
-type StoryGenerationRun = {
-  runId: string;
-  controller: AbortController;
-};
-
-const activeStoryGenerationRuns = new Map<string, StoryGenerationRun>();
 const storyVoiceCache = new Map<string, Blob>();
 const STORY_VOICE_CACHE_LIMIT = 24;
 const STORY_ACTIVE_CHARACTER_KEY = "story-last-active-character-id";
@@ -163,36 +158,6 @@ function cacheStoryVoice(key: string, blob: Blob) {
     if (!oldest) break;
     storyVoiceCache.delete(oldest);
   }
-}
-
-function createStoryGenerationRun(sessionId: string): StoryGenerationRun {
-  activeStoryGenerationRuns.get(sessionId)?.controller.abort();
-  const run = {
-    runId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    controller: new AbortController(),
-  };
-  activeStoryGenerationRuns.set(sessionId, run);
-  return run;
-}
-
-function isStoryGenerationRunActive(sessionId: string, runId: string): boolean {
-  const run = activeStoryGenerationRuns.get(sessionId);
-  return Boolean(run && run.runId === runId && !run.controller.signal.aborted);
-}
-
-function finishStoryGenerationRun(sessionId: string, runId: string): boolean {
-  const run = activeStoryGenerationRuns.get(sessionId);
-  if (!run || run.runId !== runId) return false;
-  activeStoryGenerationRuns.delete(sessionId);
-  return true;
-}
-
-function cancelStoryGenerationRun(sessionId: string): boolean {
-  const run = activeStoryGenerationRuns.get(sessionId);
-  if (!run) return false;
-  run.controller.abort();
-  activeStoryGenerationRuns.delete(sessionId);
-  return true;
 }
 
 function isAbortLikeError(error: unknown): boolean {
@@ -519,7 +484,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const [foldTagsDraft, setFoldTagsDraft] = useState("");
   const [contextExcludedTagsDraft, setContextExcludedTagsDraft] = useState("");
   // 生成状态按会话记录：避免在 A 会话生成时切到 B 会话也显示"正在生成"
-  const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [generatingSessionIds, setGeneratingSessionIds] = useState<ReadonlySet<string>>(getGeneratingStorySessionIds);
   const [mergingPage, setMergingPage] = useState(false);
   const mergingPageRef = useRef(false);
   // 抽屉滑动手势用 ref 而不是 state：手指按住时 touchmove 每帧都在触发，
@@ -645,12 +610,29 @@ export function StoryApp({ onClose }: StoryAppProps) {
   );
 
   const markGenerating = useCallback((sessionId: string, on: boolean) => {
+    if (!mountedRef.current) return;
     setGeneratingSessionIds((prev) => {
       if (on === prev.has(sessionId)) return prev;
       const next = new Set(prev);
       if (on) next.add(sessionId); else next.delete(sessionId);
       return next;
     });
+  }, []);
+
+  const refreshGenerationView = (sessionId: string) => {
+    if (!mountedRef.current) return;
+    if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
+    setStorageVersion(value => value + 1);
+  };
+
+  useEffect(() => {
+    const refresh = () => {
+      setGeneratingSessionIds(getGeneratingStorySessionIds());
+      if (activeSessionIdRef.current) setMessages(loadStoryMessages(activeSessionIdRef.current));
+      setStorageVersion(value => value + 1);
+    };
+    refresh();
+    return subscribeStoryGeneration(refresh);
   }, []);
 
   useEffect(() => {
@@ -670,9 +652,6 @@ export function StoryApp({ onClose }: StoryAppProps) {
       voiceRequestIdRef.current += 1;
       voicePlaybackRef.current?.abort();
       if (voiceNoticeTimerRef.current) clearTimeout(voiceNoticeTimerRef.current);
-      if (activeSessionIdRef.current) {
-        cancelStoryGenerationRun(activeSessionIdRef.current);
-      }
     };
   }, []);
 
@@ -1234,7 +1213,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
 
   async function handleStoryBranchMerge(sessionId: string) {
     if (mergingPageRef.current) return;
-    if (activeStoryGenerationRuns.size || floatingChatGenerating) {
+    if (getGeneratingStorySessionIds().size || floatingChatGenerating) {
       alert("请先等待剧情和悬浮聊天生成结束，再合并分页。");
       return;
     }
@@ -1503,7 +1482,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     markGenerating(sessionId, true);
     const generationRun = createStoryGenerationRun(sessionId);
     const generationRunId = generationRun.runId;
-    const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
+    const isCurrentGeneration = () => isStoryGenerationRunActive(sessionId, generationRunId);
 
     try {
       const historyForGeneration = loadStoryMessages(sessionId);
@@ -1530,10 +1509,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         regexSignature: result.regexSignature,
         parserVersion: result.parserVersion,
       });
-      if (activeSessionIdRef.current === sessionId) {
-        setMessages(loadStoryMessages(sessionId)); // 按会话从存储重读，杜绝跨会话串消息
-      }
-      setStorageVersion((value) => value + 1);
+      refreshGenerationView(sessionId);
 
       const memoryCharacterIds = currentSession?.participantIds?.length ? currentSession.participantIds : [characterId];
       const storyCharacters = memoryCharacterIds
@@ -1561,10 +1537,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         rawContent: errText,
         renderedContent: errText,
       });
-      if (activeSessionIdRef.current === sessionId) {
-        setMessages(loadStoryMessages(sessionId));
-      }
-      setStorageVersion((value) => value + 1);
+      refreshGenerationView(sessionId);
     } finally {
       if (finishStoryGenerationRun(sessionId, generationRunId)) {
         markGenerating(sessionId, false);
@@ -1594,7 +1567,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     markGenerating(sessionId, true);
     const generationRun = createStoryGenerationRun(sessionId);
     const generationRunId = generationRun.runId;
-    const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
+    const isCurrentGeneration = () => isStoryGenerationRunActive(sessionId, generationRunId);
 
     void generateStoryCompletion(characterId, [...loadStoryMessages(sessionId), virtualMessage], {
       sessionFoldTags: session.foldTags,
@@ -1619,8 +1592,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         regexSignature: result.regexSignature,
         parserVersion: result.parserVersion,
       });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion((value) => value + 1);
+      refreshGenerationView(sessionId);
 
       if (!session.independentStory) {
         for (const id of session.participantIds?.length ? session.participantIds : [characterId]) {
@@ -1634,8 +1606,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
       if (!isCurrentGeneration() || isAbortLikeError(error)) return;
       const text = error instanceof Error ? error.message : "剧情自动开场失败，请点击续写重试。";
       pushStoryMessage({ sessionId, role: "system", rawContent: text, renderedContent: text });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion((value) => value + 1);
+      refreshGenerationView(sessionId);
     }).finally(() => {
       if (finishStoryGenerationRun(sessionId, generationRunId)) markGenerating(sessionId, false);
     });
@@ -1875,7 +1846,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     markGenerating(sessionId, true);
     const generationRun = createStoryGenerationRun(sessionId);
     const generationRunId = generationRun.runId;
-    const isCurrentGeneration = () => mountedRef.current && isStoryGenerationRunActive(sessionId, generationRunId);
+    const isCurrentGeneration = () => isStoryGenerationRunActive(sessionId, generationRunId);
     try {
       const result = await generateStoryCompletion(characterId, contextMessages, {
         sessionId,
@@ -1899,14 +1870,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
         rawContent: result.rawText, renderedContent: result.renderedText,
         storySummary: result.storySummary, regexSignature: result.regexSignature, parserVersion: result.parserVersion,
       });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion(v => v + 1);
+      refreshGenerationView(sessionId);
     } catch (error) {
       if (!isCurrentGeneration() || isAbortLikeError(error)) return;
       const errText = error instanceof Error ? error.message : "重试失败，请稍后再试。";
       const systemMessage = pushStoryMessage({ sessionId, role: "system", rawContent: errText, renderedContent: errText });
-      if (activeSessionIdRef.current === sessionId) setMessages(loadStoryMessages(sessionId));
-      setStorageVersion(v => v + 1);
+      refreshGenerationView(sessionId);
     } finally {
       if (finishStoryGenerationRun(sessionId, generationRunId)) {
         markGenerating(sessionId, false);

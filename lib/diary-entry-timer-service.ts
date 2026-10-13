@@ -1,4 +1,5 @@
 import { bgSetInterval } from "./bg-timer";
+import { deferAutomaticForCalendar } from "./calendar-auto-service";
 import { loadCharacters } from "./character-storage";
 import type { Character } from "./character-types";
 import { generateDiaryEntryForCharacter } from "./diary-entry-engine";
@@ -69,6 +70,7 @@ function stampAttemptedCharacters(characterIds: string[], stamp: string): void {
 
 export async function runDiaryEntryTimerCheck(): Promise<void> {
   if (typeof window === "undefined" || running) return;
+  if (deferAutomaticForCalendar()) return;
 
   const settings = loadDiaryEntryTimerSettings();
   const dueTargets = getDueTargets(settings);

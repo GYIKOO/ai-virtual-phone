@@ -20,7 +20,7 @@ import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { getCustomStickerExample, getCustomStickerNames } from "./custom-sticker-storage";
 import { previewMessagesForApi, sendLLMRequest, type ChatEngineError } from "./chat-engine";
-import { buildCalendarScheduleMarker, clearGeneratedWeekItems, cloneWeekPlanWithManualEdits, normalizeGeneratedScheduleItems, restoreCalendarWeekItems } from "./calendar-storage";
+import { buildCalendarScheduleMarker, clearGeneratedWeekItems, cloneWeekPlanWithManualEdits, normalizeGeneratedScheduleItems, restoreCalendarWeekItems, loadCalendarWeekPlan } from "./calendar-storage";
 import {
   getWeekDates,
   getWeekStartIso,
@@ -227,22 +227,29 @@ async function resolveCalendarAssemblerInput(
   };
 }
 
+const generatingWeeks = new Set<string>();
+
 export async function generateWeeklyCalendarSchedule(
   ownerType: CalendarOwnerType,
   ownerId: string,
   weekStart: string,
+  options?: { automatic?: boolean; referenceTime?: number; signal?: AbortSignal; canSave?: () => boolean },
 ): Promise<{ success: boolean; error?: string; items?: CalendarScheduleItem[] }> {
   if (ownerType !== "character") {
     return { success: false, error: "用户日程不支持 AI 生成，请手动填写。" };
   }
+  const key = `${ownerType}:${ownerId}:${weekStart}`;
+  if (generatingWeeks.has(key)) return { success: false, error: "该角色本周日程正在生成，请稍候。" };
+  generatingWeeks.add(key);
   // 先清掉本周旧的 AI 生成条目（保留手动条目），让随后的 marker 组装读不到旧结果——
   // 否则旧日程会进提示词被模型原样照抄，"重新生成"永远一字不差。失败时恢复。
-  const removedGenerated = clearGeneratedWeekItems(ownerType, ownerId, weekStart);
+  const removedGenerated = options?.automatic ? [] : clearGeneratedWeekItems(ownerType, ownerId, weekStart);
   const restoreRemoved = () => restoreCalendarWeekItems(ownerType, ownerId, weekStart, removedGenerated);
   try {
     const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart);
     const weekDates = getWeekDates(weekStart);
-    const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates);
+    const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates)
+      + (options?.automatic ? `\n本次安排范围：从 ${new Date(options.referenceTime ?? Date.now()).toLocaleString()} 起至本周结束，时区 ${Intl.DateTimeFormat().resolvedOptions().timeZone}。保留已有手动安排，为剩余时间补充计划。` : "");
 
     const messages: LLMMessage[] = [
       ...resolved.llmMessages,
@@ -259,7 +266,7 @@ export async function generateWeeklyCalendarSchedule(
       messages,
       resolved.regexes,
       { characterName: `日历:${resolved.ownerName}` },
-      { appId: "calendar", appTags: ["calendar"] },
+      { appId: "calendar", appTags: ["calendar"], signal: options?.signal },
     );
 
     const items = parseScheduleLines(rawText, weekStart);
@@ -268,12 +275,24 @@ export async function generateWeeklyCalendarSchedule(
       return { success: false, error: "日历生成结果为空，或格式无法解析。" };
     }
 
-    cloneWeekPlanWithManualEdits(ownerType, ownerId, weekStart, items);
-    return { success: true, items };
+    if (options?.signal?.aborted || options?.canSave?.() === false) {
+      restoreRemoved();
+      return { success: false, error: "日程生成已取消。" };
+    }
+    // A manual generation or another tab may have completed while awaiting the API.
+    if (options?.automatic && loadCalendarWeekPlan(ownerType, ownerId, weekStart)?.items.some(item => item.source === "generated")) {
+      return { success: true };
+    }
+    const accepted = options?.automatic ? items.filter(item =>
+      new Date(`${item.date}T${item.startTime}:00`).getTime() >= (options.referenceTime ?? Date.now())) : items;
+    if (accepted.length) cloneWeekPlanWithManualEdits(ownerType, ownerId, weekStart, accepted);
+    return { success: true, items: accepted };
   } catch (error) {
     restoreRemoved();
     const err = error as ChatEngineError | Error;
     return { success: false, error: err?.message || "生成日历失败" };
+  } finally {
+    generatingWeeks.delete(key);
   }
 }
 

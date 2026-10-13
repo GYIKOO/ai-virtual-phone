@@ -13,7 +13,7 @@ import {
   sortScheduleItems,
   timeToMinutes,
 } from "./calendar-utils";
-import { kvGet, kvSet, registerKvMigration } from "./kv-db";
+import { kvGet, kvSet, kvRefresh, registerKvMigration } from "./kv-db";
 import { getSystemTimeZone } from "./character-time";
 
 const STORAGE_KEY = "ai_phone_calendar_plans_v1";
@@ -26,6 +26,8 @@ type PersistedCalendarStore = {
 };
 
 export type CalendarConfig = {
+  /** Explicit opt-in list; the old global toggle never opts everyone in. */
+  autoGenerateCharacterIds: string[];
   autoGenerateEnabled: boolean;
   theme: string;
   /** 详情页时间轴一页显示的天数（1/2/3/5/7），默认 2 */
@@ -33,6 +35,7 @@ export type CalendarConfig = {
 };
 
 const DEFAULT_CALENDAR_CONFIG: CalendarConfig = {
+  autoGenerateCharacterIds: [],
   autoGenerateEnabled: false,
   theme: "light",
   daysPerPage: 2,
@@ -88,6 +91,8 @@ export function loadCalendarConfig(): CalendarConfig {
     const parsed = { ...DEFAULT_CALENDAR_CONFIG, ...JSON.parse(raw) } as CalendarConfig;
     parsed.theme = normalizeCalendarTheme(parsed.theme);
     parsed.daysPerPage = normalizeCalendarDaysPerPage(parsed.daysPerPage);
+    parsed.autoGenerateCharacterIds = Array.isArray(parsed.autoGenerateCharacterIds)
+      ? [...new Set(parsed.autoGenerateCharacterIds.filter((id): id is string => typeof id === "string" && Boolean(id.trim())))] : [];
     return parsed;
   } catch {
     return { ...DEFAULT_CALENDAR_CONFIG };
@@ -97,6 +102,12 @@ export function loadCalendarConfig(): CalendarConfig {
 export function saveCalendarConfig(config: CalendarConfig): void {
   if (typeof window === "undefined") return;
   kvSet(CALENDAR_CONFIG_KEY, JSON.stringify(config));
+  window.dispatchEvent(new Event("calendar-config-updated"));
+}
+
+/** Refresh shared calendar data before a cross-tab automatic generation lock is used. */
+export async function refreshCalendarData(): Promise<void> {
+  await Promise.all([kvRefresh(STORAGE_KEY), kvRefresh(CALENDAR_CONFIG_KEY)]);
 }
 
 export function loadCalendarWeekPlan(

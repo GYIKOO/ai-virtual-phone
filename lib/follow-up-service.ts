@@ -32,6 +32,7 @@ import {
 import { loadFollowUpConfig } from "./settings-storage";
 import { loadProactive, PROACTIVE_UPDATED } from "./proactive-storage";
 import { updateProactivePresence } from "./proactive-presence";
+import { deferAutomaticForCalendar } from "./calendar-auto-service";
 import { cancelLegacyAmbient, cancelNewProactive, isNewProactiveGenerating, pollNewProactive, resetProactiveOnUserMessage, schedulePersonalityFollowUp } from "./proactive-service";
 import { parseAIResponse } from "./rich-message-parser";
 import type { ParsedMessagePart } from "./rich-message-parser";
@@ -434,6 +435,7 @@ function pollSchedules() {
         const schedules = loadAllFollowUpSchedules();
         const now = Date.now();
         if (typeof document !== "undefined") updateProactivePresence(!document.hidden, now);
+        if (deferAutomaticForCalendar()) return;
         for (const sched of schedules) {
             if (sched.fireAt > now) {
                 const remainSec = Math.round((sched.fireAt - now) / 1000);

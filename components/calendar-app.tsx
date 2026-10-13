@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Bot, Check, ChevronLeft, HeartPulse, Plus, Trash2, Wand2, X } from "lucide-react";
 import { Avatar } from "./ui/primitives";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
@@ -148,9 +148,9 @@ export function PhoneCalendarApp({
   const [showGenerateConfirm, setShowGenerateConfirm] = useState(false);
   const [showAutoConfirm, setShowAutoConfirm] = useState(false);
   const [fabMenuOpen, setFabMenuOpen] = useState(false);
-  const autoAttemptedRef = useRef<Set<string>>(new Set());
+  const [autoCharacterDraft, setAutoCharacterDraft] = useState<string[]>([]);
   const [editingItem, setEditingItem] = useState<(CalendarEventDraft & { originalDate?: string }) | null>(null);
-  const autoGenerateEnabled = config.autoGenerateEnabled;
+  const autoGenerateEnabled = config.autoGenerateCharacterIds.length > 0;
 
   const [menstrualDraft, setMenstrualDraft] = useState<{
     cycleLength: string;
@@ -256,28 +256,12 @@ export function PhoneCalendarApp({
     return () => window.removeEventListener("calendar-updated", handler);
   }, [selectedOwner]);
 
-  // 每周自动生成（仅角色）
+  // Opening an owner's calendar only reads data; automatic generation is global opt-in.
   useEffect(() => {
-    if (!selectedOwner || !autoGenerateEnabled || selectedOwner.ownerType !== "character" || isGenerating) return;
-    const autoKey = `${selectedOwner.ownerType}:${selectedOwner.ownerId}:${weekStart}`;
-    if (autoAttemptedRef.current.has(autoKey)) return;
-    const existing = loadOwnerCalendarPlans(selectedOwner.ownerType, selectedOwner.ownerId)
-      .find(plan => plan.weekStart === weekStart);
-    if (existing && existing.items.length > 0) return;
-    void (async () => {
-      autoAttemptedRef.current.add(autoKey);
-      setIsGenerating(true);
-      const result = await generateWeeklyCalendarSchedule(selectedOwner.ownerType, selectedOwner.ownerId, weekStart);
-      setIsGenerating(false);
-      if (!result.success) {
-        onNotice?.(result.error || "自动生成失败");
-        return;
-      }
-      refreshPlans();
-      onNotice?.("已自动生成本周角色日程");
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoGenerateEnabled, isGenerating, selectedOwner, weekStart]);
+    const refresh = () => setConfig(loadCalendarConfig());
+    window.addEventListener("calendar-config-updated", refresh);
+    return () => window.removeEventListener("calendar-config-updated", refresh);
+  }, []);
 
   // ── 事件编辑 ──
   const openNewDraft = (date: string) => {
@@ -585,12 +569,13 @@ export function PhoneCalendarApp({
                 data-on={autoGenerateEnabled ? "true" : undefined}
                 onClick={() => {
                   setFabMenuOpen(false);
+                  setAutoCharacterDraft(loadCalendarConfig().autoGenerateCharacterIds);
                   setShowAutoConfirm(true);
                 }}
               >
                 <Bot size={15} />
-                每周自动生成
-                <i className="calendar-fab-menu-state">{autoGenerateEnabled ? "已开" : "已关"}</i>
+                自动日程角色
+                <i className="calendar-fab-menu-state">{config.autoGenerateCharacterIds.length} 人</i>
               </button>
             </div>
           ) : null}
@@ -891,12 +876,20 @@ export function PhoneCalendarApp({
           <div className="calendar-edit-modal calendar-confirm-dialog" onClick={e => e.stopPropagation()}>
             <Bot size={26} className="calendar-confirm-icon" />
             <div className="calendar-confirm-title">
-              {autoGenerateEnabled ? "关闭自动生成？" : "开启自动生成？"}
+              自动日程角色
             </div>
             <div className="calendar-confirm-desc">
-              {autoGenerateEnabled
-                ? "关闭后将不再自动为角色生成每周日程"
-                : <>每周将自动为 <strong>{selectedOwner.name}</strong> 生成日程安排</>}
+              打开 Float 时优先为选中角色补齐本周剩余日程。其他角色仅在点击生成按钮时调用 API。每人每周单独调用，已有日程保留；全部取消即关闭。
+            </div>
+            <div className="flex max-h-64 flex-col gap-2 overflow-y-auto text-sm">
+              {owners.filter(owner => owner.ownerType === "character").map(owner => (
+                <label key={owner.ownerId} className="flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2">
+                  <input type="checkbox" checked={autoCharacterDraft.includes(owner.ownerId)}
+                    onChange={event => setAutoCharacterDraft(previous => event.target.checked
+                      ? [...new Set([...previous, owner.ownerId])] : previous.filter(id => id !== owner.ownerId))} />
+                  <span>{owner.name}</span>
+                </label>
+              ))}
             </div>
             <div className="calendar-confirm-footer">
               <button type="button" className="calendar-block-btn" data-variant="ghost" onClick={() => setShowAutoConfirm(false)}>取消</button>
@@ -905,12 +898,11 @@ export function PhoneCalendarApp({
                 className="calendar-block-btn"
                 data-variant="primary"
                 onClick={() => {
-                  const next = !autoGenerateEnabled;
-                  const nextConfig = { ...config, autoGenerateEnabled: next };
+                  const nextConfig = { ...loadCalendarConfig(), autoGenerateEnabled: false, autoGenerateCharacterIds: autoCharacterDraft };
                   setConfig(nextConfig);
                   saveCalendarConfig(nextConfig);
                   setShowAutoConfirm(false);
-                  onNotice?.(next ? "已开启每周自动生成" : "已关闭每周自动生成");
+                  onNotice?.(autoCharacterDraft.length ? "已保存自动日程角色" : "已关闭自动日程");
                 }}
               >
                 确认

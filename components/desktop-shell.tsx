@@ -6,6 +6,7 @@ import { updateStatusBarTone } from "@/lib/bg-tone";
 import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/diary-entry-timer-service";
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
+import { startCalendarAutoService, stopCalendarAutoService } from "@/lib/calendar-auto-service";
 import { bgTimerCleanup } from "@/lib/bg-timer";
 import { PhoneThemeApp } from "@/components/phone-theme-app";
 import { PhoneCharacterApp } from "@/components/phone-character-app";
@@ -1907,6 +1908,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       }
 
       if (cancelled) return;
+      startCalendarAutoService();
       startFollowUpService();
       startMomentsService();
       startDiaryEntryTimerService();
@@ -1925,6 +1927,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
       cancelled = true;
       cleanupWeixinCloudRealtimeSync?.();
       if (servicesStarted) {
+        stopCalendarAutoService();
         stopFollowUpService();
         stopMomentsService();
         stopDiaryEntryTimerService();
