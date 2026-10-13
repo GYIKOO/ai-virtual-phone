@@ -5,6 +5,7 @@
 // ensuring full character settings, world books, long-term memory, and user persona.
 
 import { loadCharacters } from "./character-storage";
+import { deferAutomaticForCalendar } from "./calendar-auto-service";
 import { loadChatContacts } from "./chat-storage";
 import type { Character } from "./character-types";
 import {
@@ -1442,6 +1443,7 @@ function stopReactionPoll() {
 }
 
 function pollPendingReactions() {
+    if (deferAutomaticForCalendar()) return;
     // Check scheduled posts
     pollScheduledPosts();
 
