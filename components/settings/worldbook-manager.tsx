@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useContext, useCallback } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { Plus, BookOpen, Trash2, Upload, Download, ChevronLeft, AlertCircle, Maximize2, Replace } from "lucide-react";
 import {
     loadWorldBooks,
@@ -755,10 +756,10 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
                                                             </div>
                                                             <div className="flex flex-col gap-1">
                                                                 <label className="menu-desc">注入深度 (Depth)</label>
-                                                                <input
+                                                                <NumberInput
                                                                     type="number"
                                                                     value={entry.depth ?? 0}
-                                                                    onChange={(e) => updateEntry(entry.uid, { depth: parseInt(e.target.value) || 0 })}
+                                                                    onValueChange={value => updateEntry(entry.uid, { depth: Math.trunc(value) || 0 })}
                                                                     min="0"
                                                                     disabled={entry.position !== 4}
                                                                     className="ui-input ts-13"
@@ -768,10 +769,10 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
 
                                                             <div className="flex flex-col gap-1">
                                                                 <label className="menu-desc">权重优先级 (Order)</label>
-                                                                <input
+                                                                <NumberInput
                                                                     type="number"
                                                                     value={entry.insertion_order ?? 50}
-                                                                    onChange={(e) => updateEntry(entry.uid, { insertion_order: parseInt(e.target.value) || 0 })}
+                                                                    onValueChange={value => updateEntry(entry.uid, { insertion_order: Math.trunc(value) || 0 })}
                                                                     className="ui-input ts-13"
                                                                 />
                                                             </div>
@@ -793,10 +794,10 @@ export function WorldBookManager({ isActive = true }: { isActive?: boolean } = {
                                                                     <input type="checkbox" checked={!!entry.useProbability} onChange={e => updateEntry(entry.uid, { useProbability: e.target.checked })} />
                                                                     启用
                                                                 </label>
-                                                                <input
+                                                                <NumberInput
                                                                     type="number"
                                                                     value={entry.probability ?? 100}
-                                                                    onChange={(e) => updateEntry(entry.uid, { probability: parseInt(e.target.value) || 0 })}
+                                                                    onValueChange={value => updateEntry(entry.uid, { probability: Math.trunc(value) || 0 })}
                                                                     min="0" max="100"
                                                                     disabled={!entry.useProbability}
                                                                     className="ui-input ts-13 ml-auto w-[88px]"

@@ -12,6 +12,7 @@
 //  ③ 默认关闭，且只对开了的角色生效。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { Eye, Loader2, ShieldAlert } from "lucide-react";
 
 import { Toggle, Textarea } from "@/components/ui/form";
@@ -208,7 +209,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
                         </span>
                       </div>
                       <div className="menu-right" style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <input
+                        <NumberInput
                           className="per-field-input"
                           style={{ width: 62 }}
                           type="number"
@@ -217,10 +218,10 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
                           max={MAX_ALLOWED}
                           value={min}
                           aria-label="间隔下限（分钟）"
-                          onChange={e => patch(character.id, { minMinutes: Number(e.target.value) })}
+                          onValueChange={value => patch(character.id, { minMinutes: value })}
                         />
                         <span className="menu-desc">~</span>
-                        <input
+                        <NumberInput
                           className="per-field-input"
                           style={{ width: 62 }}
                           type="number"
@@ -229,7 +230,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
                           max={MAX_ALLOWED}
                           value={max}
                           aria-label="间隔上限（分钟）"
-                          onChange={e => patch(character.id, { maxMinutes: Number(e.target.value) })}
+                          onValueChange={value => patch(character.id, { maxMinutes: value })}
                         />
                       </div>
                     </div>
@@ -239,7 +240,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
                         <span className="menu-label">每天最多（次）</span>
                         <span className="menu-desc">到上限就停，不会没完没了</span>
                       </div>
-                      <input
+                      <NumberInput
                         className="per-field-input"
                         style={{ width: 62 }}
                         type="number"
@@ -248,7 +249,7 @@ export function CheckInSettings({ onNotice }: { onNotice?: (msg: string) => void
                         max={DAILY_ALLOWED}
                         value={limit}
                         aria-label="每天最多查岗次数"
-                        onChange={e => patch(character.id, { dailyLimit: Number(e.target.value) })}
+                        onValueChange={value => patch(character.id, { dailyLimit: value })}
                       />
                     </div>
 

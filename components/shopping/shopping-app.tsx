@@ -1,4 +1,5 @@
 "use client";
+import { NumberInput } from "@/components/ui/number-input";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
@@ -755,7 +756,7 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
     }));
   }
 
-  function updateDeliveryDraft(key: "deliveryMinMinutes" | "deliveryMaxMinutes", value: string) {
+  function updateDeliveryDraft(key: "deliveryMinMinutes" | "deliveryMaxMinutes", value: number) {
     const amount = Number(value);
     setPromptDrafts(current => ({
       ...current,
@@ -1828,23 +1829,23 @@ export function ShoppingApp({ onClose, visible = true, onIdle, onBusyChange }: S
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
                 <label style={{ display: "flex", flexDirection: "column", gap: "6px", minWidth: 0 }}>
                   <span style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "#777" }}>最短到货（分钟）</span>
-                  <input
+                  <NumberInput
                     type="number"
                     min={1}
                     max={10080}
                     value={promptDrafts.deliveryMinMinutes}
-                    onChange={event => updateDeliveryDraft("deliveryMinMinutes", event.target.value)}
+                    onValueChange={value => updateDeliveryDraft("deliveryMinMinutes", value)}
                     style={{ width: "100%", minWidth: 0, height: "34px", border: "1px solid #eee", borderRadius: "12px", padding: "0 10px", fontSize: "calc(12px*var(--app-text-scale,1))", color: "#222", outline: "none" }}
                   />
                 </label>
                 <label style={{ display: "flex", flexDirection: "column", gap: "6px", minWidth: 0 }}>
                   <span style={{ fontSize: "calc(11px*var(--app-text-scale,1))", color: "#777" }}>最长到货（分钟）</span>
-                  <input
+                  <NumberInput
                     type="number"
                     min={1}
                     max={10080}
                     value={promptDrafts.deliveryMaxMinutes}
-                    onChange={event => updateDeliveryDraft("deliveryMaxMinutes", event.target.value)}
+                    onValueChange={value => updateDeliveryDraft("deliveryMaxMinutes", value)}
                     style={{ width: "100%", minWidth: 0, height: "34px", border: "1px solid #eee", borderRadius: "12px", padding: "0 10px", fontSize: "calc(12px*var(--app-text-scale,1))", color: "#222", outline: "none" }}
                   />
                 </label>

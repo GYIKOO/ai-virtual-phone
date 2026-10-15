@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { Bot, ChevronLeft, Clock3, NotebookPen, Trash2, WandSparkles, X } from "lucide-react";
 import { DotsThree } from "@phosphor-icons/react";
 
@@ -984,12 +985,12 @@ function DiaryEntryTimerSettingsPanel({ characters, settings, generatingCharacte
           </label>
           <label className="diary-entry-number-field">
             <span>间隔小时</span>
-            <input
+            <NumberInput
               type="number"
               min={1}
               max={720}
               value={settings.intervalHours}
-              onChange={event => onChange({ ...settings, intervalHours: Math.max(1, Math.min(720, Number(event.target.value) || 24)) })}
+              onValueChange={value => onChange({ ...settings, intervalHours: Math.max(1, Math.min(720, value || 24)) })}
             />
           </label>
         </div>

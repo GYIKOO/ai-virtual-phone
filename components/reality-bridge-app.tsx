@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 
 import { loadCharacters } from "@/lib/character-storage";
 import { CLOUD_BACKUP_BUCKET, normalizeBackupUrl } from "@/lib/cloud-backup/config";
@@ -2147,10 +2148,10 @@ export function RealityBridgeApp({ onClose, onNotice, onOpenSettings }: {
                 </div>
                 {editing.schedule.kind === "interval" ? (
                   <label>每隔多少分钟
-                    <input type="number" min={1} max={10080} value={editing.schedule.minutes ?? 60}
-                      onChange={event => setEditing({
+                    <NumberInput type="number" min={1} max={10080} value={editing.schedule.minutes ?? 60}
+                      onValueChange={value => setEditing({
                         ...editing,
-                        schedule: { kind: "interval", minutes: Math.max(1, Math.min(10080, Number(event.target.value) || 1)) },
+                        schedule: { kind: "interval", minutes: Math.max(1, Math.min(10080, value || 1)) },
                       })} />
                   </label>
                 ) : (

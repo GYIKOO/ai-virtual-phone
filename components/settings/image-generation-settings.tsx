@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { AlertCircle, Camera, ChevronDown, Image, Info, Plus, Power, RefreshCw, ScanFace, Sparkles, Trash2, Upload } from "lucide-react";
 import type { ImageGenerationSettings as ImageGenerationSettingsType, NovelAiPreset, OpenAiImagePreset } from "@/lib/settings-types";
 import {
@@ -691,27 +692,27 @@ export function ImageGenerationSettings() {
                         <div className="grid grid-cols-2 gap-3">
                             <div className="flex flex-col gap-1">
                                 <label className="menu-desc ml-1">步数 (Steps: {naiSettings.activePreset.steps})</label>
-                                <Input
+                                <NumberInput className="ui-input"
                                     type="number"
                                     min={1}
                                     max={50}
                                     value={naiSettings.activePreset.steps}
-                                    onChange={(event) => updateActivePreset({
-                                        steps: Math.max(1, Math.min(50, parseInt(event.target.value, 10) || 28)),
+                                    onValueChange={value => updateActivePreset({
+                                        steps: Math.max(1, Math.min(50, Math.trunc(value) || 28)),
                                     })}
                                 />
                             </div>
 
                             <div className="flex flex-col gap-1">
                                 <label className="menu-desc ml-1">提示词相关度 (CFG Scale: {naiSettings.activePreset.scale})</label>
-                                <Input
+                                <NumberInput className="ui-input"
                                     type="number"
                                     min={1}
                                     max={30}
                                     step={0.1}
                                     value={naiSettings.activePreset.scale}
-                                    onChange={(event) => updateActivePreset({
-                                        scale: Math.max(1, Math.min(30, parseFloat(event.target.value) || 6.0)),
+                                    onValueChange={value => updateActivePreset({
+                                        scale: Math.max(1, Math.min(30, value || 6.0)),
                                     })}
                                 />
                             </div>
@@ -967,13 +968,13 @@ export function ImageGenerationSettings() {
                     <div className="grid grid-cols-2 gap-3">
                         <div className="flex flex-col gap-1">
                             <label className="menu-desc ml-1">默认过期秒数</label>
-                            <Input
+                            <NumberInput className="ui-input"
                                 type="number"
                                 min={0}
                                 max={15552000}
                                 value={settings.imageHosting.defaultExpirationSeconds}
-                                onChange={(event) => updateImageHosting({
-                                    defaultExpirationSeconds: Math.max(0, Number.parseInt(event.target.value, 10) || 0),
+                                onValueChange={value => updateImageHosting({
+                                    defaultExpirationSeconds: Math.max(0, Math.trunc(value) || 0),
                                 })}
                                 disabled={settings.imageHosting.provider !== "imgbb"}
                             />
@@ -981,13 +982,13 @@ export function ImageGenerationSettings() {
                         </div>
                         <div className="flex flex-col gap-1">
                             <label className="menu-desc ml-1">上传上限 KB</label>
-                            <Input
+                            <NumberInput className="ui-input"
                                 type="number"
                                 min={64}
                                 max={32768}
                                 value={Math.round(settings.imageHosting.maxUploadBytes / 1024)}
-                                onChange={(event) => updateImageHosting({
-                                    maxUploadBytes: Math.max(64, Number.parseInt(event.target.value, 10) || 900) * 1024,
+                                onValueChange={value => updateImageHosting({
+                                    maxUploadBytes: Math.max(64, Math.trunc(value) || 900) * 1024,
                                 })}
                                 disabled={settings.imageHosting.provider !== "imgbb"}
                             />

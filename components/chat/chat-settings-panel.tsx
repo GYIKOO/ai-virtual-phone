@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import {
     CHAT_INITIAL_VISIBLE_MESSAGE_COUNT,
     CHAT_LOAD_MORE_MESSAGE_COUNT,
@@ -1321,12 +1322,12 @@ export function ChatSettingsPanel({
                             >
                                 -
                             </button>
-                            <input
+                            <NumberInput
                                 type="number"
                                 min={0}
                                 max={MAX_VISION_IMAGE_PROMPT_LIMIT}
                                 value={visionImagePromptLimit}
-                                onChange={e => updateVisionImagePromptLimit(e.target.value)}
+                                onValueChange={value => updateVisionImagePromptLimit(value)}
                                 className="ui-input h-8 w-14 text-center"
                             />
                             <button

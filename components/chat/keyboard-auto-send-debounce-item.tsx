@@ -9,6 +9,7 @@
 // 开启后下面多一行等待秒数的输入框。开关关掉后行为与原版完全一致。
 
 import { useState, type CSSProperties } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { KeyboardOff } from "lucide-react";
 import { Toggle } from "@/components/ui/form";
 import {
@@ -60,7 +61,7 @@ export function KeyboardAutoSendDebounceItem({ sessionId }: { sessionId: string 
                     <span className="menu-desc">这几秒内又点回输入框，就当你还没说完，先不回</span>
                 </div>
                 <div className="menu-right">
-                    <input
+                    <NumberInput
                         type="number"
                         inputMode="decimal"
                         autoComplete="off"
@@ -68,7 +69,7 @@ export function KeyboardAutoSendDebounceItem({ sessionId }: { sessionId: string 
                         max={MAX_AUTO_SEND_DEBOUNCE_MS / 1000}
                         step={0.5}
                         value={seconds}
-                        onChange={e => commit(Number(e.target.value))}
+                        onValueChange={value => commit(value)}
                         className="ui-input h-8 w-16 text-center"
                     />
                 </div>
