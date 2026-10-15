@@ -10,6 +10,7 @@
 //    并支持一键清空——感知数据只留本机，用户随时可清。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import {
   Activity, AlertCircle, BarChart3, Battery, Calendar, Cloud,
   Footprints, MapPin, Moon, Plus, RefreshCw, ShieldCheck, Smartphone, Sunrise, Trash2, Users, Wifi,
@@ -305,13 +306,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">采样间隔</div>
                       <div className="per-field-hint">多久检查一次手机状态，单位秒</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={20}
                       max={600}
                       value={config.sampleSeconds}
-                      onChange={e => update({ sampleSeconds: Number(e.target.value) || 60 })}
+                      onValueChange={value => update({ sampleSeconds: value || 60 })}
                     />
                   </div>
                   <div className="per-field">
@@ -319,13 +320,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">电量变动步长</div>
                       <div className="per-field-hint">电量每掉多少个百分点才提醒一次</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={1}
                       max={50}
                       value={config.batteryStepPercent}
-                      onChange={e => update({ batteryStepPercent: Number(e.target.value) || 5 })}
+                      onValueChange={value => update({ batteryStepPercent: value || 5 })}
                     />
                   </div>
                   <div className="per-field">
@@ -333,13 +334,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">应用停留时长</div>
                       <div className="per-field-hint">同一应用连续用满多少分钟才算一次事件</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={2}
                       max={180}
                       value={config.appDwellMinutes}
-                      onChange={e => update({ appDwellMinutes: Number(e.target.value) || 20 })}
+                      onValueChange={value => update({ appDwellMinutes: value || 20 })}
                     />
                   </div>
                   <div className="per-field">
@@ -350,13 +351,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                         0 = 这类信号全关。与上面「应用停留时长」的区别：那个看连续停留，一旦切走就归零
                       </div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={0}
                       max={720}
                       value={config.appUsageSignalMinutes}
-                      onChange={e => update({ appUsageSignalMinutes: Math.max(0, Number(e.target.value) || 0) })}
+                      onValueChange={value => update({ appUsageSignalMinutes: Math.max(0, value || 0) })}
                     />
                   </div>
                   <div className="per-field">
@@ -364,13 +365,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">每小时上限</div>
                       <div className="per-field-hint">保护你的 API 额度：超过这个数就不再投递</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={1}
                       max={60}
                       value={config.hourlyLimit}
-                      onChange={e => update({ hourlyLimit: Number(e.target.value) || 12 })}
+                      onValueChange={value => update({ hourlyLimit: value || 12 })}
                     />
                   </div>
                   <div className="per-field">
@@ -378,13 +379,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">电量偏低阈值</div>
                       <div className="per-field-hint">电量跌到这个百分比以下，事件名就是「电量偏低」（现实桥按它匹配）</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={1}
                       max={99}
                       value={config.batteryLowPercent}
-                      onChange={e => update({ batteryLowPercent: Number(e.target.value) || 20 })}
+                      onValueChange={value => update({ batteryLowPercent: value || 20 })}
                     />
                   </div>
                   <div className="per-field" style={{ alignItems: "center" }}>
@@ -416,15 +417,15 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                             onChange={e => updateOverrides(config.appUsageSignalOverrides.map((r, i) =>
                               i === idx ? { ...r, pattern: e.target.value } : r))}
                           />
-                          <input
+                          <NumberInput
                             className="per-field-input"
                             style={{ width: 72 }}
                             type="number"
                             min={0}
                             max={720}
                             value={rule.minutes}
-                            onChange={e => updateOverrides(config.appUsageSignalOverrides.map((r, i) =>
-                              i === idx ? { ...r, minutes: Math.max(0, Number(e.target.value) || 0) } : r))}
+                            onValueChange={value => updateOverrides(config.appUsageSignalOverrides.map((r, i) =>
+                              i === idx ? { ...r, minutes: Math.max(0, value || 0) } : r))}
                           />
                           <button
                             type="button"
@@ -473,13 +474,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">离开多久才算</div>
                       <div className="per-field-hint">低于这个时长不算「离开过」，防止切一下别的 App 回来就触发；单位分钟</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={1}
                       max={720}
                       value={config.returnAwayMinutes}
-                      onChange={e => update({ returnAwayMinutes: Number(e.target.value) || 5 })}
+                      onValueChange={value => update({ returnAwayMinutes: value || 5 })}
                     />
                   </div>
                   <div className="per-field">
@@ -487,13 +488,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">触发间隔</div>
                       <div className="per-field-hint">两次信号之间至少隔多久，防止反复切前后台刷屏；单位分钟，0 = 不限制</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={0}
                       max={720}
                       value={config.returnCooldownMinutes}
-                      onChange={e => update({ returnCooldownMinutes: Number(e.target.value) || 0 })}
+                      onValueChange={value => update({ returnCooldownMinutes: value || 0 })}
                     />
                   </div>
                 </div>
@@ -514,13 +515,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                         这段时间正好落在推送安静时段里，开着「遵守安静时段」时它会被拦下
                       </div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={0}
                       max={12}
                       value={config.lateNightUntilHour}
-                      onChange={e => update({ lateNightUntilHour: Number(e.target.value) || 0 })}
+                      onValueChange={value => update({ lateNightUntilHour: value || 0 })}
                     />
                   </div>
                   <div className="per-field">
@@ -531,13 +532,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                         单位小时，0 = 关
                       </div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={0}
                       max={336}
                       value={config.noTalkHours}
-                      onChange={e => update({ noTalkHours: Number(e.target.value) || 0 })}
+                      onValueChange={value => update({ noTalkHours: value || 0 })}
                     />
                   </div>
                   <div className="per-field">
@@ -548,13 +549,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                         单位分钟，0 = 关。需要步数权限
                       </div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={0}
                       max={720}
                       value={config.sitStillMinutes}
-                      onChange={e => update({ sitStillMinutes: Number(e.target.value) || 0 })}
+                      onValueChange={value => update({ sitStillMinutes: value || 0 })}
                     />
                   </div>
                 </div>
@@ -583,13 +584,13 @@ export function PerceptionSettings({ onNotice }: { onNotice?: (msg: string) => v
                       <div className="per-field-label">主动查看的间隔</div>
                       <div className="per-field-hint">角色两次「看手机」之间至少隔多久，防止连查；单位分钟，0 = 不限制</div>
                     </div>
-                    <input
+                    <NumberInput
                       className="per-field-input"
                       type="number"
                       min={0}
                       max={720}
                       value={config.queryCooldownMinutes}
-                      onChange={e => update({ queryCooldownMinutes: Number(e.target.value) || 0 })}
+                      onValueChange={value => update({ queryCooldownMinutes: value || 0 })}
                     />
                   </div>
                 </div>

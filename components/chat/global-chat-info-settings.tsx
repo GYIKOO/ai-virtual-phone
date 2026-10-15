@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { BellRing, ChevronRight, Code, Image as ImageIcon, LayoutPanelTop, Play, RotateCcw, User, X } from "lucide-react";
 import { PageShell } from "@/components/ui/page-shell";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
@@ -417,7 +418,7 @@ export function GlobalChatInfoSettings({ onBack }: { onBack: () => void }) {
                         <div className="menu-label-group"><span className="menu-label">传入最近图片</span><span className="menu-desc">所有私聊和群聊的默认视觉上下文数量</span></div>
                         <div className="menu-right gap-2">
                             <button className="ui-btn ui-btn-ghost h-8 w-8 p-0" onClick={() => changeVisionLimit(visionLimit - 1)} disabled={visionLimit <= 0}>-</button>
-                            <input type="number" min={0} max={MAX_VISION_IMAGE_PROMPT_LIMIT} value={visionLimit} onChange={event => changeVisionLimit(event.target.value)} className="ui-input h-8 w-14 text-center" />
+                            <NumberInput type="number" min={0} max={MAX_VISION_IMAGE_PROMPT_LIMIT} value={visionLimit} onValueChange={value => changeVisionLimit(value)} className="ui-input h-8 w-14 text-center" />
                             <button className="ui-btn ui-btn-ghost h-8 w-8 p-0" onClick={() => changeVisionLimit(visionLimit + 1)} disabled={visionLimit >= MAX_VISION_IMAGE_PROMPT_LIMIT}>+</button>
                         </div>
                     </div>

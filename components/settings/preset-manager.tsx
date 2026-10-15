@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useContext, useCallback, useMemo } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { Plus, Upload, Download, Trash2, RotateCcw, ChevronLeft, ChevronDown, GripVertical, MessageSquare, AlertCircle, Maximize2, Copy, Replace, CheckSquare, Check, Filter, MoreHorizontal } from "lucide-react";
 import {
     loadPresets,
@@ -1857,11 +1858,11 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                                                                     </div>
                                                                     <div className={`flex flex-col gap-1 min-w-0${prompt.marker ? " opacity-40 pointer-events-none" : ""}`}>
                                                                         <label className="menu-desc ts-11">Inject Depth</label>
-                                                                        <input type="number" disabled={!!prompt.marker} value={prompt.injection_depth ?? 0} onChange={e => {
+                                                                        <NumberInput type="number" disabled={!!prompt.marker} value={prompt.injection_depth ?? 0} onValueChange={value => {
                                                                             updatePrompt(
                                                                                 preset,
                                                                                 prompt.identifier,
-                                                                                current => ({ ...current, injection_depth: parseInt(e.target.value) || 0 }),
+                                                                                current => ({ ...current, injection_depth: Math.trunc(value) || 0 }),
                                                                             );
                                                                         }} className="ui-input ts-13 px-2 py-[6px] rounded-[6px]" />
                                                                     </div>

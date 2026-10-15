@@ -765,7 +765,7 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
     const userIdentity = isGroup ? resolveUserIdentity(undefined, "group_chat") : null;
     const groupAvatarItems = isGroup
         ? [
-            ...(userIdentity ? [{ id: "self", name: userIdentity.name || "我", avatar: userIdentity.avatarUrl || "" }] : []),
+            ...(!session.isSpectator && userIdentity ? [{ id: "self", name: userIdentity.name || "我", avatar: userIdentity.avatarUrl || "" }] : []),
             ...((session.participantIds || [])
                 .map(id => chars.find(c => c.id === id))
                 .filter(Boolean) as Character[])

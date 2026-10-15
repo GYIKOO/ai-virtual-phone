@@ -13,6 +13,7 @@
 // 挂载方式与 DeviceActionSettings 一致：直接渲染内容，不套 PageShell、不收 onBack。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 
 import { Toggle } from "@/components/ui/form";
 import { loadCharacters } from "@/lib/character-storage";
@@ -307,15 +308,15 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
             <div className="ws-grid2">
               <label className="ws-field">
                 宽（dp）
-                <input type="number" min={WIDGET_LIMITS.widthDp.min} max={WIDGET_LIMITS.widthDp.max}
+                <NumberInput type="number" min={WIDGET_LIMITS.widthDp.min} max={WIDGET_LIMITS.widthDp.max}
                   value={config.widthDp}
-                  onChange={e => update({ widthDp: clampInt(Number(e.target.value) || config.widthDp, WIDGET_LIMITS.widthDp.min, WIDGET_LIMITS.widthDp.max) })} />
+                  onValueChange={value => update({ widthDp: clampInt(value || config.widthDp, WIDGET_LIMITS.widthDp.min, WIDGET_LIMITS.widthDp.max) })} />
               </label>
               <label className="ws-field">
                 高（dp）
-                <input type="number" min={WIDGET_LIMITS.heightDp.min} max={WIDGET_LIMITS.heightDp.max}
+                <NumberInput type="number" min={WIDGET_LIMITS.heightDp.min} max={WIDGET_LIMITS.heightDp.max}
                   value={config.heightDp}
-                  onChange={e => update({ heightDp: clampInt(Number(e.target.value) || config.heightDp, WIDGET_LIMITS.heightDp.min, WIDGET_LIMITS.heightDp.max) })} />
+                  onValueChange={value => update({ heightDp: clampInt(value || config.heightDp, WIDGET_LIMITS.heightDp.min, WIDGET_LIMITS.heightDp.max) })} />
               </label>
             </div>
             <label className="ws-field">
@@ -411,15 +412,15 @@ export function WidgetSettings({ onNotice }: { onNotice?: (msg: string) => void 
               <label className="ws-field">
                 多久换一次（小时）
                 {/* 自己填，不再给死档位：1~168 小时（一周）之间任意整数 */}
-                <input
+                <NumberInput
                   type="number"
                   inputMode="numeric"
                   min={WIDGET_LIMITS.autoIntervalHours.min}
                   max={WIDGET_LIMITS.autoIntervalHours.max}
                   value={config.autoIntervalHours}
-                  onChange={e => update({
+                  onValueChange={value => update({
                     autoIntervalHours: clampInt(
-                      Number(e.target.value) || config.autoIntervalHours,
+                      value || config.autoIntervalHours,
                       WIDGET_LIMITS.autoIntervalHours.min,
                       WIDGET_LIMITS.autoIntervalHours.max,
                     ),

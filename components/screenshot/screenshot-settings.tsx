@@ -14,6 +14,7 @@
 // 直接渲染内容，不套 PageShell、不收 onBack。
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { Camera, CircleDot, Loader2, ShieldCheck, Smartphone, Trash2 } from "lucide-react";
 
 import { Toggle } from "@/components/ui/form";
@@ -736,7 +737,7 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
                 </span>
               </div>
               {/* 直接填数值：1~50 张之间任意整数，不再给死档位 */}
-              <input
+              <NumberInput
                 className="per-field-input"
                 style={{ maxWidth: 82 }}
                 type="number"
@@ -745,8 +746,8 @@ export function ScreenshotSettings({ onNotice }: { onNotice?: (msg: string) => v
                 max={50}
                 value={config.keepRecent}
                 aria-label="保留最近截屏张数"
-                onChange={e => {
-                  const n = Number(e.target.value);
+                onValueChange={value => {
+                  const n = value;
                   if (!Number.isFinite(n)) return;
                   update({ keepRecent: Math.max(1, Math.min(50, Math.round(n))) });
                 }}

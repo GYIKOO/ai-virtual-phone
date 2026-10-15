@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent, type TextareaHTMLAttributes, type TouchEvent } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { Bot, ChevronLeft, Clock3, Flame, MessageCircle, PenLine, RotateCw, Trash2, UserRound, WandSparkles, X } from "lucide-react";
 import { CardsThree, DotsThree } from "@phosphor-icons/react";
 
@@ -1686,12 +1687,12 @@ function TimerSettingsPanel({ characters, settings, generatingCharacterIds, repl
             </label>
             <label className="nw-field nw-interval-field">
               <span>间隔分钟</span>
-              <input
+              <NumberInput
                 type="number"
                 min={5}
                 max={10080}
                 value={settings.intervalMinutes}
-                onChange={event => onChange({ ...settings, intervalMinutes: Math.max(5, Math.min(10080, Number(event.target.value) || 360)) })}
+                onValueChange={value => onChange({ ...settings, intervalMinutes: Math.max(5, Math.min(10080, value || 360)) })}
               />
             </label>
           </div>

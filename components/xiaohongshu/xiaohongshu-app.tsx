@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type TouchEvent, type UIEvent, type WheelEvent } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { ShareFat } from "@phosphor-icons/react";
 import {
   AtSign,
@@ -3228,14 +3229,14 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
             <div className="xhs-profile-edit-body">
               <div className="xhs-profile-edit-field">
                 <span className="xhs-profile-edit-section-title">INTERACTION <em>角色互动概率</em></span>
-                <input
+                <NumberInput
                   className="xhs-profile-edit-pill"
                   type="number"
                   min={0}
                   max={100}
                   value={settingsDraft.sendToCharacterProbability}
                   placeholder="发给角色的概率 (0–100)"
-                  onChange={event => setSettingsDraft(prev => ({ ...prev, sendToCharacterProbability: Number(event.target.value) }))}
+                  onValueChange={value => setSettingsDraft(prev => ({ ...prev, sendToCharacterProbability: value }))}
                 />
               </div>
 

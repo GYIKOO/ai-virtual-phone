@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { NumberInput } from "@/components/ui/number-input";
 import { AlertCircle, RotateCcw } from "lucide-react";
 import { BottomSheet, ConfirmDialog } from "@/components/ui/modal";
 import { loadMemoryConfig } from "@/lib/memory-storage";
@@ -79,12 +80,12 @@ export function MemoryRebuildPanel({ characterId, characterName, onChanged }: { 
                 {error && <p role="alert" className="ts-12 text-red-600 whitespace-pre-wrap">{error}</p>}
                 {!job ? <>
                     <label className="menu-label flex flex-col gap-2">每批最多处理的记录数
-                        <input className="ui-input w-full" type="number" min={1} max={1000} value={batchSize} onChange={e => { setBatchSize(Number(e.target.value)); setPreview(undefined); }} />
+                        <NumberInput className="ui-input w-full" type="number" min={1} max={1000} value={batchSize} onValueChange={value => { setBatchSize(value); setPreview(undefined); }} />
                         <span className="menu-desc">默认沿用当前自动总结间隔；仅调整本次重建，不改变日常设置。</span>
                         <span className="menu-desc">最后不足一批的记录，达到日常自动总结阈值才总结，否则留着继续累积。同一时间戳的记录不会拆在已总结与未总结两侧。</span>
                     </label>
                     <label className="menu-label flex flex-col gap-2">每次请求输入预算（估算 tokens）
-                        <input className="ui-input w-full" type="number" min={1024} max={64000} step={1024} value={inputTokens} onChange={e => { setInputTokens(Number(e.target.value)); setPreview(undefined); }} />
+                        <NumberInput className="ui-input w-full" type="number" min={1024} max={64000} step={1024} value={inputTokens} onValueChange={value => { setInputTokens(value); setPreview(undefined); }} />
                         <span className="menu-desc">超长记录会进一步拆分。须为模型输出预留空间；估算不等于模型精确计数。</span>
                     </label>
                     <label className="menu-label flex items-center gap-2"><input type="checkbox" checked={includeCore} onChange={e => { setIncludeCore(e.target.checked); setPreview(undefined); }} />同时基于新长期记忆重建核心记忆</label>
