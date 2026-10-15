@@ -1,5 +1,6 @@
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { resolveUserIdentity } from "./settings-storage";
+import { normalizeProbabilityMap } from "./social-post-probability";
 import {
   DEFAULT_XIAOHONGSHU_PROFILE,
   DEFAULT_XIAOHONGSHU_SETTINGS,
@@ -158,13 +159,15 @@ export function normalizeXiaohongshuSettings(raw: unknown): XiaohongshuSettings 
     collapseBilingualTranslation: record.collapseBilingualTranslation !== false,
     bilingualTranslationPrompt: cleanMultiline(record.bilingualTranslationPrompt, 8000) || DEFAULT_XIAOHONGSHU_SETTINGS.bilingualTranslationPrompt,
     npcIdentityGuardPrompt: cleanMultiline(record.npcIdentityGuardPrompt, 8000) || DEFAULT_XIAOHONGSHU_SETTINGS.npcIdentityGuardPrompt,
-    npcFeedPrompt: npcFeedPrompt && npcFeedPrompt.includes("#附近笔记") ? npcFeedPrompt : DEFAULT_XIAOHONGSHU_SETTINGS.npcFeedPrompt,
+    npcFeedPrompt: npcFeedPrompt || DEFAULT_XIAOHONGSHU_SETTINGS.npcFeedPrompt,
     npcUserPostReactionPrompt: cleanMultiline(record.npcUserPostReactionPrompt, 8000) || DEFAULT_XIAOHONGSHU_SETTINGS.npcUserPostReactionPrompt,
     npcCommentReplyPrompt: cleanMultiline(record.npcCommentReplyPrompt, 8000) || DEFAULT_XIAOHONGSHU_SETTINGS.npcCommentReplyPrompt,
     npcMoreCommentsPrompt: cleanMultiline(record.npcMoreCommentsPrompt, 8000) || DEFAULT_XIAOHONGSHU_SETTINGS.npcMoreCommentsPrompt,
     npcDmReplyPrompt: cleanMultiline(record.npcDmReplyPrompt, 8000) || DEFAULT_XIAOHONGSHU_SETTINGS.npcDmReplyPrompt,
     participantCharacterIds: Array.from(new Set(participantCharacterIds)),
     sendToCharacterProbability: Math.max(0, Math.min(100, probability)),
+    browseCommentProbability: Math.min(100, numberOr(record.browseCommentProbability, DEFAULT_XIAOHONGSHU_SETTINGS.browseCommentProbability)),
+    browseCommentProbabilityByCharacter: normalizeProbabilityMap(record.browseCommentProbabilityByCharacter),
   };
 }
 

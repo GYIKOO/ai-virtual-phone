@@ -1,0 +1,8 @@
+.controls { padding: 10px 14px 14px; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: calc(13px * var(--app-text-scale, 1)); line-height: 1.5; }
+.row > span:first-child { min-width: 0; }
+.probability { margin-bottom: 10px; }
+.number { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; color: inherit; }
+.number input { width: 62px; min-width: 0; padding: 4px 6px; border: 1px solid #8883; border-radius: 8px; text-align: right; font: inherit; color: inherit; background: transparent; }
+.range { display: block; width: 100%; margin: 8px 0 0; accent-color: var(--social-post-accent, #ad7693); }
+.hint { margin: 7px 0 0; font-size: calc(11px * var(--app-text-scale, 1)); line-height: 1.55; opacity: .65; }

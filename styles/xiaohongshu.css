@@ -2894,6 +2894,16 @@ textarea.xhs-profile-edit-pill.xhs-profile-edit-bio {
   color: #14161a;
 }
 
+.xhs-social-hint { margin: 4px 0 0; color: #858a93; font-size: calc(11px * var(--app-text-scale, 1)); line-height: 1.55; }
+.xhs-social-character { --social-post-accent: #ff2442; border: 1px solid #eceef0; border-radius: 16px; color: #282b30; background: #fafbfc; }
+.xhs-social-character .ui-toggle[data-checked] { background: #ff2442; }
+.xhs-social-character header { display: flex; align-items: center; gap: 9px; padding: 12px 14px 0; }
+.xhs-social-character header strong { font-size: calc(13px * var(--app-text-scale, 1)); font-weight: 600; overflow-wrap: anywhere; }
+.xhs-social-character header img, .xhs-social-avatar { width: 28px; height: 28px; flex-shrink: 0; border-radius: 50%; object-fit: cover; }
+.xhs-social-avatar { display: grid; place-items: center; background: #eee; font-size: 12px; }
+.xhs-social-comment { border-top: 1px solid #eceef0; padding: 12px 14px 4px; }
+.xhs-social-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: calc(12px * var(--app-text-scale, 1)); }
+
 .xhs-settings-edit-prompt-textarea {
   display: block;
   margin-top: 6px;

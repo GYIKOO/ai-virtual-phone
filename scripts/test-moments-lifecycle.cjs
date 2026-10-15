@@ -17,7 +17,8 @@ function extract(file, name, globals) {
 }
 const kv = new Map();
 const kvMock = { kvGet: key => kv.get(key), kvSet: (key, value) => kv.set(key, value), registerKvMigration() {} };
-const storage = load('lib/moments-storage.ts', { './kv-db': kvMock }, { window: {} });
+const social = load('lib/social-post-probability.ts');
+const storage = load('lib/moments-storage.ts', { './kv-db': kvMock, './social-post-probability': social }, { window: {} });
 const config = () => storage.loadMomentsConfig();
 
 async function gates() {
@@ -46,7 +47,7 @@ async function gates() {
 }
 async function scheduling() {
   storage.saveMomentsConfig({ ...config(), autoPostProbabilityByCharacter: { c: 0, rare: 0.2 } });
-  assert.equal(storage.getMomentPostProbability('other'), 1, 'old configurations retain behavior');
+  assert.equal(storage.getMomentPostProbability('other'), 0.5, 'unset characters default to 50%; explicit overrides remain');
   assert.equal(storage.getMomentPostProbability('rare'), 0.2);
   let requests = 0;
   storage.getOrCreateSchedule('c');
@@ -66,7 +67,7 @@ async function scheduling() {
   poll(); await Promise.resolve(); await Promise.resolve(); assert.equal(requests, 1);
   storage.saveMomentsConfig({ ...config(), autoPostProbabilityByCharacter: { c: -1, rare: 3, invalid: '0.2' }, lifePrompt: '' });
   assert.equal(storage.getMomentPostProbability('c'), 0); assert.equal(storage.getMomentPostProbability('rare'), 1);
-  assert.equal(storage.getMomentPostProbability('invalid'), 1); assert.equal(config().lifePrompt, '', 'blank prompt is an opt-out');
+  assert.equal(storage.getMomentPostProbability('invalid'), 0.5); assert.equal(config().lifePrompt, '', 'blank prompt is an opt-out');
 }
 
 function timeAndPlans() {
