@@ -2,6 +2,9 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type TouchEvent, type UIEvent, type WheelEvent } from "react";
 import { NumberInput } from "@/components/ui/number-input";
+import { ProbabilityControl, SocialPostControls } from "@/components/ui/social-post-controls";
+import { loadMomentsConfig, saveMomentsConfig } from "@/lib/moments-storage";
+import { getSocialPostProbability, mergeSocialPostDraft, rollXiaohongshuActivity, type SocialPostConfig } from "@/lib/social-post-probability";
 import { ShareFat } from "@phosphor-icons/react";
 import {
   AtSign,
@@ -62,6 +65,7 @@ import {
   makeXiaohongshuComment,
   makeXiaohongshuNotification,
   saveXiaohongshuState,
+  normalizeXiaohongshuSettings,
 } from "@/lib/xiaohongshu-storage";
 import {
   deleteXiaohongshuProjectionEventForComment,
@@ -769,6 +773,8 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
   const [pendingFeedAction, setPendingFeedAction] = useState<PendingFeedAction | null>(null);
   const [profileDraft, setProfileDraft] = useState(state.profile);
   const [settingsDraft, setSettingsDraft] = useState(state.settings);
+  const [socialDraft, setSocialDraft] = useState<SocialPostConfig>(loadMomentsConfig);
+  const socialOriginal = useRef<SocialPostConfig>(socialDraft);
   const [expandedPrompts, setExpandedPrompts] = useState<Set<string>>(new Set());
   const [draft, setDraft] = useState<XiaohongshuUserPostInput>({
     title: "",
@@ -1407,9 +1413,14 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
     let firstError: unknown = null;
 
     for (const character of participants) {
+      const plan = rollXiaohongshuActivity(
+        getSocialPostProbability(character.id, "xiaohongshu", loadMomentsConfig()),
+        activeSettings.browseCommentProbabilityByCharacter[character.id] ?? activeSettings.browseCommentProbability / 100,
+      );
+      if (!plan.post && !plan.comment) continue;
       let activity: ParsedXiaohongshuCharacterActivity | null = null;
       try {
-        activity = await generateXiaohongshuCharacterActivity(character.id, current.notes.slice(0, 30), activeSettings);
+        activity = await generateXiaohongshuCharacterActivity(character.id, current.notes.slice(0, 30), activeSettings, plan);
       } catch (err) {
         firstError ??= err;
         console.warn("[Xiaohongshu] Character activity failed:", character.name, err);
@@ -1509,19 +1520,30 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
     setProfileOpen(false);
   }
 
+  function openSettings() {
+    setSettingsDraft(state.settings);
+    const social = loadMomentsConfig();
+    socialOriginal.current = social;
+    setSocialDraft(social);
+    setSettingsOpen(true);
+  }
+
   function handleSaveSettings() {
+    const current = loadMomentsConfig();
+    saveMomentsConfig({ ...current, ...mergeSocialPostDraft(socialOriginal.current, socialDraft, current) });
     persist({
       ...state,
-      settings: {
+      settings: normalizeXiaohongshuSettings({
         ...settingsDraft,
         bilingualTranslationPrompt: settingsDraft.bilingualTranslationPrompt.trim() || DEFAULT_XIAOHONGSHU_BILINGUAL_PROMPT,
         sendToCharacterProbability: Math.max(0, Math.min(100, Number(settingsDraft.sendToCharacterProbability) || 0)),
-      },
+      }),
     });
     setSettingsOpen(false);
   }
 
   function handleResetSettingsDraft() {
+    if (!window.confirm("恢复小红书默认设置？本页自定义提示词、参与角色和评论概率将重置，保存后生效。共享发帖概率保持不变。")) return;
     setSettingsDraft(DEFAULT_XIAOHONGSHU_SETTINGS);
   }
 
@@ -1673,7 +1695,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
 
       setBusy("character-reaction");
       for (const characterId of current.settings.participantCharacterIds) {
-        if (Math.random() * 100 > current.settings.sendToCharacterProbability) continue;
+        if (Math.random() * 100 >= current.settings.sendToCharacterProbability) continue;
         const character = characters.find(item => item.id === characterId);
         if (!character) continue;
         const latestNote = current.notes.find(note => note.id === userNote.id) ?? userNote;
@@ -2995,7 +3017,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
                   <ChevronLeft size={24} strokeWidth={2.4} />
                 </button>
                 <div>
-                  <button type="button" onClick={() => setSettingsOpen(true)} aria-label="设置">
+                  <button type="button" onClick={openSettings} aria-label="设置">
                     <MoreHorizontal size={22} strokeWidth={1.5} />
                   </button>
                 </div>
@@ -3036,7 +3058,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
                     <div><strong>{formatCount(profileStats.likedAndSavedCount)}</strong><span>获赞与收藏</span></div>
                   </div>
                   <button type="button" className="cp-xhs-profile-edit" onClick={() => { setProfileDraft(state.profile); setProfileOpen(true); }}>编辑资料</button>
-                  <button type="button" className="cp-xhs-profile-settings" aria-label="Profile settings" onClick={() => setSettingsOpen(true)}>
+                  <button type="button" className="cp-xhs-profile-settings" aria-label="Profile settings" onClick={openSettings}>
                     <MoreHorizontal size={22} strokeWidth={1.5} />
                   </button>
                 </div>
@@ -3228,7 +3250,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
 
             <div className="xhs-profile-edit-body">
               <div className="xhs-profile-edit-field">
-                <span className="xhs-profile-edit-section-title">INTERACTION <em>角色互动概率</em></span>
+                <span className="xhs-profile-edit-section-title">INTERACTION <em>回应我的帖子</em></span>
                 <NumberInput
                   className="xhs-profile-edit-pill"
                   type="number"
@@ -3238,6 +3260,14 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
                   placeholder="发给角色的概率 (0–100)"
                   onValueChange={value => setSettingsDraft(prev => ({ ...prev, sendToCharacterProbability: value }))}
                 />
+                <p className="xhs-social-hint">你发布笔记后，参与角色回应这条笔记的概率。</p>
+              </div>
+
+              <div className="xhs-profile-edit-field">
+                <span className="xhs-profile-edit-section-title">BROWSING <em>刷新时的评论概率</em></span>
+                <ProbabilityControl label="默认评论概率" value={settingsDraft.browseCommentProbability}
+                  onChange={value => setSettingsDraft(prev => ({ ...prev, browseCommentProbability: value }))} />
+                <p className="xhs-social-hint">发帖、评论分别抽取；都未抽中的角色不调用模型。直接回复与 @ 互动不受影响。</p>
               </div>
 
               <div className="xhs-profile-edit-field">
@@ -3295,8 +3325,29 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
                 </div>
               </div>
 
+              {characters.filter(character => settingsDraft.participantCharacterIds.includes(character.id)).map(character => (
+                <section className="xhs-social-character" key={character.id} aria-label={`${character.name}的互动设置`}>
+                  <header>{character.avatar ? <img src={character.avatar} alt="" /> : <span className="xhs-social-avatar">{character.name.slice(0, 1)}</span>}<strong>{character.name}</strong></header>
+                  <SocialPostControls characterId={character.id} app="xiaohongshu" config={socialDraft}
+                    onChange={patch => setSocialDraft(prev => ({ ...prev, ...patch }))} />
+                  <div className="xhs-social-comment">
+                    <label className="xhs-social-row"><span>评论概率跟随默认值</span><Toggle
+                      checked={!Object.hasOwn(settingsDraft.browseCommentProbabilityByCharacter, character.id)}
+                      onChange={follow => setSettingsDraft(prev => {
+                        const overrides = { ...prev.browseCommentProbabilityByCharacter };
+                        if (follow) delete overrides[character.id];
+                        else overrides[character.id] = prev.browseCommentProbability / 100;
+                        return { ...prev, browseCommentProbabilityByCharacter: overrides };
+                      })} /></label>
+                    <ProbabilityControl label="评论概率" value={Math.round((settingsDraft.browseCommentProbabilityByCharacter[character.id] ?? settingsDraft.browseCommentProbability / 100) * 100)}
+                      onChange={value => setSettingsDraft(prev => ({ ...prev, browseCommentProbabilityByCharacter: { ...prev.browseCommentProbabilityByCharacter, [character.id]: value / 100 } }))} />
+                  </div>
+                </section>
+              ))}
+
               <div className="xhs-profile-edit-field">
                 <span className="xhs-profile-edit-section-title">PROMPTS <em>提示词</em></span>
+                <p className="xhs-social-hint">本地修改会保留；留空使用默认提示词。每项最多 8000 字。</p>
                 {[
                   { key: "npcIdentityGuardPrompt", label: "NPC身份保护", value: settingsDraft.npcIdentityGuardPrompt ?? DEFAULT_XIAOHONGSHU_SETTINGS.npcIdentityGuardPrompt, onChange: (v: string) => setSettingsDraft(prev => ({ ...prev, npcIdentityGuardPrompt: v })) },
                   { key: "npcFeedPrompt", label: "帖子生成", value: settingsDraft.npcFeedPrompt, onChange: (v: string) => setSettingsDraft(prev => ({ ...prev, npcFeedPrompt: v })) },
@@ -3328,6 +3379,7 @@ export function XiaohongshuApp({ onClose, onNotice, visible = true, onIdle, onBu
                       {isOpen ? (
                         <textarea
                           className="xhs-profile-edit-pill xhs-settings-edit-prompt-textarea"
+                          maxLength={8000}
                           value={value}
                           onChange={event => onChange(event.target.value)}
                         />

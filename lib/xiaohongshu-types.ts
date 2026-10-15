@@ -79,6 +79,8 @@ export type XiaohongshuSettings = {
   npcDmReplyPrompt: string;
   participantCharacterIds: string[];
   sendToCharacterProbability: number;
+  browseCommentProbability: number;
+  browseCommentProbabilityByCharacter: Record<string, number>;
 };
 
 export type XiaohongshuNotificationType = "like" | "save" | "comment" | "dm" | "follow";
@@ -421,4 +423,6 @@ export const DEFAULT_XIAOHONGSHU_SETTINGS: XiaohongshuSettings = {
   npcDmReplyPrompt: DEFAULT_XIAOHONGSHU_NPC_DM_REPLY_PROMPT,
   participantCharacterIds: [],
   sendToCharacterProbability: 60,
+  browseCommentProbability: 25,
+  browseCommentProbabilityByCharacter: {},
 };

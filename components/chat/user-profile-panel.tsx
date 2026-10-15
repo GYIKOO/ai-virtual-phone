@@ -19,6 +19,7 @@ import type { FollowUpConfig } from "@/lib/settings-storage";
 import { PageShell } from "@/components/ui/page-shell";
 import { CHAT_APP_CSS_EXAMPLE } from "@/lib/css-examples";
 import { Toggle } from "@/components/ui/form";
+import { SocialPostControls } from "@/components/ui/social-post-controls";
 import { StickerManager } from "./sticker-manager";
 import { ChatPluginManager } from "./chat-plugin-manager";
 import { ChatPluginPageBoundary } from "./chat-plugin-page-boundary";
@@ -963,10 +964,16 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
         .filter(c => c.char) as (typeof contacts[number] & { char: Character })[];
 
     const update = (patch: Partial<MomentsInteractionConfig>) => {
-        const next = { ...config, ...patch };
+        const next = { ...loadMomentsConfig(), ...patch };
         setConfig(next);
         saveMomentsConfig(next);
     };
+
+    useEffect(() => {
+        const refresh = () => setConfig(loadMomentsConfig());
+        window.addEventListener("moments-config-updated", refresh);
+        return () => window.removeEventListener("moments-config-updated", refresh);
+    }, []);
 
     // 自动发帖角色开关：只拦调度发帖；评论/点赞/手动立即发帖不受影响
     const disabledAutoPostIds = new Set(config.autoPostDisabledCharacterIds);
@@ -1205,16 +1212,7 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                                     />
                                 </div>
                             </div>
-                            {!disabledAutoPostIds.has(c.characterId) && <ProfileSettingsSliderItem
-                                icon={Radio}
-                                color={CONTENT_APP_ACCENTS.moments}
-                                label={`${c.char.name}的发帖概率`}
-                                desc="每次机会独立抽取；未抽中就等下一轮，不调用模型。手动发帖不受影响。"
-                                value={Math.round((config.autoPostProbabilityByCharacter[c.characterId] ?? 1) * 100)}
-                                valueLabel={`${Math.round((config.autoPostProbabilityByCharacter[c.characterId] ?? 1) * 100)}%`}
-                                min={0} max={100} step={5}
-                                onChange={value => update({ autoPostProbabilityByCharacter: { ...config.autoPostProbabilityByCharacter, [c.characterId]: value / 100 } })}
-                            />}
+                            <SocialPostControls characterId={c.characterId} app="moments" config={config} onChange={update} />
                         </div>
                     ))}
                     {showAutoPostList && enriched.length === 0 && (
@@ -1258,7 +1256,10 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                 </div>
 
                 <div className="menu-group">
-                    <button className="menu-item" onClick={() => { setConfig(DEFAULT_MOMENTS_CONFIG); saveMomentsConfig(DEFAULT_MOMENTS_CONFIG); }}>
+                    <button className="menu-item" onClick={() => {
+                        if (!window.confirm("恢复朋友圈默认设置？自定义提示词和共享发帖概率也会恢复默认；小红书独立设置的概率保持不变。")) return;
+                        update({ ...DEFAULT_MOMENTS_CONFIG, xiaohongshuPostProbabilityByCharacter: loadMomentsConfig().xiaohongshuPostProbabilityByCharacter });
+                    }}>
                         <ProfileSettingsIcon icon={RotateCcw} color={BINDING_ACCENTS.regex} />
                         <div className="menu-label-group"><span className="menu-label menu-label-danger">恢复默认</span></div>
                     </button>

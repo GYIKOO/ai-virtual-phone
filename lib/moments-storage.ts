@@ -5,6 +5,7 @@ import type { MomentPost, MomentComment, AIMomentSchedule, PendingReaction } fro
 import { loadCharacters } from "./character-storage";
 import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { DEFAULT_MOMENTS_BILINGUAL_PROMPT } from "./bilingual-prompt-defaults";
+import { getSocialPostProbability, normalizeProbabilityMap } from "./social-post-probability";
 import { canCharacterSeeMomentPost, getVisibleMomentCommentsForCharacter } from "./character-world-storage";
 import {
     initMomentsDb,
@@ -357,6 +358,8 @@ export type MomentsInteractionConfig = {
     autoPostDisabledCharacterIds: string[];
     /** Each scheduled opportunity rolls once; skipped opportunities make no model request. */
     autoPostProbabilityByCharacter: Record<string, number>;
+    /** Presence means Xiaohongshu is unlinked; otherwise both apps share the map above. */
+    xiaohongshuPostProbabilityByCharacter: Record<string, number>;
     lifePrompt: string;
 };
 
@@ -374,6 +377,7 @@ export const DEFAULT_MOMENTS_CONFIG: MomentsInteractionConfig = {
     bilingualTranslationPrompt: DEFAULT_MOMENTS_BILINGUAL_PROMPT,
     autoPostDisabledCharacterIds: [],
     autoPostProbabilityByCharacter: {},
+    xiaohongshuPostProbabilityByCharacter: {},
     lifePrompt: "依据人设、记录之间实际经过的时间和附近日程，构思角色此刻的普通生活近况。工作、兴趣与身边的人事可以在未聊天期间自然发展。分享优先从当下的所见所感中产生，也可以回顾近期经历或谈起接下来的计划。日程表示安排，实际进展以经历记录为基础；涉及用户的行动与共同事件沿用已有记录。",
 };
 
@@ -385,24 +389,20 @@ export function loadMomentsConfig(): MomentsInteractionConfig {
         const merged = { ...DEFAULT_MOMENTS_CONFIG, ...JSON.parse(raw) };
         if (typeof merged.lifePrompt !== "string") merged.lifePrompt = DEFAULT_MOMENTS_CONFIG.lifePrompt;
         if (!Array.isArray(merged.autoPostDisabledCharacterIds)) merged.autoPostDisabledCharacterIds = [];
-        const probabilities = merged.autoPostProbabilityByCharacter;
-        merged.autoPostProbabilityByCharacter = Object.fromEntries(
-            probabilities && typeof probabilities === "object" && !Array.isArray(probabilities)
-                ? Object.entries(probabilities).filter(([, v]) => typeof v === "number" && Number.isFinite(v))
-                    .map(([id, v]) => [id, Math.max(0, Math.min(1, v as number))]) : [],
-        );
+        merged.autoPostProbabilityByCharacter = normalizeProbabilityMap(merged.autoPostProbabilityByCharacter);
+        merged.xiaohongshuPostProbabilityByCharacter = normalizeProbabilityMap(merged.xiaohongshuPostProbabilityByCharacter);
         return merged;
     } catch { return DEFAULT_MOMENTS_CONFIG; }
 }
 
 export function getMomentPostProbability(characterId: string, config = loadMomentsConfig()): number {
-    const value = config.autoPostProbabilityByCharacter?.[characterId];
-    return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1;
+    return getSocialPostProbability(characterId, "moments", config);
 }
 
 export function saveMomentsConfig(config: MomentsInteractionConfig): void {
     if (typeof window === "undefined") return;
     kvSet(MOMENTS_CONFIG_KEY, JSON.stringify(config));
+    window.dispatchEvent?.(new Event("moments-config-updated"));
 }
 
 // ── Moments Notification (unread comments/replies) ──────────

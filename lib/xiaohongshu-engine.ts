@@ -3,6 +3,7 @@ import { ChatEngineError, previewMessagesForApi, sendLLMRequest } from "./chat-e
 import { loadCharacters } from "./character-storage";
 import type { Character } from "./character-types";
 import { assemblePromptPayload, type AssemblerInput, type LLMContentPart, type LLMMessage } from "./llm-prompt-assembler";
+import { buildXiaohongshuActivityScope, type XiaohongshuActivityPlan } from "./social-post-probability";
 import { DEFAULT_XIAOHONGSHU_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./bilingual-prompt-defaults";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
@@ -1174,7 +1175,9 @@ export async function generateXiaohongshuCharacterActivity(
   characterId: string,
   notes: XiaohongshuNote[],
   settings?: XiaohongshuSettings,
+  plan: XiaohongshuActivityPlan = { post: true, comment: true },
 ): Promise<ParsedXiaohongshuCharacterActivity | null> {
+  if (!plan.post && !plan.comment) return null;
   const userNames = getUserXiaohongshuNamesFromNotes(notes);
   const context = userNames.length > 0
     ? prependXiaohongshuUserIdentityHint(
@@ -1187,6 +1190,7 @@ export async function generateXiaohongshuCharacterActivity(
   }, settings);
   if (!resolved?.apiConfig) return null;
   const messages = assemblePromptPayload(resolved.input);
+  messages.push({ role: "user", content: buildXiaohongshuActivityScope(plan) });
   const raw = await sendLLMRequest(
     resolved.apiConfig,
     resolved.preset,
@@ -1195,7 +1199,8 @@ export async function generateXiaohongshuCharacterActivity(
     { characterName: `小红书:${resolved.character.name}`, userName: resolved.input.userIdentity?.name },
     { appId: "xiaohongshu", appTags: ["xiaohongshu", "activity"] },
   );
-  return parseWithDebug(raw, output => parseXiaohongshuCharacterActivity(output, notes.map(note => note.id)), "无法解析小红书角色互动内容");
+  const activity = parseWithDebug(raw, output => parseXiaohongshuCharacterActivity(output, notes.map(note => note.id)), "无法解析小红书角色互动内容");
+  return { ...activity, post: plan.post ? activity.post : undefined, comments: plan.comment ? activity.comments : [] };
 }
 
 export async function generateXiaohongshuCharacterReactionToUserPost(
@@ -1448,6 +1453,7 @@ export async function previewXiaohongshuPromptPayload(
   );
   if (!resolved?.apiConfig) throw new ChatEngineError("未配置小红书 API。");
   const messages = assemblePromptPayload(resolved.input);
+  if (mode === "activity") messages.push({ role: "user", content: buildXiaohongshuActivityScope({ post: true, comment: true }) });
   if (firstNote && mode !== "activity") {
     const imageDataUrl = resolved.apiConfig.enableImageRecognition ? await resolveNoteImageDataUrl(firstNote) : null;
     if (imageDataUrl) {
