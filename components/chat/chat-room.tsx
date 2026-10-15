@@ -5189,9 +5189,6 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                     <button onClick={() => (m.role === "assistant" ? handleEditResponseStart(m) : handleEditMessageStart(m))} className="ctx-menu-btn">
                         {m.role === "assistant" && (m.rawResponseText || m.editableResponseText) ? "编辑回复" : "编辑"}
                     </button>
-                    {m.mediaType === "audio" && m.mediaData?.label && (
-                        <button onClick={() => { setVoiceTextIds(prev => { const next = new Set(prev); if (next.has(m.id)) next.delete(m.id); else next.add(m.id); return next; }); setActiveMessageId(null); }} className="ctx-menu-btn">转文字</button>
-                    )}
                     {m.role === "user" && (
                         <button onClick={() => handleRetractMessage(storedMessageId)} className="ctx-menu-btn">撤回消息</button>
                     )}
@@ -6501,6 +6498,13 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
                                             style={isStandaloneHtmlPreview ? STANDALONE_CARD_BUBBLE_STYLE : undefined}
                                             data-ui={msg.role === "user" ? "bubble-user" : "bubble-bot"}
                                             data-msg-id={msg.id}
+                                            onClick={event => {
+                                                if (renderMsg.mediaType === "audio" && renderMsg.mediaData?.label
+                                                    && activeMessageId !== msg.id
+                                                    && (event.target as Element).closest?.(".voice-msg-bubble")) {
+                                                    setVoiceTextIds(previous => previous.has(msg.id) ? previous : new Set(previous).add(msg.id));
+                                                }
+                                            }}
                                             {...(activeMessageId === msg.id ? { "data-active": "" } : {})}
                                             >
                                             {/* Message Actions Popup */}
