@@ -113,8 +113,8 @@ export function readScreenshotBallStyle(): BallStyle | null {
   }
 }
 
-/** 原生当前的球是否用了自定义图片。 */
-export function readBallHasImage(): boolean {
+/** 原生当前的球是否用了自定义图片；读取异常时返回 null。 */
+export function readBallHasImage(): boolean | null {
   try {
     const raw = bridge()?.getScreenshotBallStyle?.();
     if (!raw) return false;

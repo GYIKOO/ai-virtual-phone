@@ -30,6 +30,7 @@ import {
 } from "./checkin-config";
 import { consumePendingUserShot, hasCheckInBridge, readCheckInCapabilities, requestCheckIn } from "./checkin";
 import { resolveCheckInGuidance } from "./checkin-guidance";
+import type { CheckInOutcome } from "./types";
 import { ensureShellOverlayListener, subscribeShellOverlayEvents } from "../shell-call-overlay";
 
 /** 一次查岗尝试的结论（给调用方/设置页做记录用）。 */
