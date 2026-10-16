@@ -3,9 +3,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
+const { performance } = require('node:perf_hooks');
 const cache = new Map();
 let events = {}, turns = {}, memories = {}, vectorCalls = 0, vectorFailure = false, vectors = false;
-let queried = [], embeddingQueries = [];
+let queried = [], embeddingQueries = [], memoryReads = 0;
 const at = n => new Date(Date.UTC(2026, 9, 1) + n * 3600000).toISOString();
 const mocks = {
   './macro-engine': { MacroEngine: class { expand(text) { return text; } }, postProcessTrim: text => text },
@@ -22,10 +23,13 @@ const mocks = {
       unifiedRecentItems:(events[id] || []).filter(event => !excluded.has(event.entryId) && (!options.afterTimestamp || event.timestamp > options.afterTimestamp)) };
   } },
   './story-storage': { loadStoryRecallTurns: id => turns[id] || [] },
-  './memory-storage': { loadMemoryEntriesByType: async (id,type) => (memories[id] || []).filter(entry => entry.type === type) },
+  './memory-storage': { loadMemoryEntriesByType: async (id,type) => {
+    memoryReads++;
+    return (memories[id] || []).filter(entry => entry.type === type);
+  } },
   './calendar-storage': { getCurrentCalendarScheduleForPrompt: () => '', buildCalendarScheduleMarker: () => '' },
   './calendar-utils': { getWeekStartIso: () => '' },
-  './character-world-storage': { formatCharacterRelationsForPrompt: () => '' },
+  './character-world-storage': { formatCharacterRelationsForPrompt: () => '', formatCharactersRelationsForPrompt: () => '' },
 };
 function load(name) {
   if (mocks[name]) return mocks[name];
@@ -33,7 +37,7 @@ function load(name) {
   const exports = {};
   cache.set(name,exports);
   const filename = `lib/${name.slice(2)}.ts`;
-  const real = new Set(['./token-counter','./story-context-budget','./story-ensemble-context','./memory-service','./memory-time','./memory-embedding','./llm-prompt-assembler']);
+  const real = new Set(['./token-counter','./story-context-budget','./story-ensemble-context','./memory-service','./memory-time','./memory-embedding','./llm-prompt-assembler','./story-default-prompt','./llm-provider-adapter','./api-helpers','./generation-parameters','./character-relation-context']);
   if (!real.has(name)) return {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename,'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
     {exports,require:load,console}, {filename});
@@ -86,6 +90,39 @@ function options(ids, extra={}) {
   assert.ok(!text(await builder.buildEnsembleStoryPrompt({...input,afterTimestamp:at(2)})).includes('共享车站完整正文'));
   console.log('PASS: ABC → DABC shared event once, full prose replaces summary, time order, tags, retry/IF/start boundaries');
 
+  // Reproduce an old ABC page followed by several new DABC exchanges, including
+  // actual native-provider conversion. No generated response is simulated here.
+  const continued = options(['d','a','b','c']);
+  const chronology = ['共享车站完整正文'];
+  continued.base.history = Array.from({length:8}, (_,i) => {
+    const content = `DABC当前页进展_${i}_END`;
+    chronology.push(content);
+    return history(`progress-${i}`,10+i,content,i%2 ? 'assistant' : 'user');
+  });
+  continued.base.preset = {...preset,prompts:[
+    {identifier:'story_output_format',role:'system',enabled:true,content:load('./story-default-prompt').DEFAULT_STORY_OUTPUT_PROMPT},
+    ...preset.prompts,
+  ]};
+  const continuedMessages = await builder.buildEnsembleStoryPrompt(continued);
+  assert.ok(continuedMessages.filter(m=>m.role==='system').some(m=>m.content.includes('【模式】')));
+  assert.ok(continuedMessages.filter(m=>m.role==='assistant').every(m=>!m.content.includes('【模式】') && !m.content.includes('【时间】')));
+  const adapter = load('./llm-provider-adapter');
+  for (const provider of ['OpenAI','Anthropic','Google']) {
+    const request = adapter.buildProviderRequest({provider,apiKey:'offline-fixture',defaultModel:'fixture'}, continued.base.preset, adapter.toLlmRequestMessages(continuedMessages));
+    const body = request.body;
+    const serialized = provider === 'Google'
+      ? JSON.stringify([body.systemInstruction,body.contents])
+      : JSON.stringify([body.system,body.messages]);
+    let previous = -1;
+    for (const fragment of chronology) {
+      assert.equal(occurrence(serialized,fragment),1,`${provider}: each prose segment occurs once`);
+      const position = serialized.indexOf(fragment);
+      assert.ok(position>previous,`${provider}: older page stays before current-page progress`);
+      previous = position;
+    }
+  }
+  console.log('PASS: ABC → eight DABC messages remain ordered and unique in OpenAI/Anthropic/Gemini payloads; factory headings are system instructions, not inserted assistant prose');
+
   // Exact provenance + content may merge; equal words from unrelated sources must not merge.
   const c = {id:'same-source',kind:'long',timestamp:at(1),text:'同一事实',owners:['a']};
   assert.equal(budget.deduplicateStoryCandidates([c,{...c,owners:['b']}]).length,1);
@@ -135,6 +172,45 @@ function options(ids, extra={}) {
   mocks['./calendar-storage'].getCurrentCalendarScheduleForPrompt = () => '';
   console.log('PASS: timezone-aware ordering; schedule permission does not depend on core-memory permission');
 
+  // Marker placement applies to ALL cards, personalities, schedules and shared relations.
+  const placed = options(['a','b']);
+  placed.characters.forEach(character => { character.personality = `性格_${character.id}_{{char}}_END`; });
+  placed.base.history = [history('u',20,'当前分页输入_END'),history('a',21,'当前分页回复_END','assistant')];
+  placed.base.preset = {...preset,prompts:[
+    ...['charDescription','charPersonality','calendarSchedule','characterRelations','memoryCore','memoryLongTerm','shortTermMemory'].map(identifier=>({identifier,marker:true,role:'system',content:'',enabled:true})),
+    {identifier:'after-history',role:'system',content:'预设末尾格式要求_END',enabled:true},
+  ]};
+  placed.tail = [{role:'system',content:'本轮剧情设置_END'}];
+  let relationOptions;
+  mocks['./character-world-storage'].formatCharactersRelationsForPrompt = (ids,options) => {
+    assert.equal(ids.join(','),'a,b'); relationOptions = options; return '共享关系条目_END';
+  };
+  mocks['./calendar-storage'].getCurrentCalendarScheduleForPrompt = (_type,id) => `日程_${id}_END`;
+  output = text(await builder.buildEnsembleStoryPrompt(placed));
+  for (const fragment of ['PERSONA_a_END','PERSONA_b_END','性格_a_A_END','性格_b_B_END','日程_a_END','日程_b_END','共享关系条目_END']) {
+    assert.equal(occurrence(output,fragment),1,fragment);
+    assert.ok(output.indexOf(fragment)<output.indexOf('当前分页输入_END'),`${fragment}: before history`);
+  }
+  assert.ok(output.indexOf('当前分页回复_END')<output.indexOf('预设末尾格式要求_END'));
+  assert.ok(output.indexOf('预设末尾格式要求_END')<output.indexOf('本轮剧情设置_END'));
+  assert.ok(relationOptions.mentionText.includes('当前分页回复_END'));
+  assert.ok(!relationOptions.mentionText.includes('PERSONA_'));
+  // Even with memories disabled, users retain independent control of relationship/schedule markers.
+  const noMetadata = {...placed,base:{...placed.base,preset:{...placed.base.preset,prompts:placed.base.preset.prompts.map(p=>['charDescription','charPersonality','calendarSchedule','characterRelations'].includes(p.identifier)?{...p,enabled:false}:p)}}};
+  output = text(await builder.buildEnsembleStoryPrompt(noMetadata));
+  assert.ok(!/PERSONA_|性格_|日程_\w_END|共享关系条目_END/.test(output));
+  const unbound = {...placed,base:{...placed.base,preset:null}};
+  assert.ok(text(await builder.buildEnsembleStoryPrompt(unbound)).includes('PERSONA_b_END'));
+  const moved = {...placed,base:{...placed.base,preset:{...placed.base.preset,prompts:[
+    ...placed.base.preset.prompts.filter(p=>p.identifier!=='characterRelations'),
+    placed.base.preset.prompts.find(p=>p.identifier==='characterRelations'),
+  ]}}};
+  output = text(await builder.buildEnsembleStoryPrompt(moved));
+  assert.ok(output.indexOf('共享关系条目_END')>output.indexOf('当前分页回复_END'),'explicit preset reordering is respected');
+  mocks['./character-world-storage'].formatCharactersRelationsForPrompt = () => '';
+  mocks['./calendar-storage'].getCurrentCalendarScheduleForPrompt = () => '';
+  console.log('PASS: all ensemble cards/traits/schedules/shared relations follow preset positions and switches; current history precedes tail requirements; no card text activates relations');
+
   // Stress the real assembler with character count and private history growth.
   for (const count of [2,4,8,16,32]) {
     const ids = Array.from({length:count},(_,i)=>`p${i}`);
@@ -147,13 +223,25 @@ function options(ids, extra={}) {
     const stress = options(ids);
     stress.base.history = [history('latest-user',200,'车站此刻的新输入'), history('latest-assistant',201,'当前剧情最新回复','assistant')];
     stress.tail = [{role:'user',content:'本轮导演指令：车站会合'}];
+    const readsBefore = memoryReads;
+    const started = performance.now();
     const messages = await builder.buildEnsembleStoryPrompt(stress);
+    const elapsed = performance.now() - started;
     const tokens = budget.estimateStoryMessages(messages);
     assert.ok(tokens <= budget.storyInputBudget(preset));
     assert.ok(text(messages).includes('车站此刻的新输入') && text(messages).includes('当前剧情最新回复'));
     assert.equal(occurrence(text(messages),'本轮导演指令：车站会合'),1);
     for(let i=0;i<80;i++) assert.ok(occurrence(text(messages),`共同事件${i}：`)<=1);
     console.log(`PASS: ${count} participants, ${count*230} recent candidates, estimated input ${tokens}/${budget.storyInputBudget(preset)} tokens`);
+    if (process.env.FLOAT_STORY_PROFILE === '1') {
+      console.log(`PROFILE: ${count} participants, ${elapsed.toFixed(1)} ms, ${memoryReads-readsBefore} memory reads (in-memory fixtures; excludes IndexedDB, native timeline collection and network)`);
+      const wide = {...stress,base:{...stress.base,preset:{...preset,openai_max_context:100000}}};
+      const wideStarted = performance.now();
+      const wideMessages = await builder.buildEnsembleStoryPrompt(wide);
+      const wideElapsed = performance.now()-wideStarted;
+      assert.ok(budget.estimateStoryMessages(wideMessages)<=budget.storyInputBudget(wide.base.preset));
+      console.log(`PROFILE: ${count} participants at 100K capacity, ${wideElapsed.toFixed(1)} ms, input ${budget.estimateStoryMessages(wideMessages)} tokens (same fixture limitations)`);
+    }
   }
   // Fallback summary is whole, and immutable content failure happens before any API call.
   const huge = {id:'huge',kind:'recent',owners:['a'],timestamp:at(1),text:'正文'.repeat(10000),summary:'完整已有摘要'};
@@ -165,7 +253,10 @@ function options(ids, extra={}) {
   const oversized = options(['a','b'],{tail:[{role:'user',content:'不能删除的本轮输入'.repeat(20000)}]});
   await assert.rejects(builder.buildEnsembleStoryPrompt(oversized),/超过上下文预算/);
   assert.equal(vectorCalls,calls);
-  assert.equal(budget.storyInputBudget({...preset,openai_max_context:100000}),Math.floor((32768-2000)*0.85));
+  assert.equal(budget.storyInputBudget({...preset,openai_max_context:100000}),Math.floor((100000-2000)*0.85));
+  assert.equal(budget.storyInputBudget({...preset,openai_max_context:100000},32768),Math.floor((32768-2000)*0.85),'explicit existing limits are preserved');
+  assert.equal(budget.storyInputBudget({...preset,openai_max_context:1000000}),Math.floor((100000-2000)*0.85));
+  assert.equal(budget.storyInputBudget({...preset,openai_max_context:1000000},150000),Math.floor((150000-2000)*0.85));
   assert.equal(budget.storyInputBudget(preset,8000),5100);
   assert.equal(budget.storyInputBudget({...preset,openai_max_context:1000,openai_max_tokens:2000}),0);
   const oldHistory = options(['a','b']);

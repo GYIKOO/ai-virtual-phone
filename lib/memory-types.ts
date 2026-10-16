@@ -114,7 +114,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     shortTermTokenBudget: 100000,
     coreMemoryTokenBudget: 100000,
     longTermTokenBudget: 100000,
-    storyContextTokenLimit: 32768,
+    storyContextTokenLimit: 100000,
     summarizationPrompt: DEFAULT_SUMMARIZATION_PROMPT,
     coreMemoryPrompt: DEFAULT_CORE_MEMORY_PROMPT,
     vnSummaryPrompt: "",

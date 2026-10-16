@@ -21,7 +21,7 @@ export function compareStoryTimes(a: string, b: string): number {
 }
 
 export function storyInputBudget(preset: PresetConfig | null, configuredLimit?: number): number {
-  const limit = Number.isFinite(configuredLimit) && configuredLimit! > 0 ? configuredLimit! : 32768;
+  const limit = Number.isFinite(configuredLimit) && configuredLimit! > 0 ? configuredLimit! : 100000;
   const context = Number.isFinite(preset?.openai_max_context) && preset!.openai_max_context > 0
     ? Math.min(preset!.openai_max_context, limit) : limit;
   const output = Number.isFinite(preset?.openai_max_tokens) && preset!.openai_max_tokens > 0

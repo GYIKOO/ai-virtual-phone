@@ -1191,10 +1191,10 @@ export function MemoryBankPage({
                         color={BINDING_ACCENTS.memory}
                         label="多人剧情上下文容量"
                         desc="全员共用，含设定、记忆与输出预留；设为不高于模型容量，同时受预设容量约束"
-                        value={config.storyContextTokenLimit ?? 32768}
-                        min={2048}
-                        max={262144}
-                        step={1024}
+                        value={config.storyContextTokenLimit ?? 100000}
+                        min={2000}
+                        max={1000000}
+                        step={1000}
                         onChange={value => {
                             const next = { ...config, storyContextTokenLimit: value };
                             setConfig(next);

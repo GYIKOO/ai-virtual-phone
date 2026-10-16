@@ -4,6 +4,7 @@ import { kvGet, kvSet, registerKvMigration } from "./kv-db";
 import type { Character } from "./character-types";
 import type { MomentComment, MomentLike, MomentPost } from "./moments-types";
 import { loadUserIdentities, resolveUserIdentity } from "./settings-storage";
+import { selectRelatedWorldRelations } from "./character-relation-context";
 
 const CHARACTER_WORLDS_KEY = "ai_phone_character_worlds_v1";
 export const CHARACTER_WORLDS_UPDATED_EVENT = "character-worlds-updated";
@@ -436,79 +437,97 @@ export function getVisibleMomentLikesForCharacter(post: MomentPost, viewerCharac
     });
 }
 
-export function formatCharacterRelationsForPrompt(characterId: string): string {
+export type CharacterRelationPromptOptions = {
+    mentionText?: string;
+    /** Undefined resolves the character binding; [] explicitly means no user identity. */
+    userIdentityIds?: string[];
+    appId?: string;
+    /** Participants whose card is managed separately, including intentionally disabled cards. */
+    describedCharacterIds?: string[];
+};
+
+export function formatCharacterRelationsForPrompt(characterId: string, options: CharacterRelationPromptOptions = {}): string {
+    return formatCharactersRelationsForPrompt([characterId], options);
+}
+
+/** One world section per request, regardless of how many participants share it. */
+export function formatCharactersRelationsForPrompt(characterIds: string[], options: CharacterRelationPromptOptions = {}): string {
     const groups = loadCharacterWorldGroups();
-    const group = groups.find(item => item.memberIds.includes(characterId)) ?? null;
-    if (!group) return "";
-    const worldDescription = group.description.trim();
-    const hasWorldSetup = groups.length > 1 || group.id !== DEFAULT_CHARACTER_WORLD_ID || group.relations.length > 0 || Boolean(worldDescription);
-    if (!hasWorldSetup) return "";
-
     const characters = loadCharacters();
-    const userIdentity = resolveUserIdentity(characterId);
-    const userName = userIdentity?.name?.trim() || "用户";
-    const nameById = new Map(characters.map(character => [character.id, character.name]));
-    for (const identity of loadUserIdentities()) {
-        nameById.set(getCharacterWorldUserNodeId(identity.id), identity.name?.trim() || "用户");
-    }
-    // 标注哪些同世界角色已是用户好友——供「推荐联系人」判断是否还需要发名片
+    const identities = loadUserIdentities();
+    const activeIds = new Set(options.userIdentityIds ?? characterIds.flatMap(id => {
+        const identity = resolveUserIdentity(id, options.appId);
+        return identity ? [identity.id] : [];
+    }));
+    const activeIdentities = identities.filter(identity => activeIds.has(identity.id));
     const contactIds = new Set(loadChatContacts().map(contact => contact.characterId));
-    const memberNames = group.memberIds
-        .map(memberId => {
-            const name = nameById.get(memberId);
-            if (!name) return null;
-            return contactIds.has(memberId) ? `${name}（已是用户好友）` : name;
-        })
-        .filter((name): name is string => Boolean(name));
+    const described = new Set(options.describedCharacterIds ?? characterIds);
+    return groups.filter(group => characterIds.some(id => group.memberIds.includes(id))).map(group => {
+        const worldDescription = group.description.trim();
+        const hasWorldSetup = groups.length > 1 || group.id !== DEFAULT_CHARACTER_WORLD_ID || group.relations.length > 0 || Boolean(worldDescription);
+        if (!hasWorldSetup) return "";
 
-    const lines: string[] = [];
-    lines.push(`当前世界观：${group.name}。`);
-    if (worldDescription) {
-        lines.push(`世界观描述：${worldDescription}`);
-    }
-    if (memberNames.length > 0 && (groups.length > 1 || group.id !== DEFAULT_CHARACTER_WORLD_ID || worldDescription)) {
-        lines.push(`同世界角色：${memberNames.join("、")}。`);
-    }
+        const nodes = [...characters.filter(character => group.memberIds.includes(character.id)),
+            ...activeIdentities.map(identity => ({ id: getCharacterWorldUserNodeId(identity.id), name: identity.name?.trim() || "用户" }))];
+        const nameById = new Map(nodes.map(node => [node.id, node.name]));
+        const selected = selectRelatedWorldRelations({ nodes, relations: group.relations,
+            seedIds: [...characterIds, ...activeIdentities.map(identity => getCharacterWorldUserNodeId(identity.id))],
+            mentionText: options.mentionText || "" });
+        // 标注哪些同世界角色已是用户好友——供「推荐联系人」判断是否还需要发名片
+        const memberNames = group.memberIds
+            .filter(id => selected.includedIds.has(id))
+            .map(memberId => {
+                const name = nameById.get(memberId);
+                if (!name) return null;
+                return contactIds.has(memberId) ? `${name}（已是用户好友）` : name;
+            })
+            .filter((name): name is string => Boolean(name));
 
-    for (const relation of group.relations) {
-        const fromName = nameById.get(relation.fromCharacterId);
-        const toName = nameById.get(relation.toCharacterId);
-        if (!fromName || !toName) continue;
-        lines.push(`${fromName}是${toName}的${relation.label}。`);
-    }
+        const lines: string[] = [];
+        lines.push(`当前世界观：${group.name}。`);
+        if (worldDescription) {
+            lines.push(`世界观描述：${worldDescription}`);
+        }
+        if (memberNames.length > 0 && (groups.length > 1 || group.id !== DEFAULT_CHARACTER_WORLD_ID || worldDescription)) {
+            lines.push(`本轮相关的同世界角色：${memberNames.join("、")}。`);
+        }
 
-    const currentUserNodeId = userIdentity ? getCharacterWorldUserNodeId(userIdentity.id) : "";
-    if (currentUserNodeId && group.relations.some(relation => relation.fromCharacterId === currentUserNodeId || relation.toCharacterId === currentUserNodeId)) {
-        const identityDetails = [
-            userIdentity?.gender ? `性别：${userIdentity.gender}` : "",
-            userIdentity?.age ? `年龄：${userIdentity.age}` : "",
-            userIdentity?.occupation ? `职业：${userIdentity.occupation}` : "",
-            userIdentity?.bio?.trim() ? `简介：${userIdentity.bio.trim()}` : "",
-            userIdentity?.customSettings?.trim() ? `补充设定：${userIdentity.customSettings.trim()}` : "",
-        ].filter(Boolean).join("；");
-        lines.push(`当前用户身份节点：${userName}${identityDetails ? `（${identityDetails}）` : ""}。`);
-    }
+        for (const relation of selected.relations) {
+            const fromName = nameById.get(relation.fromCharacterId);
+            const toName = nameById.get(relation.toCharacterId);
+            if (!fromName || !toName) continue;
+            lines.push(`${fromName}是${toName}的${relation.label}。`);
+        }
 
-    // 一跳视角简介：与 viewer 拉过线的角色，附上各自的简量人设，
-    // 让 viewer 生成时「知道对方是谁」，避免对方在其口中/笔下 OOC。
-    // 没有简介的角色自然跳过（未生成时行为与旧版一致）。
-    const characterById = new Map(characters.map(character => [character.id, character]));
-    const counterpartIds = new Set<string>();
-    for (const relation of group.relations) {
-        if (relation.fromCharacterId === characterId) counterpartIds.add(relation.toCharacterId);
-        else if (relation.toCharacterId === characterId) counterpartIds.add(relation.fromCharacterId);
-    }
-    const briefLines: string[] = [];
-    for (const counterpartId of counterpartIds) {
-        const counterpart = characterById.get(counterpartId);
-        const brief = counterpart?.briefPersona?.trim();
-        if (!counterpart || !brief) continue;
-        briefLines.push(`- ${counterpart.name}：${brief}`);
-    }
-    if (briefLines.length > 0) {
-        lines.push("与你有关系的角色简介（供你在提及、转述或与其互动时保持其人设一致）：");
-        lines.push(...briefLines);
-    }
+        for (const userIdentity of activeIdentities) {
+            const currentUserNodeId = getCharacterWorldUserNodeId(userIdentity.id);
+            if (selected.relations.some(relation => relation.fromCharacterId === currentUserNodeId || relation.toCharacterId === currentUserNodeId)) {
+                const identityDetails = [
+                    userIdentity.gender ? `性别：${userIdentity.gender}` : "",
+                    userIdentity.age ? `年龄：${userIdentity.age}` : "",
+                    userIdentity.occupation ? `职业：${userIdentity.occupation}` : "",
+                    userIdentity.bio?.trim() ? `简介：${userIdentity.bio.trim()}` : "",
+                    userIdentity.customSettings?.trim() ? `补充设定：${userIdentity.customSettings.trim()}` : "",
+                ].filter(Boolean).join("；");
+                lines.push(`当前用户身份节点：${userIdentity.name?.trim() || "用户"}${identityDetails ? `（${identityDetails}）` : ""}。`);
+            }
+        }
 
-    return lines.join("\n");
+        // Existing briefs cover referenced/neighbour characters, without duplicating full participant cards.
+        const characterById = new Map(characters.map(character => [character.id, character]));
+        const briefLines: string[] = [];
+        for (const counterpartId of selected.includedIds) {
+            if (described.has(counterpartId)) continue;
+            const counterpart = characterById.get(counterpartId);
+            const brief = counterpart?.briefPersona?.trim();
+            if (!counterpart || !brief) continue;
+            briefLines.push(`- ${counterpart.name}：${brief.replace(/\{\{\s*char\s*\}\}/gi, () => counterpart.name)}`);
+        }
+        if (briefLines.length > 0) {
+            lines.push("相关角色简介（供提及、转述或互动时参考）：");
+            lines.push(...briefLines);
+        }
+
+        return lines.join("\n");
+    }).filter(Boolean).join("\n\n");
 }

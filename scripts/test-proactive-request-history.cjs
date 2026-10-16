@@ -30,7 +30,8 @@ const assembler = load('lib/llm-prompt-assembler.ts', {
   './macro-engine': macro, './character-time': time, './prompt-time': promptTime, './prompt-sanitizer': sanitizer,
   './content-tag-utils': load('lib/content-tag-utils.ts', { './checkphone-config': load('lib/checkphone-config.ts') }),
   './recent-time-context': load('lib/recent-time-context.ts', { './character-time': time }),
-  './character-world-storage': { formatCharacterRelationsForPrompt: () => '' },
+  './character-world-storage': { formatCharacterRelationsForPrompt: () => '', formatCharactersRelationsForPrompt: () => '' },
+  './character-relation-context': load('lib/character-relation-context.ts'),
   './dwelling-storage': { readDwellingLayoutCache: () => null },
   './dwelling-engine': { formatDwellingContext: () => '' },
 });

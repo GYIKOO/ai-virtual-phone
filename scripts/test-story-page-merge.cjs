@@ -28,7 +28,7 @@ const mocks = {
 function load(name) {
   if (mocks[name]) return mocks[name];
   if (modules.has(name)) return modules.get(name);
-  if (!['./story-storage', './story-tag-settings', './short-term-assembler', './story-engine', './story-instructions', './story-constraints', './story-context-budget', './story-ensemble-context'].includes(name)) {
+  if (!['./story-storage', './story-tag-settings', './short-term-assembler', './story-engine', './story-instructions', './story-constraints', './story-context-budget', './story-ensemble-context', './character-relation-context'].includes(name)) {
     return new Proxy({}, { get: () => () => [] }); // All unrelated app stores are empty.
   }
   const exports = {};
@@ -128,7 +128,7 @@ const json = value => JSON.parse(JSON.stringify(value));
   mocks['./chat-engine'] = { ChatEngineError:Error, previewMessagesForApi: (_a,_p,messages) => messages };
   mocks['./memory-service'] = { retrieveMemoriesForPrompt: async()=>null, retrieveCoreMemoriesForPrompt:async()=>null, createStoryMemoryRanker: () => async () => [] };
   mocks['./calendar-storage'] = { buildCalendarScheduleMarker:()=>'', getCurrentCalendarScheduleForPrompt:()=>'' };
-  mocks['./character-world-storage'] = { formatCharacterRelationsForPrompt:()=>'' };
+  mocks['./character-world-storage'] = { formatCharacterRelationsForPrompt:()=>'', formatCharactersRelationsForPrompt:()=>'' };
   modules.delete('./short-term-assembler');
   const engine = load('./story-engine');
   const preview = await engine.previewStoryPromptPayload('d', [], { sessionId:dabc.id, participantIds:['d','a','b','c'] });

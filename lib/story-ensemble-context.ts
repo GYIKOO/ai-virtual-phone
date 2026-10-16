@@ -9,7 +9,8 @@ import type { Character } from "./character-types";
 import type { ChatMessage } from "./chat-storage";
 import { getCurrentCalendarScheduleForPrompt, buildCalendarScheduleMarker } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
-import { formatCharacterRelationsForPrompt } from "./character-world-storage";
+import { formatCharactersRelationsForPrompt } from "./character-world-storage";
+import { buildRelationMentionContext } from "./character-relation-context";
 import { formatPromptTimestamp } from "./prompt-time";
 import { packStoryContext, storyInputBudget, estimateStoryMessages, compareStoryTimes, type StoryContextCandidate, type SelectedStoryContext } from "./story-context-budget";
 
@@ -17,7 +18,7 @@ type Candidate = StoryContextCandidate & {
   history?: ChatMessage[];
   sourceIds?: string[];
   sourceApp?: string;
-  background?: boolean;
+  background?: "current" | "week";
 };
 
 /** The storage is still per character; only the scene's read/selection layer is shared. */
@@ -90,14 +91,13 @@ export async function buildEnsembleStoryPrompt(options: {
       }
     }
   }
-  const roster = characters.map((character, index) => [
-    `## ${character.name}`,
-    // The lead character is already described by the base preset's markers.
-    index > 0 && marker("charDescription") ? character.persona?.trim() : "",
-    index > 0 && marker("charPersonality") ? character.personality?.trim() : "",
-  ].filter(Boolean).join("\n")).join("\n\n");
+  // Resolve each card's {{char}} before the scene's lead-character macro pass.
+  const cardText = (character: Character, text: string) => text.replace(/\{\{\s*char\s*\}\}/gi, () => character.name);
+  const roster = characters.map(character => `角色资料：${character.name}\n${cardText(character, character.persona || "")}`).join("\n\n");
+  const personalities = characters.filter(character => character.personality?.trim())
+    .map(character => `角色性格：${character.name}\n${cardText(character, character.personality!)}`).join("\n\n");
   const knowledgeRule = "以下记忆按角色归属提供，用于呈现各自的认知、动机与反应。角色之间的信息传递以剧情中实际发生的交流和经历为依据。多位角色共有的来源只展示一次，各自的个人理解仍按归属呈现。";
-  const rosterMessage: LLMMessage = { role: "system", content: `# 多人见面剧情\n${roster}\n${knowledgeRule}` };
+  const relationCache = new Map<string, string>();
   const enabledLimit = (value: number | undefined) => Number.isFinite(value) && value! >= 0 ? value! : 100000;
   const limits = { recent: Math.max(0, (enabledLimit(config.shortTermTokenBudget) || 100000) - estimateStoryMessages(mandatoryHistory)), long: enabledLimit(config.longTermTokenBudget), core: enabledLimit(config.coreMemoryTokenBudget) };
   const render = (selected: SelectedStoryContext[]) => {
@@ -112,15 +112,31 @@ export async function buildEnsembleStoryPrompt(options: {
         text: `【记录归属：${ownersLabel(item.candidate.owners)}；来源：${item.candidate.sourceApp || "日程与关系"}】\n${item.text}` }));
     const unified: UnifiedRecentItem[] = [...events, ...history.map((message, historyIndex) => ({ kind: "history" as const, historyIndex, timestamp: message.createdAt }))]
       .sort((a, b) => compareStoryTimes(a.timestamp, b.timestamp));
-    const background: LLMMessage[] = chosen.filter(item => item.candidate.background).map(item => ({ role: "system",
-      content: `【${ownersLabel(item.candidate.owners)}：日程与关系】\n${item.text}` }));
+    const schedules = chosen.filter(item => item.candidate.background);
+    const scheduleText = (items: typeof chosen) => items.map(item => `角色：${ownersLabel(item.candidate.owners)}\n${item.text}`).join("\n\n");
+    let relations = "";
+    if (!options.independent && marker("characterRelations")) {
+      const mentionText = buildRelationMentionContext(currentHistory.map(message => message.content), [
+        ...chosen.filter(item => !item.candidate.background && !item.candidate.history).map(item => item.text),
+        options.queryInstruction || "",
+      ]);
+      if (!relationCache.has(mentionText)) relationCache.set(mentionText, formatCharactersRelationsForPrompt(characters.map(character => character.id), {
+        appId: "story", mentionText,
+        userIdentityIds: base.userIdentity === undefined ? undefined : base.userIdentity ? [base.userIdentity.id] : [],
+        describedCharacterIds: characters.map(character => character.id),
+      }));
+      relations = relationCache.get(mentionText)!;
+    }
     return [...assemblePromptPayload({ ...base, history,
       worldBookActivationContext: query,
       recentBlocks: events.length ? [{ tag: "recent_events", content: events.map(item => item.kind === "event" ? item.text : "").join("\n\n") }] : [],
       unifiedRecentItems: unified,
       coreMemories: memoryText("core"), longTermMemories: memoryText("long"),
-      scheduleSummary: undefined, currentSchedule: undefined, characterRelations: null, dwellingContext: null,
-    }), rosterMessage, ...background, ...options.tail];
+      markerContentOverrides: { ...base.markerContentOverrides,
+        charDescription: `# 多人见面剧情\n${roster}\n${knowledgeRule}`, charPersonality: personalities },
+      scheduleSummary: scheduleText(schedules), currentSchedule: scheduleText(schedules.filter(item => item.candidate.background === "current")),
+      characterRelations: relations, dwellingContext: null,
+    }), ...options.tail];
   };
   // Retrieval is anchored in the current scene, not separately in each character's unrelated last chat.
   const scene = currentHistory.slice(-8).map(message => message.content).join("\n");
@@ -150,10 +166,9 @@ export async function buildEnsembleStoryPrompt(options: {
       }
       const currentSchedule = marker("calendarSchedule") ? getCurrentCalendarScheduleForPrompt("character", character.id, now) : "";
       const weekSchedule = marker("calendarSchedule") ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now)) : "";
-      const relations = marker("characterRelations") ? formatCharacterRelationsForPrompt(character.id) : "";
-      for (const [key, text, score] of [["current", currentSchedule, 2], ["relations", relations, 1], ["week", weekSchedule, 0]] as const) {
+      for (const [key, text, score] of [["current", currentSchedule, 2], ["week", weekSchedule, 0]] as const) {
         if (text) candidates.push({ id: `life:${character.id}:${key}`, kind: "core", owners: [character.id],
-          timestamp: now.toISOString(), text, sourceApp: "日程与关系", score, background: true });
+          timestamp: now.toISOString(), text, sourceApp: "日程", score, background: key });
       }
     }
   }

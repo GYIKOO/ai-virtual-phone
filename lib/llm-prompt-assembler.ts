@@ -13,7 +13,8 @@ import { matchesActiveTags } from "./content-tag-utils";
 import { formatXiaohongshuShareForPrompt } from "./chat-share";
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { formatPromptTimestamp, getPromptTimestampOptionsForTimeContext, resolvePromptTimeAware, type PromptTimestampOptions } from "./prompt-time";
-import { formatCharacterRelationsForPrompt } from "./character-world-storage";
+import { formatCharacterRelationsForPrompt, formatCharactersRelationsForPrompt } from "./character-world-storage";
+import { buildRelationMentionContext } from "./character-relation-context";
 import { buildCharacterTimeContext, buildGroupTimeContext, type CharacterTimeContext } from "./character-time";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
 import { buildGroupAdminBracketText } from "./group-admin";
@@ -103,6 +104,8 @@ export interface AssemblerInput {
     phoneLastRefreshAt?: string;
     /** null = explicitly disable the automatic relationship lookup (used by isolated story branches). */
     characterRelations?: string | null;   // formatted world-group relationship marker
+    /** Replacement data still follows the preset marker's placement and enabled state. */
+    markerContentOverrides?: Partial<Record<string, string>>;
     /** null = explicitly disable the automatic dwelling lookup (used by isolated story branches). */
     dwellingContext?: string | null;      // formatted dwelling layout snapshot for cross-app reference
     dwellingRoom?: string;
@@ -454,9 +457,7 @@ function getMarkerContent(
         case "memoryLongTerm":
             return longTermMemories?.trim() || null;
         case "characterRelations": {
-            if (characterRelations === null) return null;
-            const relations = characterRelations?.trim() || formatCharacterRelationsForPrompt(character.id).trim();
-            return relations || null;
+            return characterRelations?.trim() || null;
         }
         case "dwellingContext": {
             if (dwellingContext === null) return null;
@@ -650,6 +651,7 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
     // --- World Book keyword activation ---
     const recentHistoryStr = input.worldBookActivationContext
         ?? history.slice(-10).map(m => m.content).join("\n");
+    let resolvedRelations = input.characterRelations;
     const activatedWBEntries: WorldBookEntry[] = [];
     worldBooks.forEach(wb => {
         (wb.entries || []).forEach(entry => {
@@ -781,15 +783,26 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
             }
 
             if (p.marker) {
-
-                let markerContent = getMarkerContent(
+                if (p.identifier === "characterRelations" && resolvedRelations === undefined) {
+                    resolvedRelations = formatCharacterRelationsForPrompt(character.id, {
+                        appId, userIdentityIds: userIdentity === undefined ? undefined : userIdentity ? [userIdentity.id] : [],
+                        describedCharacterIds: [character.id],
+                        mentionText: buildRelationMentionContext(history.map(message => message.content), [
+                            input.coreMemories || "", input.longTermMemories || "",
+                            ...(input.unifiedRecentItems || []).filter(item => item.kind === "event").slice(-12).map(item => item.kind === "event" ? item.text : ""),
+                            input.xiaohongshuFeedContext || "", input.xiaohongshuUserPostContext || "", input.xiaohongshuCommentContext || "", input.xiaohongshuMentionContext || "",
+                            input.interviewQuestion || "", input.chapterContent || "", input.annotationHistory || "",
+                        ]),
+                    });
+                }
+                let markerContent = input.markerContentOverrides?.[p.identifier] ?? getMarkerContent(
                     p.identifier, character, userPersonaText,
                     wbBeforeEntries, wbAfterEntries,
                     scheduleSummary,
                     coreMemories,
                     longTermMemories,
                     regexes, { macroEngine: engine, activeTags },
-                    input.characterRelations,
+                    resolvedRelations,
                     input.dwellingContext,
                     appId,
                 );
@@ -894,6 +907,17 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
             });
         });
 
+    }
+
+    // An unbound ensemble still needs its supplied character data. An explicitly
+    // selected (even empty) preset remains authoritative and never uses this fallback.
+    if (!preset && input.markerContentOverrides) {
+        for (const [marker, text] of Object.entries({ ...input.markerContentOverrides,
+            calendarSchedule: input.scheduleSummary, characterRelations: input.characterRelations,
+            memoryCore: input.coreMemories, memoryLongTerm: input.longTermMemories })) {
+            if (text?.trim()) blocks.push({ text: wrapXml(marker, text), role: "system",
+                depth: resolveBeforeHistoryDepth(history.length, input.unifiedRecentItems?.length), order: blocks.length, marker });
+        }
     }
 
     // --- CHAT HISTORY / SHORT-TERM MEMORY ---
@@ -1814,7 +1838,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     let orderIdx = 0;
 
     // Markers to skip inside <member> blocks (injected at group level instead)
-    const SKIP_IN_MEMBER = new Set(["personaDescription"]);
+    const SKIP_IN_MEMBER = new Set(["personaDescription", "characterRelations"]);
 
     // 1. User persona block before members and chat history.
     const userPersonaText = buildUserPersonaText(userIdentity, resolvedUserName);
@@ -2076,6 +2100,22 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
             if (gcTags && !gcTags.every(t => activeTags.includes(t))) continue;
 
             if (p.marker) {
+                if (p.identifier === "characterRelations") {
+                    const automaticMembers = members.filter(member => member.characterRelations === undefined);
+                    const sharedRelations = automaticMembers.length ? formatCharactersRelationsForPrompt(
+                        automaticMembers.map(member => member.character.id), {
+                            appId: "chat", userIdentityIds: userIdentity === undefined ? undefined : userIdentity ? [userIdentity.id] : [],
+                            describedCharacterIds: members.map(member => member.character.id),
+                            mentionText: buildRelationMentionContext(history.map(message => message.content), [
+                                ...members.flatMap(member => [member.coreMemories || "", member.longTermMemories || ""]),
+                                ...(unifiedRecentItems || []).filter(item => item.kind === "event").slice(-12).map(item => item.kind === "event" ? item.text : ""),
+                            ]),
+                        }) : "";
+                    const content = [...new Set([sharedRelations, ...members.map(member => member.characterRelations || "")])].filter(Boolean).join("\n\n");
+                    if (content) blocks.push({ text: wrapXml("characterRelations", postProcessTrim(groupEngine.expand(content)).trim()),
+                        role: "system", depth: afterChatHistory ? 0 : beforeHistoryDepth,
+                        order: afterChatHistory ? 10 + afterOrderIdx++ : orderIdx++, marker: "characterRelations" });
+                }
                 // Skip markers (handled in <member> blocks or at group level)
                 continue;
             }

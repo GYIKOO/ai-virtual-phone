@@ -40,7 +40,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   const deps = {
     './story-tag-settings': load('lib/story-tag-settings.ts'),
     './prompt-time': { formatPromptTimestamp: () => '2026-10-15T12:00:00Z' },
-    './character-world-storage': { formatCharacterRelationsForPrompt: () => '' },
+    './character-world-storage': { formatCharacterRelationsForPrompt: () => '', formatCharactersRelationsForPrompt: () => '' },
     './story-instructions': instructions,
     './story-constraints': constraints,
     './character-storage': { loadCharacters: () => [{ id: 'char', name: '角色' }, { id: 'other', name: '配角' }] },
@@ -68,6 +68,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   };
   deps['./token-counter'] = load('lib/token-counter.ts');
   deps['./story-context-budget'] = load('lib/story-context-budget.ts', deps);
+  deps['./character-relation-context'] = load('lib/character-relation-context.ts');
   deps['./story-ensemble-context'] = load('lib/story-ensemble-context.ts', deps);
   const engine = load('lib/story-engine.ts', deps);
   await engine.generateStoryCompletion('char', [user, director], { retryInstruction: '不要下雨' });
