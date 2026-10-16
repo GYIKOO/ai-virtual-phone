@@ -67,11 +67,19 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
     './macro-engine': { MacroEngine: class {} },
   };
   deps['./token-counter'] = load('lib/token-counter.ts');
+  deps['./story-preset-selection'] = load('lib/story-preset-selection.ts');
+  deps['./story-preparation'] = load('lib/story-preparation.ts');
   deps['./story-context-budget'] = load('lib/story-context-budget.ts', deps);
   deps['./character-relation-context'] = load('lib/character-relation-context.ts');
   deps['./story-ensemble-context'] = load('lib/story-ensemble-context.ts', deps);
   const engine = load('lib/story-engine.ts', deps);
-  await engine.generateStoryCompletion('char', [user, director], { retryInstruction: '不要下雨' });
+  const phases = [];
+  await engine.generateStoryCompletion('char', [user, director], { retryInstruction: '不要下雨', onPhase: phase => phases.push(phase) });
+  assert.deepEqual(phases, ['preparing', 'requesting']);
+  const previousPayload = captured;
+  const stopped = new AbortController(); stopped.abort();
+  await assert.rejects(engine.generateStoryCompletion('char', [user], {signal: stopped.signal}), {name:'AbortError'});
+  assert.equal(captured, previousPayload, 'cancelled preparation does not send a completion request');
   assert.equal(contextOptions.history.length, 1, 'director excluded from narrative history');
   assert.ok(contextOptions.excludeStoryMessageIds.includes('a'), 'discarded reply projection excluded before generation');
   assert.match(captured.at(-2).content, /镜头转向窗外/);

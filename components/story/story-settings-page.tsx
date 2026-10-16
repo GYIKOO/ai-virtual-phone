@@ -7,6 +7,8 @@ import { Maximize2, Play, Download, Upload, Save, FolderOpen } from "lucide-reac
 import { ContentDialog, TextExpandModal } from "@/components/ui/modal";
 import { CustomStatusFrame } from "@/components/chat/custom-status-frame";
 import { StoryPaginationManager, type StoryBranchCreateInput } from "@/components/story/story-pagination-manager";
+import { SettingCard, StorySettingsPanels, StorySettingsTabPage } from "./story-settings-panels";
+import { isStoryPresetPromptEnabled } from "@/lib/story-preset-selection";
 import { downloadFile } from "@/lib/download-utils";
 import { resolveStoryUserControlMode, resolveStoryUserControlPrompt, resolveStoryUserControlEndingPrompt, STORY_USER_CONTROL_OPTIONS, DEFAULT_STORY_VOICE_FORMAT_PROMPT, type StoryUserControlMode } from "@/lib/story-constraints";
 import type { Character } from "@/lib/character-types";
@@ -185,20 +187,6 @@ function CharLimitInput({ label, value, onCommit }: { label: string; value: numb
       />
       <small className="story-char-limit-hint" data-out={outOfRange ? "true" : undefined}>{outOfRange ? `已保存 ${value}，生成时按 50–10000 生效` : "范围 50–10000"}</small>
     </label>
-  );
-}
-
-function SettingCard({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <section className="story-settings-card">
-      <div className="story-settings-card-head">
-        <div>
-          <h2>{title}</h2>
-          {hint ? <p>{hint}</p> : null}
-        </div>
-      </div>
-      {children}
-    </section>
   );
 }
 
@@ -483,6 +471,15 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
   }, [props.activeSessionId, props.uiPrefs.customFontUrl]);
   const selectedSession = props.ownerSessions.find((item) => item.id === props.activeSessionId);
   const independentStory = selectedSession?.independentStory === true;
+  const availablePrompts = useMemo(() => {
+    const preset = props.boundPreset;
+    if (!preset) return [];
+    const order = new Map(preset.prompt_order?.map((entry, index) => [entry.identifier, index]));
+    return preset.prompts.filter(prompt => !prompt.marker && prompt.content?.trim())
+      .sort((a, b) => (order.get(a.identifier) ?? Infinity) - (order.get(b.identifier) ?? Infinity));
+  }, [props.boundPreset]);
+  const selectedPromptIds = normalized.enabledPresetPromptIds
+    ?? availablePrompts.filter(prompt => props.boundPreset && isStoryPresetPromptEnabled(props.boundPreset, prompt)).map(prompt => prompt.identifier);
 
   const patchSettings = (updates: Partial<StoryCharacterSettings>) => {
     props.onSettingsChange({ ...normalized, ...updates });
@@ -608,6 +605,7 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
         <strong>剧情设置</strong>
         <button type="button" onClick={props.onClose} aria-label="关闭设置"><XMarkIcon width={17} /></button>
       </header>
+      <StorySettingsPanels>
       <main className="story-settings-scroll">
         <StoryPaginationManager
           characters={props.characters}
@@ -639,7 +637,8 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
         )}
         <fieldset disabled={props.mergeBusy || Boolean(props.ownerSessions.find(item => item.id === props.activeSessionId)?.mergedIntoSessionId)} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         <p className="story-settings-note">以下设置由同一角色或多人组的所有未归档分页共用，修改后同时生效，新分页也会沿用。分页名称、剧情记录与记忆选项仍各自独立。</p>
-        <SettingCard title="剧情预设设置" hint="建议给剧情 APP 单独制作专属预设，避免影响其他应用">
+        <StorySettingsTabPage tab="generation">
+        <SettingCard sectionId="presets" title="剧情预设设置" summary={`${props.boundPreset?.name || "未绑定预设"} · ${normalized.enabledPresetPromptIds === undefined ? "跟随预设默认" : "已设置局部开关"}`} hint="建议给剧情 APP 单独制作专属预设，避免影响其他应用">
           <label className="story-settings-field"><span>当前角色专属预设名称</span><input value={normalized.presetName} onChange={(event) => patchSettings({ presetName: event.target.value })} /></label>
           <div className="story-settings-subhead"><strong>专属预设条目</strong><button className="story-settings-mini-add" type="button" onClick={() => patchSettings({ customPromptEntries: [...(normalized.customPromptEntries || []), { id: `story-entry-${Date.now()}`, name: `新条目 ${(normalized.customPromptEntries?.length || 0) + 1}`, content: "", enabled: true }] })}><PlusIcon width={13} />增加</button></div>
           <div className="story-custom-entry-list">
@@ -651,9 +650,26 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
             ))}
             {!normalized.customPromptEntries?.length ? <p className="story-settings-empty">暂无专属条目，可按需要增加；它们只影响当前角色的剧情。</p> : null}
           </div>
+          <details className="story-bound-preset-entries">
+            <summary>已绑定预设条目 <span>{availablePrompts.filter(prompt => selectedPromptIds.includes(prompt.identifier)).length}/{availablePrompts.length} 项开启</span></summary>
+            <p className="story-settings-note">{props.boundPreset?.name || "未绑定预设"} · 开关仅影响当前角色或多人组，不修改共用预设。记忆、角色卡等动态条目沿用预设设置。</p>
+            {availablePrompts.length ? <>
+              <button type="button" className="story-font-reset" disabled={normalized.enabledPresetPromptIds === undefined}
+                onClick={() => patchSettings({ enabledPresetPromptIds: undefined })}>跟随预设默认</button>
+              <div className="story-preset-prompt-list">
+                {availablePrompts.map(prompt => <label key={prompt.identifier}>
+                  <input type="checkbox" checked={selectedPromptIds.includes(prompt.identifier)} onChange={event => {
+                    const next = event.target.checked ? [...selectedPromptIds, prompt.identifier] : selectedPromptIds.filter(id => id !== prompt.identifier);
+                    patchSettings({ enabledPresetPromptIds: [...new Set(next)] });
+                  }} />
+                  <span><strong>{prompt.name || prompt.identifier}</strong><small>{prompt.content.slice(0, 70)}</small></span>
+                </label>)}
+              </div>
+            </> : <p className="story-settings-empty">请先在“配置绑定”中给剧情 APP 绑定包含文本条目的预设。</p>}
+          </details>
         </SettingCard>
 
-        <SettingCard title="剧情设置预设" hint="保存或切换一整套剧情设置；不会保存聊天内容">
+        <SettingCard sectionId="schemes" title="剧情设置预设" summary={`已保存 ${settingsPresets.length} 套设置`} hint="保存或切换一整套剧情设置；不会保存聊天内容">
           <div className="story-settings-inline">
             <select value={activeSettingsPresetId} onChange={(event) => setActiveSettingsPresetId(event.target.value)}>
               <option value="">选择已保存的设置预设</option>
@@ -668,7 +684,7 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           <p className="story-settings-note">包含通用生成能力、文风/人称/字数、额外要求、语音、字体、自动阅读、快捷面板、剧情尾部、悬浮小手机、CSS 与折叠规则。</p>
         </SettingCard>
 
-        <SettingCard title="通用生成能力" hint="这里的开关由所有角色、多人组、主线和分线共同使用">
+        <SettingCard sectionId="general" title="通用生成能力" summary={`流式${props.globalSettings.streamingEnabled ? "开启" : "关闭"} · 时间感知${props.globalSettings.timeAware ? "开启" : "关闭"} · 全局共用`} hint="这里的开关由所有角色、多人组、主线和分线共同使用">
           <ToggleRow
             title="剧情时截断当前角色后台主动发消息活动"
             detail="开启后，剧情页面进行期间检测到当前角色正在主动发消息或追加消息，会立即中止对应的后台 API 请求"
@@ -689,11 +705,11 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           />
         </SettingCard>
 
-        <SettingCard title="剧情额外要求" hint="只影响当前角色或多人组的剧情；会随设置预设一起保存">
+        <SettingCard sectionId="extra" title="剧情额外要求" summary={normalized.extraPrompt?.trim() ? "已填写额外要求" : "未填写"} hint="只影响当前角色或多人组的剧情；会随设置预设一起保存">
           <label className="story-settings-field"><textarea value={normalized.extraPrompt || ""} onChange={(event) => patchSettings({ extraPrompt: event.target.value })} placeholder="填写本剧情需要额外遵守的要求" /></label>
         </SettingCard>
 
-        <SettingCard title="生成设置" hint="检查预设条目与生成设置是否重复">
+        <SettingCard sectionId="generation" title="生成设置" summary={`${userControlOption.label} · ${normalized.usePresetNarration ? "字数与人称随预设" : `${normalized.minChars}–${normalized.maxChars} 字`} · ${normalized.usePresetProseStyle ? "文风随预设" : "自选文风"}`} hint="检查预设条目与生成设置是否重复">
           <ToggleRow title="字数与人称由预设决定" detail="开启后不追加下方的字数及用户人称要求" checked={Boolean(normalized.usePresetNarration)} onChange={(value) => patchSettings({ usePresetNarration: value })} />
           <label className="story-settings-field">
             <span>抢话设置</span>
@@ -722,13 +738,15 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           {!normalized.usePresetProseStyle && <ProseStyleEditor schemes={repo.proseStyleSchemes} activeId={normalized.activeProseStyleSchemeId!} onChange={(proseStyleSchemes, activeProseStyleSchemeId) => { patchRepo({ proseStyleSchemes }); patchSettings({ activeProseStyleSchemeId }); }} />}
         </SettingCard>
 
-        <SettingCard title="语音与播放">
+        </StorySettingsTabPage>
+        <StorySettingsTabPage tab="reading">
+        <SettingCard sectionId="voice" title="语音与播放" summary={props.uiPrefs.voiceEnabled ? "语音已开启" : "语音未开启"}>
           <ToggleRow title="开启语音" detail="启动当前角色绑定到剧情 APP 的语音；不会自动阅读" checked={Boolean(props.uiPrefs.voiceEnabled)} onChange={(value) => props.onUiPrefsChange({ ...props.uiPrefs, voiceEnabled: value })} />
           {props.activeGroupId ? <p className="story-settings-note">多人剧情角色语音不统一，当前可能默认绑定第一个角色的语音。</p> : null}
           <p className="story-settings-note">总播放键按次播放下一句；每句对白末尾的小按钮仍可单独播放。</p>
         </SettingCard>
 
-        <SettingCard title="自定义字体" hint="只应用于当前剧情会话；可上传字体文件或填写字体直链">
+        <SettingCard sectionId="font" title="自定义字体" summary={props.uiPrefs.customFontDataUrl ? props.uiPrefs.customFontName || "已上传字体" : props.uiPrefs.customFontUrl ? "使用字体直链" : "使用默认字体"} hint="只应用于当前剧情会话；可上传字体文件或填写字体直链">
           <input
             ref={fontFileRef}
             hidden
@@ -759,7 +777,7 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           <p className="story-settings-note">远程字体必须是可直接访问的字体文件，并允许跨域加载；否则浏览器会自动回退到默认剧情字体。</p>
         </SettingCard>
 
-        <SettingCard title="自动阅读" hint="开启后可在“续写”旁启动自动滚动，解放双手阅读">
+        <SettingCard sectionId="reading" title="自动阅读" summary={props.uiPrefs.autoReadingEnabled ? `已开启 · ${props.uiPrefs.autoReadingSpeed ?? 36} 像素/秒` : "未开启"} hint="开启后可在“续写”旁启动自动滚动，解放双手阅读">
           <ToggleRow title="开启自动阅读" detail="可从最新角色消息或当前页面位置开始" checked={Boolean(props.uiPrefs.autoReadingEnabled)} onChange={(value) => props.onUiPrefsChange({ ...props.uiPrefs, autoReadingEnabled: value })} />
           {props.uiPrefs.autoReadingEnabled ? (
             <label className="story-auto-reading-speed">
@@ -777,7 +795,9 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           ) : null}
         </SettingCard>
 
-        <SettingCard title="快捷输入面板" hint="开启后“续写”右侧出现“输入”按钮；方案保存在公用仓库，所有角色共享">
+        </StorySettingsTabPage>
+        <StorySettingsTabPage tab="advanced">
+        <SettingCard sectionId="input" title="快捷输入面板" summary={props.uiPrefs.quickInputEnabled ? `已开启 · ${quickInputActive?.name || "默认方案"}` : "未开启"} hint="开启后“续写”右侧出现“输入”按钮；方案保存在公用仓库，所有角色共享">
           <ToggleRow
             title="开启快捷输入面板"
             detail="输入框上方展开窄长横幅，点按选项即插入输入框，选项过多可左右滑动"
@@ -832,17 +852,17 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           ) : null}
         </SettingCard>
 
-        <SettingCard title="剧情尾部" hint="状态栏与小剧场方案保存在公用仓库，所有角色共享；每个角色单独选择启用哪一套">
+        <SettingCard sectionId="tail" title="剧情尾部" summary={`状态栏：${repo.statusSchemes.find(item => item.id === normalized.activeStatusSchemeId)?.name || "默认方案"} · 小剧场：${repo.theaterSchemes.find(item => item.id === normalized.activeTheaterSchemeId)?.name || "默认方案"}`} hint="状态栏与小剧场方案保存在公用仓库，所有角色共享；每个角色单独选择启用哪一套">
           <SchemeEditor label="状态栏方案" schemes={repo.statusSchemes} activeId={normalized.activeStatusSchemeId!} tag="story_status" contextNote="进入上下文" onChange={(schemes, activeStatusSchemeId) => { patchRepo({ statusSchemes: schemes }); patchSettings({ activeStatusSchemeId }); }} />
           <SchemeEditor label="小剧场方案" schemes={repo.theaterSchemes} activeId={normalized.activeTheaterSchemeId!} tag="story_theater" contextNote="默认不进上下文" onChange={(schemes, activeTheaterSchemeId) => { patchRepo({ theaterSchemes: schemes }); patchSettings({ activeTheaterSchemeId }); }} />
         </SettingCard>
 
-        <SettingCard title="悬浮小手机" hint="开启后剧情正文右侧出现手机悬浮球">
+        <SettingCard sectionId="phone" title="悬浮小手机" summary={normalized.floatingPhoneEnabled ? `已开启 · ${independentStory ? "独立剧情" : normalized.floatingPhoneInContext ? "聊天衔接剧情" : "不带入聊天"}` : "未开启"} hint="开启后剧情正文右侧出现手机悬浮球">
           <ToggleRow title="启用悬浮小手机" detail={independentStory ? "独立剧情中只显示未连接外壳，不绑定或同步任何线上聊天" : "居中打开窄版小手机，显示与当前角色的线上聊天记录"} checked={Boolean(normalized.floatingPhoneEnabled)} onChange={(value) => patchSettings({ floatingPhoneEnabled: value })} />
           <ToggleRow title="聊天记录衔接剧情上下文" detail={independentStory ? "独立剧情已强制隔离，线上私聊、群聊和小手机内容都不会进入上下文" : "生成剧情时带入小手机最近的线上消息"} checked={!independentStory && Boolean(normalized.floatingPhoneInContext)} disabled={independentStory} onChange={(value) => patchSettings({ floatingPhoneInContext: value })} />
         </SettingCard>
 
-        <SettingCard title="标签与高级设置">
+        <SettingCard sectionId="advanced" title="标签与高级设置" summary="折叠与上下文标签 · 壁纸 · CSS · 渲染缓存">
           <label className="story-settings-field"><span>折叠标签</span><input value={props.foldTags} onChange={(event) => props.onTagsChange(event.target.value, props.contextExcludedTags)} placeholder={DEFAULT_STORY_FOLD_TAGS} /></label>
           <label className="story-settings-field"><span>不进上下文标签</span><input value={props.contextExcludedTags} onChange={(event) => props.onTagsChange(props.foldTags, event.target.value)} placeholder={DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS} /></label>
           <p className="story-settings-note">标签设置同样在当前角色或多人组内共用。折叠仅影响显示，不会自动排除上下文。</p>
@@ -850,8 +870,10 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           <button className="story-settings-row-button" type="button" onClick={props.onOpenCss}><span><strong>页面 CSS 样式</strong><small>进入完整样式编辑页面</small></span><ChevronLeftIcon width={17} style={{ transform: "rotate(180deg)" }} /></button>
           <button className="story-settings-row-button" type="button" onClick={props.onRebuildCache}><span><strong>重建剧情渲染缓存</strong><small>方案或标签变化后使用</small></span><ChevronLeftIcon width={17} style={{ transform: "rotate(180deg)" }} /></button>
         </SettingCard>
+        </StorySettingsTabPage>
         </fieldset>
       </main>
+      </StorySettingsPanels>
       {settingsPresetNameDraft !== null && <ContentDialog title="设置预设名称" onConfirm={saveCurrentSettingsPreset} onCancel={() => setSettingsPresetNameDraft(null)}>
         <input className="ui-input" aria-label="设置预设名称" autoFocus value={settingsPresetNameDraft} onChange={event => setSettingsPresetNameDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.nativeEvent.isComposing) saveCurrentSettingsPreset(); }} />
       </ContentDialog>}

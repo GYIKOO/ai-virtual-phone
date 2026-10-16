@@ -2,25 +2,34 @@
 // High-level memory orchestration: retrieve long-term memories for prompt injection.
 
 import type { MemoryConfig, MemoryEntry } from "./memory-types";
-import { loadMemoryEntriesByType } from "./memory-storage";
+import { loadMemoryEntries, loadMemoryEntriesByType } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
 import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity, keywordSearch } from "./memory-embedding";
 import { estimateTokens } from "./token-counter";
 import { knownAt } from "./proactive-replay";
 import { formatMemoryEntry, memoryEventRange } from "./memory-time";
+import { throwIfStoryAborted } from "./story-preparation";
 
 /** One scene query/vector shared by every participant. Does not change single-chat retrieval. */
-export function createStoryMemoryRanker(query: string, config: MemoryConfig) {
+export function createStoryMemoryRanker(query: string, config: MemoryConfig, signal?: AbortSignal) {
     let vector: Promise<number[] | null> | undefined;
+    const reads = new Map<string, Promise<MemoryEntry[]>>();
     return async (characterId: string, type: "long_term" | "core") => {
-        const entries = await loadMemoryEntriesByType(characterId, type);
+        throwIfStoryAborted(signal);
+        if (!reads.has(characterId)) reads.set(characterId, loadMemoryEntries(characterId));
+        const entries = (await reads.get(characterId)!).filter(entry => entry.type === type);
+        throwIfStoryAborted(signal);
         const keywordScores = new Map(keywordSearch(query, entries, entries.length).map(hit => [hit.entry.id, hit.score]));
         let queryVector: number[] | null = null;
         if (type === "long_term" && query.trim() && config.vectorRecallEnabled && entries.some(entry => entry.embedding?.length)) {
             const api = resolveAuxiliaryApiConfig("embeddingApiConfigId");
             if (api && resolveEmbeddingModel(api)) {
-                vector ??= generateEmbedding(query, api).catch(() => null);
+                vector ??= generateEmbedding(query, api, { signal, timeoutMs: 10000 }).catch(() => {
+                    throwIfStoryAborted(signal);
+                    return null;
+                });
                 queryVector = await vector;
+                throwIfStoryAborted(signal);
             }
         }
         return entries.map(entry => {

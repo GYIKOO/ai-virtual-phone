@@ -27,6 +27,8 @@ import { resolveStoryUserControlPrompt, resolveStoryUserControlEndingPrompt, DEF
 import { formatPromptTimestamp } from "./prompt-time";
 import { buildEnsembleStoryPrompt } from "./story-ensemble-context";
 import { estimateStoryMessages, storyInputBudget } from "./story-context-budget";
+import { selectStoryPresetPrompts } from "./story-preset-selection";
+import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase } from "./story-preparation";
 
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS, storyFoldSignature } from "./story-tag-settings";
 
@@ -47,17 +49,8 @@ export type StoryGenerationOptions = {
   };
   onDelta?: (text: string) => void;
   signal?: AbortSignal;
+  onPhase?: (phase: StoryGenerationPhase) => void;
 };
-
-function selectStoryPresetPrompts(preset: PresetConfig | null, selectedIds?: string[]): PresetConfig | null {
-  if (!preset || selectedIds === undefined) return preset;
-  const allowed = new Set(selectedIds);
-  return {
-    ...preset,
-    prompts: preset.prompts.map((prompt) => prompt.marker ? prompt : { ...prompt, enabled: prompt.enabled && allowed.has(prompt.identifier) }),
-    prompt_order: preset.prompt_order,
-  };
-}
 
 function buildStorySettingsPrompt(
   settings: StoryCharacterSettings | undefined,
@@ -229,6 +222,8 @@ export async function generateStoryCompletion(
   history: StoryMessage[],
   options?: StoryGenerationOptions,
 ): Promise<StoryGenerationResult> {
+  options?.onPhase?.("preparing");
+  await yieldStoryPreparation(options?.signal);
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
     throw new ChatEngineError(`Character not found: ${characterId}`);
@@ -252,8 +247,13 @@ export async function generateStoryCompletion(
     options?.storyMemory,
     options?.sessionId,
     options?.retryInstruction,
+    options,
   );
+  await yieldStoryPreparation(options?.signal);
   checkEnsembleRequestBudget(characterId, options?.participantIds, apiConfig, preset, llmMessages);
+  throwIfStoryAborted(options?.signal);
+  options?.onPhase?.("requesting");
+  await yieldStoryPreparation(options?.signal);
 
   const userIdentity = resolveUserIdentity(characterId, "story");
   const macroEngine = new MacroEngine(character.name, userIdentity?.name ?? "用户");
@@ -318,6 +318,7 @@ async function buildStoryPromptMessages(
   storyMemory?: StoryGenerationOptions["storyMemory"],
   sessionId?: string,
   retryInstruction?: string,
+  preparation?: Pick<StoryGenerationOptions, "signal" | "onPhase">,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -359,6 +360,7 @@ async function buildStoryPromptMessages(
   };
   if (isEnsemble) {
     return buildEnsembleStoryPrompt({
+      signal: preparation?.signal, onPhase: preparation?.onPhase,
       base: { character, history: historyMessages, preset, worldBooks: effectiveWorldBooks, regexes, userIdentity, appId: "story", timeAware },
       characters: participantCharacters, config: memConfig, independent,
       excludedMessageIds: [...new Set([...storedMessages.map(message => message.id), ...historyIds])],

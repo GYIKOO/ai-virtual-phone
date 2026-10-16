@@ -38,7 +38,7 @@ export function resolveEmbeddingModel(apiConfig: Pick<ApiConfig, "provider" | "d
 export async function generateEmbedding(
     text: string,
     apiConfig: ApiConfig,
-    options: { throwOnError?: boolean } = {}
+    options: { throwOnError?: boolean; signal?: AbortSignal; timeoutMs?: number } = {}
 ): Promise<number[] | null> {
     const fail = (message: string): null => {
         if (options.throwOnError) throw new Error(message);
@@ -58,11 +58,17 @@ export async function generateEmbedding(
         : `${baseUrl.replace(/\/$/, "")}/embeddings`;
 
     const headers = buildRequestHeaders(apiConfig, baseUrl);
+    const controller = options.timeoutMs ? new AbortController() : undefined;
+    const forwardAbort = () => controller?.abort();
+    if (options.signal?.aborted) forwardAbort();
+    options.signal?.addEventListener("abort", forwardAbort, { once: true });
+    const timeout = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
 
     try {
         const res = await fetch(url, {
             method: "POST",
             headers,
+            signal: controller?.signal ?? options.signal,
             body: JSON.stringify({
                 model: embeddingModel,
                 input: text,
@@ -78,9 +84,13 @@ export async function generateEmbedding(
         }
         return embedding;
     } catch (err) {
+        if (options.signal?.aborted) throw err;
         if (options.throwOnError) throw err;
         console.warn("[MemoryEmbedding] fetch error:", err);
         return null;
+    } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+        options.signal?.removeEventListener("abort", forwardAbort);
     }
 }
 

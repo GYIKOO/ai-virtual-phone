@@ -65,18 +65,22 @@ function fairMemoryOrder(candidates: StoryContextCandidate[]): StoryContextCandi
   return result;
 }
 
-export function packStoryContext(options: {
+type StoryPackingOptions = {
   candidates: StoryContextCandidate[];
   inputBudget: number;
   limits: Record<StoryBudgetKind, number>;
   render: (selected: SelectedStoryContext[]) => LLMMessage[];
-}): { messages: LLMMessage[]; selected: SelectedStoryContext[]; estimatedTokens: number } {
+};
+type PackedStoryContext = { messages: LLMMessage[]; selected: SelectedStoryContext[]; estimatedTokens: number };
+
+function* storyPackingSteps(options: StoryPackingOptions): Generator<void, PackedStoryContext> {
   const base = options.render([]);
   const baseTokens = estimateStoryMessages(base);
   if (baseTokens > options.inputBudget) {
     throw new Error(`多人剧情的角色设定、预设、世界书与本轮输入已超过上下文预算（估算 ${baseTokens} / ${options.inputBudget} tokens）。请缩减必需内容，或将预设上下文容量设为模型实际支持的数值。`);
   }
   const available = options.inputBudget - baseTokens;
+  yield;
   const candidates = deduplicateStoryCandidates(options.candidates);
   const pools: Record<StoryBudgetKind, StoryContextCandidate[]> = {
     recent: candidates.filter(c => c.kind === "recent").sort((a, b) => compareStoryTimes(b.timestamp, a.timestamp) || a.id.localeCompare(b.id)),
@@ -87,27 +91,56 @@ export function packStoryContext(options: {
   const chosen = new Set<StoryContextCandidate>();
   const used = { recent: 0, core: 0, long: 0 };
   let total = 0;
-  const take = (kind: StoryBudgetKind, allowance: number) => {
+  const costs = new Map<StoryContextCandidate, Map<string, number>>();
+  const costOf = (candidate: StoryContextCandidate, text: string) => {
+    let variants = costs.get(candidate);
+    if (!variants) { variants = new Map(); costs.set(candidate, variants); }
+    if (!variants.has(text)) variants.set(text, estimateTokens(text) + 32 + estimateTokens(candidate.owners.join("、")));
+    return variants.get(text)!;
+  };
+  const take = function* (kind: StoryBudgetKind, allowance: number): Generator<void> {
+    let visited = 0;
     for (const candidate of pools[kind]) {
+      if (++visited % 128 === 0) yield;
       if (chosen.has(candidate)) continue;
       const room = Math.min(allowance - used[kind], available - total);
       const variants = [candidate.text, candidate.summary].filter((text): text is string => Boolean(text));
-      const text = variants.find(value => estimateTokens(value) + 32 + estimateTokens(candidate.owners.join("、")) <= room);
+      const text = variants.find(value => costOf(candidate, value) <= room);
       if (!text) continue; // A large entry must not prevent smaller relevant entries from fitting.
-      const cost = estimateTokens(text) + 32 + estimateTokens(candidate.owners.join("、"));
+      const cost = costOf(candidate, text);
       selected.push({ candidate, text }); chosen.add(candidate); used[kind] += cost; total += cost;
     }
   };
-  take("core", Math.min(options.limits.core, available * 0.15));
-  take("long", Math.min(options.limits.long, available * 0.25));
-  take("recent", Math.min(options.limits.recent, available - total));
+  yield* take("core", Math.min(options.limits.core, available * 0.15));
+  yield* take("long", Math.min(options.limits.long, available * 0.25));
+  yield* take("recent", Math.min(options.limits.recent, available - total));
   // Reuse spare space, while keeping each category's configured shared cap.
-  for (const kind of ["core", "long", "recent"] as const) take(kind, options.limits[kind]);
+  for (const kind of ["core", "long", "recent"] as const) yield* take(kind, options.limits[kind]);
+  yield;
   let messages = options.render(selected);
   // Count the actual assembled prompt, including wrappers, macros, preset and world books.
   while (estimateStoryMessages(messages) > options.inputBudget && selected.length) {
+    yield;
     selected.pop();
     messages = options.render(selected);
   }
   return { messages, selected, estimatedTokens: estimateStoryMessages(messages) };
+}
+
+export function packStoryContext(options: StoryPackingOptions): PackedStoryContext {
+  const steps = storyPackingSteps(options);
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+/** Same selection algorithm, with cooperative checkpoints for the interactive generation path. */
+export async function packStoryContextAsync(options: StoryPackingOptions, checkpoint: () => Promise<void>): Promise<PackedStoryContext> {
+  const steps = storyPackingSteps(options);
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    await checkpoint();
+  }
 }

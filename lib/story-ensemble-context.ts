@@ -12,7 +12,8 @@ import { getWeekStartIso } from "./calendar-utils";
 import { formatCharactersRelationsForPrompt } from "./character-world-storage";
 import { buildRelationMentionContext } from "./character-relation-context";
 import { formatPromptTimestamp } from "./prompt-time";
-import { packStoryContext, storyInputBudget, estimateStoryMessages, compareStoryTimes, type StoryContextCandidate, type SelectedStoryContext } from "./story-context-budget";
+import { packStoryContext, packStoryContextAsync, storyInputBudget, estimateStoryMessages, compareStoryTimes, type StoryContextCandidate, type SelectedStoryContext } from "./story-context-budget";
+import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase } from "./story-preparation";
 
 type Candidate = StoryContextCandidate & {
   history?: ChatMessage[];
@@ -34,6 +35,8 @@ export async function buildEnsembleStoryPrompt(options: {
   formatStoryMessage: (message: StoryMessage) => ChatMessage;
   cleanText: (text: string) => string;
   historySummaries?: Map<string, string>;
+  signal?: AbortSignal;
+  onPhase?: (phase: StoryGenerationPhase) => void;
 }): Promise<LLMMessage[]> {
   const { base, characters, config } = options;
   const marker = (name: string) => isContextMarkerEnabled(base.preset, name);
@@ -48,8 +51,9 @@ export async function buildEnsembleStoryPrompt(options: {
   const mandatoryHistory = currentHistory.slice(-2);
   const candidates: Candidate[] = [];
   const contexts = new Map<string, ReturnType<typeof prepareShortTermContext>>();
-  if (!options.independent) {
+  if (!options.independent && recentEnabled) {
     for (const character of characters) {
+      await yieldStoryPreparation(options.signal);
       contexts.set(character.id, prepareShortTermContext(character.id, "story", {
         history: currentHistory, tokenBudget: 0,
         userName: resolveUserIdentity(character.id, "story")?.name ?? base.userIdentity?.name ?? "用户",
@@ -59,6 +63,7 @@ export async function buildEnsembleStoryPrompt(options: {
     }
   }
   if (recentEnabled) {
+    const renderedTurns = new Map<string, { fullText?: string; summary: string }>();
     // Older current-page prose competes once, not once per participant.
     for (const message of currentHistory.slice(0, -2)) {
       candidates.push({ id: `history:${message.id}`, kind: "recent", owners: characters.map(c => c.id),
@@ -68,6 +73,7 @@ export async function buildEnsembleStoryPrompt(options: {
         sourceApp: "story" });
     }
     for (const character of characters) {
+      await yieldStoryPreparation(options.signal);
       const context = contexts.get(character.id);
       if (!context) continue;
       // Projection eligibility comes from the existing native timeline's source filters.
@@ -76,11 +82,17 @@ export async function buildEnsembleStoryPrompt(options: {
       for (const event of events) {
         const turn = event.entryId ? storyTurns.get(event.entryId) : undefined;
         if (turn?.messages.some(message => excluded.has(message.id))) continue;
-        const fullText = turn?.messages.map(message => {
-          const rendered = options.formatStoryMessage(message);
-          return `[${time(message.createdAt)} ${message.role === "user" ? "用户发言" : "剧情正文"}]\n${rendered.content}`;
-        }).join("\n\n");
-        const summary = turn ? options.cleanText(turn.summary).trim() : "";
+        const turnKey = turn?.id;
+        if (turn && turnKey && !renderedTurns.has(turnKey)) {
+          renderedTurns.set(turnKey, {
+            fullText: turn.messages.map(message => {
+              const rendered = options.formatStoryMessage(message);
+              return `[${time(message.createdAt)} ${message.role === "user" ? "用户发言" : "剧情正文"}]\n${rendered.content}`;
+            }).join("\n\n"),
+            summary: options.cleanText(turn.summary).trim(),
+          });
+        }
+        const { fullText, summary } = (turnKey && renderedTurns.get(turnKey)) || { summary: "" };
         candidates.push({
           id: event.entryId || `${character.id}:${event.sourceTag}:${event.timestamp}:${event.text}`,
           kind: "recent", owners: [character.id], timestamp: event.timestamp,
@@ -146,31 +158,53 @@ export async function buildEnsembleStoryPrompt(options: {
   // Fail before embedding calls if immutable material alone cannot fit.
   packStoryContext({ candidates: [], inputBudget, limits, render });
   if (!options.independent) {
-    const rankMemory = createStoryMemoryRanker(query, config);
-    for (const character of characters) {
-      for (const [type, kind, enabled] of [
-        ["core", "core", marker("memoryCore")], ["long_term", "long", marker("memoryLongTerm")],
-      ] as const) {
-        if (!enabled) continue;
-        const ranked = await rankMemory(character.id, type);
-        for (const { entry, score } of ranked) {
-          const sources = [...new Set(entry.sourceMessageIds || [])].sort();
-          // Exact source + content identity can share storage projections; distinct interpretations stay distinct.
-          const identity = sources.length ? `${sources.join("|")}:${entry.content}` : `${character.id}:${entry.id}`;
-          candidates.push({ id: `${kind}:${identity}`, kind, owners: [character.id],
-            timestamp: Number.isFinite(memoryEventRange(entry)?.end ?? Date.parse(entry.createdAt))
-              ? new Date(memoryEventRange(entry)?.end ?? Date.parse(entry.createdAt)).toISOString() : "",
-            text: base.timeAware === false ? entry.content : formatMemoryEntry(entry, now.getTime()),
-            score, sourceApp: entry.sourceApp, sourceIds: sources });
+    options.onPhase?.("recalling");
+    await yieldStoryPreparation(options.signal);
+    const rankMemory = createStoryMemoryRanker(query, config, options.signal);
+    // Bound concurrent storage reads. Results are consumed in the original participant/type order.
+    for (let offset = 0; offset < characters.length; offset += 4) {
+      const batch = characters.slice(offset, offset + 4);
+      const rankedBatch = await Promise.all(batch.map(async character => ({
+        character,
+        core: marker("memoryCore") ? await rankMemory(character.id, "core") : [],
+        long: marker("memoryLongTerm") ? await rankMemory(character.id, "long_term") : [],
+      })));
+      for (const { character, core, long } of rankedBatch) {
+        await yieldStoryPreparation(options.signal);
+        for (const [type, kind, enabled] of [
+          ["core", "core", marker("memoryCore")], ["long_term", "long", marker("memoryLongTerm")],
+        ] as const) {
+          if (!enabled) continue;
+          const ranked = type === "core" ? core : long;
+          for (const { entry, score } of ranked) {
+            const sources = [...new Set(entry.sourceMessageIds || [])].sort();
+            // Exact source + content identity can share storage projections; distinct interpretations stay distinct.
+            const identity = sources.length ? `${sources.join("|")}:${entry.content}` : `${character.id}:${entry.id}`;
+            candidates.push({ id: `${kind}:${identity}`, kind, owners: [character.id],
+              timestamp: Number.isFinite(memoryEventRange(entry)?.end ?? Date.parse(entry.createdAt))
+                ? new Date(memoryEventRange(entry)?.end ?? Date.parse(entry.createdAt)).toISOString() : "",
+              text: base.timeAware === false ? entry.content : formatMemoryEntry(entry, now.getTime()),
+              score, sourceApp: entry.sourceApp, sourceIds: sources });
+          }
         }
-      }
-      const currentSchedule = marker("calendarSchedule") ? getCurrentCalendarScheduleForPrompt("character", character.id, now) : "";
-      const weekSchedule = marker("calendarSchedule") ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now)) : "";
-      for (const [key, text, score] of [["current", currentSchedule, 2], ["week", weekSchedule, 0]] as const) {
-        if (text) candidates.push({ id: `life:${character.id}:${key}`, kind: "core", owners: [character.id],
-          timestamp: now.toISOString(), text, sourceApp: "日程", score, background: key });
+        const currentSchedule = marker("calendarSchedule") ? getCurrentCalendarScheduleForPrompt("character", character.id, now) : "";
+        const weekSchedule = marker("calendarSchedule") ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now)) : "";
+        for (const [key, text, score] of [["current", currentSchedule, 2], ["week", weekSchedule, 0]] as const) {
+          if (text) candidates.push({ id: `life:${character.id}:${key}`, kind: "core", owners: [character.id],
+            timestamp: now.toISOString(), text, sourceApp: "日程", score, background: key });
+        }
       }
     }
   }
-  return packStoryContext({ candidates, inputBudget, limits, render }).messages;
+  options.onPhase?.("preparing");
+  await yieldStoryPreparation(options.signal);
+  throwIfStoryAborted(options.signal);
+  let lastYield = Date.now();
+  return (await packStoryContextAsync({ candidates, inputBudget, limits, render }, async () => {
+    throwIfStoryAborted(options.signal);
+    if (Date.now() - lastYield >= 8) {
+      await yieldStoryPreparation(options.signal);
+      lastYield = Date.now();
+    }
+  })).messages;
 }

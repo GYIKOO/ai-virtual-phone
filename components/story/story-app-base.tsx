@@ -1,6 +1,7 @@
 "use client";
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS } from "@/lib/story-tag-settings";
-import { createStoryGenerationRun, isStoryGenerationRunActive, finishStoryGenerationRun, cancelStoryGenerationRun, getGeneratingStorySessionIds, subscribeStoryGeneration } from "@/lib/story-generation-runs";
+import { createStoryGenerationRun, isStoryGenerationRunActive, finishStoryGenerationRun, cancelStoryGenerationRun, getGeneratingStorySessionIds, subscribeStoryGeneration, getStoryGenerationPhase, setStoryGenerationPhase } from "@/lib/story-generation-runs";
+import type { StoryGenerationPhase } from "@/lib/story-preparation";
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
@@ -229,26 +230,20 @@ type StoryComposerAppendRequest = {
   text: string;
 };
 
-const STORY_GENERATION_STATUS = ["整理场景", "续写剧情", "打磨对白", "写入故事"];
 const STORY_INITIAL_LOAD = 10;
 const STORY_LOAD_MORE_COUNT = 10;
 
 function StoryGeneratingIndicator({
   characterName,
   avatar,
+  phase,
 }: {
   characterName: string;
   avatar?: string;
+  phase?: StoryGenerationPhase;
 }) {
-  const [statusIndex, setStatusIndex] = useState(0);
-  const status = STORY_GENERATION_STATUS[statusIndex % STORY_GENERATION_STATUS.length];
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setStatusIndex((index) => (index + 1) % STORY_GENERATION_STATUS.length);
-    }, 1400);
-    return () => window.clearInterval(timer);
-  }, []);
+  const status = phase === "preparing" ? "正在整理上下文…" : phase === "recalling" ? "正在检索相关记忆…"
+    : "等待模型回复…";
 
   return (
     <article className="story-row" data-role="assistant">
@@ -262,7 +257,7 @@ function StoryGeneratingIndicator({
         </div>
       </div>
       <div className="story-bubble-wrap">
-        <div className="story-bubble story-generating-bubble" aria-label="正在生成剧情">
+        <div className="story-bubble story-generating-bubble" aria-label="正在生成剧情" role="status" aria-live="polite">
           <span className="story-generating-copy">{status}</span>
           <span className="story-generating-dots" aria-hidden="true">
             <i />
@@ -1647,6 +1642,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     try {
       const historyForGeneration = loadStoryMessages(sessionId);
       const result = await generateStoryCompletion(characterId, historyForGeneration, {
+        onPhase: phase => setStoryGenerationPhase(sessionId, generationRunId, phase),
         sessionFoldTags: currentSession?.foldTags,
         sessionContextExcludedTags: currentSession?.contextExcludedTags,
         settings: currentSession?.settings,
@@ -1733,6 +1729,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     const isCurrentGeneration = () => isStoryGenerationRunActive(sessionId, generationRunId);
 
     void generateStoryCompletion(characterId, [...loadStoryMessages(sessionId), virtualMessage], {
+      onPhase: phase => setStoryGenerationPhase(sessionId, generationRunId, phase),
       sessionFoldTags: session.foldTags,
       sessionContextExcludedTags: session.contextExcludedTags,
       settings: session.settings,
@@ -2143,6 +2140,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     const isCurrentGeneration = () => isStoryGenerationRunActive(sessionId, generationRunId);
     try {
       const result = await generateStoryCompletion(characterId, contextMessages, {
+        onPhase: phase => setStoryGenerationPhase(sessionId, generationRunId, phase),
         sessionId,
         retryInstruction,
         sessionFoldTags: currentSession?.foldTags,
@@ -2537,6 +2535,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
             {isGenerating && !activeStreamingText ? (
               <StoryGeneratingIndicator
                 characterName={storyDisplayName}
+                phase={getStoryGenerationPhase(activeSessionId)}
                 avatar={storyAvatar || undefined}
               />
             ) : null}

@@ -23,9 +23,9 @@ const mocks = {
       unifiedRecentItems:(events[id] || []).filter(event => !excluded.has(event.entryId) && (!options.afterTimestamp || event.timestamp > options.afterTimestamp)) };
   } },
   './story-storage': { loadStoryRecallTurns: id => turns[id] || [] },
-  './memory-storage': { loadMemoryEntriesByType: async (id,type) => {
+  './memory-storage': { loadMemoryEntries: async id => {
     memoryReads++;
-    return (memories[id] || []).filter(entry => entry.type === type);
+    return memories[id] || [];
   } },
   './calendar-storage': { getCurrentCalendarScheduleForPrompt: () => '', buildCalendarScheduleMarker: () => '' },
   './calendar-utils': { getWeekStartIso: () => '' },
@@ -37,7 +37,7 @@ function load(name) {
   const exports = {};
   cache.set(name,exports);
   const filename = `lib/${name.slice(2)}.ts`;
-  const real = new Set(['./token-counter','./story-context-budget','./story-ensemble-context','./memory-service','./memory-time','./memory-embedding','./llm-prompt-assembler','./story-default-prompt','./llm-provider-adapter','./api-helpers','./generation-parameters','./character-relation-context']);
+  const real = new Set(['./token-counter','./story-context-budget','./story-ensemble-context','./memory-service','./memory-time','./memory-embedding','./llm-prompt-assembler','./story-default-prompt','./llm-provider-adapter','./api-helpers','./generation-parameters','./character-relation-context','./story-preparation']);
   if (!real.has(name)) return {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename,'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
     {exports,require:load,console}, {filename});

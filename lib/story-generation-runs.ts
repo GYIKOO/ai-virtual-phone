@@ -1,6 +1,7 @@
 import { loadStoryMessages, loadStorySessions } from "./story-storage";
+import type { StoryGenerationPhase } from "./story-preparation";
 
-type StoryGenerationRun = { runId: string; controller: AbortController; history: string };
+type StoryGenerationRun = { runId: string; controller: AbortController; history: string; phase: StoryGenerationPhase };
 const activeStoryGenerationRuns = new Map<string, StoryGenerationRun>();
 const listeners = new Set<() => void>();
 const historySignature = (sessionId: string) => JSON.stringify(loadStoryMessages(sessionId).map(m => [m.id, m.role, m.rawContent, m.kind]));
@@ -15,10 +16,19 @@ export function subscribeStoryGeneration(listener: () => void): () => void {
 }
 export function createStoryGenerationRun(sessionId: string): StoryGenerationRun {
   activeStoryGenerationRuns.get(sessionId)?.controller.abort();
-  const run = { runId: `${Date.now()}-${Math.random().toString(36).slice(2)}`, controller: new AbortController(), history: historySignature(sessionId) };
+  const run: StoryGenerationRun = { runId: `${Date.now()}-${Math.random().toString(36).slice(2)}`, controller: new AbortController(), history: historySignature(sessionId), phase: "preparing" };
   activeStoryGenerationRuns.set(sessionId, run);
   notify();
   return run;
+}
+export function getStoryGenerationPhase(sessionId: string): StoryGenerationPhase | undefined {
+  return activeStoryGenerationRuns.get(sessionId)?.phase;
+}
+export function setStoryGenerationPhase(sessionId: string, runId: string, phase: StoryGenerationPhase): void {
+  const run = activeStoryGenerationRuns.get(sessionId);
+  if (!run || run.runId !== runId || run.controller.signal.aborted || run.phase === phase) return;
+  run.phase = phase;
+  notify();
 }
 export function isStoryGenerationRunActive(sessionId: string, runId: string): boolean {
   const run = activeStoryGenerationRuns.get(sessionId);
