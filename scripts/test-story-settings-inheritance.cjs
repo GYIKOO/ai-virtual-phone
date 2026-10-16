@@ -40,6 +40,7 @@ function load(name) {
       foldTags: '', contextExcludedTags: '', uiPrefs: { voiceEnabled: true, theme: 'night', wallpaper: 'test-wallpaper' },
       independentStory: true, inheritRecentMemory: false, autoStartPrompt: 'keep', lastMessageAt: legacy.updatedAt },
     { ...legacy, id: 'm-archive', characterId: 'm', branchId: 'archive', mergedIntoSessionId: 'm-main', settings: { minChars: 42 } },
+    { ...legacy, id: 'm-momo-archive', characterId: 'm', branchId: 'momo-archive', mergedIntoMainAt: legacy.updatedAt, mergedIntoMainSessionId: 'm-main', settings: { minChars: 43 } },
   ]);
   kv.set('story-active-page-map-v1', JSON.stringify({ 'single:m': 'm-active' }));
   let store = load('./story-storage');
@@ -132,6 +133,8 @@ function load(name) {
   const fromArchive = store.createOrGetStorySession('m', { branchId: 'from-archive', baseSession: get('m-archive') });
   assert.equal(fromArchive.settings.minChars, 800, 'read-only archive cannot revive stale preferences');
   assert.equal(get('m-archive').settings.minChars, 42);
+  assert.equal(get('m-momo-archive').settings.minChars, 43, 'upstream archive snapshot also stays unchanged');
+  assert.throws(() => store.updateStorySession('m-momo-archive', { settings: { minChars: 1 } }), /只读/);
   assert.throws(() => store.updateStorySession('m-archive', { settings: { minChars: 1 } }), /只读/);
   await db.sessions.toArray();
   const parser = load('./story-parser');

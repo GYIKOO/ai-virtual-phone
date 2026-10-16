@@ -12,7 +12,7 @@ const at = n => `2026-10-10T${String(n).padStart(2, '0')}:00:00.000Z`;
 const chatRows = [2, 4].map(n => ({ id: `chat${n}`, sessionId: 'chat', role: 'user', content: `线上${n}`, createdAt: at(n) }));
 const mocks = {
   dexie: Dexie,
-  './kv-db': { hydrateKvDb: async () => {}, registerKvMigration() {}, kvGet: key => kv.get(key), kvSet: (key, value) => kv.set(key, value) },
+  './kv-db': { hydrateKvDb: async () => {}, registerKvMigration() {}, registerDynamicPrefix() {}, kvGet: key => kv.get(key), kvSet: (key, value) => kv.set(key, value) },
   './llm-prompt-assembler': { formatChatTimestamp: value => value },
   './chat-storage': { loadChatSessions: () => [{ id: 'chat', contactId: 'a' }], loadChatMessages: () => chatRows,
     isReadingDiscussMessage: () => false, isSystemInstructionMessage: () => false },
@@ -28,7 +28,7 @@ const mocks = {
 function load(name) {
   if (mocks[name]) return mocks[name];
   if (modules.has(name)) return modules.get(name);
-  if (!['./story-storage', './story-tag-settings', './short-term-assembler'].includes(name)) {
+  if (!['./story-storage', './story-tag-settings', './short-term-assembler', './story-engine', './story-instructions', './story-constraints'].includes(name)) {
     return new Proxy({}, { get: () => () => [] }); // All unrelated app stores are empty.
   }
   const exports = {};
@@ -115,6 +115,29 @@ const json = value => JSON.parse(JSON.stringify(value));
   assert.equal(store.loadStoryProjectionEntries('b').filter(e => e.id === `story_projection_${groupMessage.id}`).length, 1, 'group participants receive one shared event');
   const mismatched = store.createOrGetStorySession('a', { ...groupOptions, participantIds: ['a', 'c'], branchId: 'mismatch' });
   await assert.rejects(store.mergeStoryPageIntoMain(mismatched.id), /参与角色不同/);
+  // Reproduce ABC -> DABC with the newly joined character selected first.
+  // Real storage projections + real recent selection + real Story request builder.
+  const abc = store.createOrGetStorySession('a', { ownerType: 'group', ownerId: 'abc', participantIds: ['a', 'b', 'c'] });
+  store.pushStoryMessage({ sessionId: abc.id, role: 'assistant', rawContent: '三人曾在车站见面。', storySummary: 'ABC三人车站见面事件', createdAt: at(8) });
+  const dabc = store.createOrGetStorySession('d', { ownerType: 'group', ownerId: 'dabc', participantIds: ['d', 'a', 'b', 'c'] });
+  mocks['./character-storage'].loadCharacters = () => ['a','b','c','d'].map(id => ({ id, name: id.toUpperCase() }));
+  Object.assign(mocks['./settings-storage'], { loadBindingConfig: () => ({characterBindings:[]}), resolveBinding: () => ({ apiConfigId:'local' }),
+    loadApiConfigs: () => [{ id:'local', defaultModel:'offline' }], loadPresets: () => [], loadRegexes: () => [], loadWorldBooks: () => [] });
+  Object.assign(mocks['./llm-prompt-assembler'], { isContextMarkerEnabled: () => true,
+    assemblePromptPayload: ({history}) => history.map(m => ({role:m.role,content:m.content})) });
+  mocks['./chat-engine'] = { ChatEngineError:Error, previewMessagesForApi: (_a,_p,messages) => messages };
+  mocks['./memory-service'] = { retrieveMemoriesForPrompt: async()=>null, retrieveCoreMemoriesForPrompt:async()=>null };
+  mocks['./calendar-storage'] = { buildCalendarScheduleMarker:()=>'', getCurrentCalendarScheduleForPrompt:()=>'' };
+  mocks['./character-world-storage'] = { formatCharacterRelationsForPrompt:()=>'' };
+  modules.delete('./short-term-assembler');
+  const engine = load('./story-engine');
+  const preview = await engine.previewStoryPromptPayload('d', [], { sessionId:dabc.id, participantIds:['d','a','b','c'] });
+  const assembled = preview.messages.map(m=>m.content).join('\n');
+  assert.ok(assembled.includes('ABC三人车站见面事件'), 'ABC scene is available when D leads the new ensemble');
+  assert.ok(!assembled.split('## 角色 2：')[0].includes('ABC三人车站见面事件'), 'D does not acquire the event as its personal memory');
+  const isolated = await engine.previewStoryPromptPayload('d', [], { sessionId:dabc.id, participantIds:['d','a','b','c'], storyMemory:{independent:true} });
+  assert.ok(!isolated.messages.some(m=>m.content.includes('ABC三人车站见面事件')));
+  console.log('PASS: ABC -> DABC real stored event reaches ensemble request through shared participants, not D; isolated story excludes it');
   console.log('PASS: group pages merge only within the same owner and participant set');
   console.log('PASS: cross-page chronological memory, current-page deduplication, retry exclusion, IF/character isolation and creation-time boundary');
   console.log('PASS: atomic page merge/rollback, stable IDs/times/summaries, read-only archive, no memory duplication, reload and safe archive deletion');

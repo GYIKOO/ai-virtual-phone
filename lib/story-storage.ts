@@ -32,6 +32,90 @@ export type StoryUiPrefs = {
   quickInputCursor?: "left" | "middle" | "right";
 };
 
+/** 剧情 APP 全局生成能力；不跟角色/多人组/分线走，所有剧情共用。 */
+export type StoryGlobalSettings = {
+  /** 剧情页打开期间，中止当前剧情角色正在进行的线上主动/追发 API 请求。 */
+  interruptProactiveDuringStory: boolean;
+  /** 生成过程中实时显示正文增量；默认关闭，避免不支持 SSE 的旧接口受影响。 */
+  streamingEnabled: boolean;
+  /** 每轮明确注入当前日期时间，并让历史消息按时间语义参与判断。 */
+  timeAware: boolean;
+};
+
+export const STORY_GLOBAL_SETTINGS_EVENT = "story-global-settings-updated";
+const STORY_GLOBAL_SETTINGS_KEY = "ai_phone_story_global_settings_v1";
+registerKvMigration(STORY_GLOBAL_SETTINGS_KEY);
+
+const DEFAULT_STORY_GLOBAL_SETTINGS: StoryGlobalSettings = {
+  interruptProactiveDuringStory: false,
+  streamingEnabled: false,
+  timeAware: true,
+};
+
+export function loadStoryGlobalSettings(): StoryGlobalSettings {
+  try {
+    const parsed = JSON.parse(kvGet(STORY_GLOBAL_SETTINGS_KEY) || "{}") as Partial<StoryGlobalSettings>;
+    return {
+      interruptProactiveDuringStory: parsed.interruptProactiveDuringStory === true,
+      streamingEnabled: parsed.streamingEnabled === true,
+      timeAware: parsed.timeAware !== false,
+    };
+  } catch {
+    return { ...DEFAULT_STORY_GLOBAL_SETTINGS };
+  }
+}
+
+export function saveStoryGlobalSettings(settings: StoryGlobalSettings): void {
+  const normalized: StoryGlobalSettings = {
+    interruptProactiveDuringStory: settings.interruptProactiveDuringStory === true,
+    streamingEnabled: settings.streamingEnabled === true,
+    timeAware: settings.timeAware !== false,
+  };
+  kvSet(STORY_GLOBAL_SETTINGS_KEY, JSON.stringify(normalized));
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(STORY_GLOBAL_SETTINGS_EVENT, { detail: normalized }));
+  }
+}
+
+export type StorySettingsPreset = {
+  id: string;
+  name: string;
+  settings: StoryCharacterSettings;
+  uiPrefs: StoryUiPrefs;
+  globalSettings: StoryGlobalSettings;
+  customCSS: string;
+  foldTags: string;
+  contextExcludedTags: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const STORY_SETTINGS_PRESETS_KEY = "ai_phone_story_settings_presets_v1";
+export const STORY_SETTINGS_PRESETS_EVENT = "story-settings-presets-updated";
+registerKvMigration(STORY_SETTINGS_PRESETS_KEY);
+
+export function loadStorySettingsPresets(): StorySettingsPreset[] {
+  try {
+    const parsed = JSON.parse(kvGet(STORY_SETTINGS_PRESETS_KEY) || "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is StorySettingsPreset => Boolean(
+      item && typeof item === "object"
+      && typeof (item as StorySettingsPreset).id === "string"
+      && typeof (item as StorySettingsPreset).name === "string"
+      && (item as StorySettingsPreset).settings
+      && (item as StorySettingsPreset).uiPrefs
+      && (item as StorySettingsPreset).globalSettings,
+    ));
+  } catch {
+    return [];
+  }
+}
+
+export function saveStorySettingsPresets(presets: StorySettingsPreset[]): void {
+  kvSet(STORY_SETTINGS_PRESETS_KEY, JSON.stringify(presets));
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(STORY_SETTINGS_PRESETS_EVENT));
+}
+
 /** 快捷输入面板默认选项：成对引号 + 常用标点。 */
 export const STORY_DEFAULT_QUICK_INPUT_OPTIONS = ["“”", "「」", "，", "？", "……"];
 
@@ -380,6 +464,9 @@ export type StorySession = {
   mergedIntoSessionId?: string;
   mergedAt?: string;
   mergedMessageIds?: string[];
+  /** 分线内容已经按时间复制并合并到主线，避免重复合并与重复注入。 */
+  mergedIntoMainAt?: string;
+  mergedIntoMainSessionId?: string;
   updatedAt: string;
   customCSS?: string;
   foldTags?: string;            // Owner-shared comma-separated tag names to fold.
@@ -402,6 +489,8 @@ export type StoryMessage = {
   role: StoryMessageRole;
   /** Absent on existing records. Director notes are UI history, not story events. */
   kind?: "director";
+  /** 仅控制送入剧情模型时的身份；可让系统样式卡片以用户行为进入上下文。 */
+  contextRole?: StoryMessageRole;
   rawContent: string;
   renderedContent?: string;
   storySummary?: string;
@@ -441,7 +530,7 @@ const mergingStorySessionIds = new Set<string>();
 
 function assertStorySessionWritable(sessionId: string): void {
   if (mergingStorySessionIds.has(sessionId)) throw new Error("剧情正在合并，请稍后再试。");
-  if (_sessionsCache.find(item => item.id === sessionId)?.mergedIntoSessionId) {
+    if (_sessionsCache.some(item => item.id === sessionId && (item.mergedIntoSessionId || item.mergedIntoMainAt))) {
     throw new Error("该分页已并入主线并只读归档，请在主线继续剧情。");
   }
 }
@@ -560,7 +649,7 @@ async function migrateSharedStoryPreferences(): Promise<void> {
   try { pageMap = JSON.parse(kvGet("story-active-page-map-v1") || "{}") || {}; } catch { /* Use main below. */ }
   const owners = new Map<string, StorySession[]>();
   for (const session of _sessionsCache) {
-    if (session.mergedIntoSessionId) continue; // Archives retain their read-only snapshot.
+    if (session.mergedIntoSessionId || session.mergedIntoMainAt) continue; // Archives retain their read-only snapshot.
     const key = getStorySessionOwnerKey(session);
     owners.set(key, [...(owners.get(key) || []), session]);
   }
@@ -643,7 +732,7 @@ async function migrateLegacyStorySchemeData(): Promise<void> {
   const quickNames = new Set(repo.quickInputSchemes.map((item) => item.name));
 
   for (const session of [..._sessionsCache]) {
-    if (session.mergedIntoSessionId) continue;
+    if (session.mergedIntoSessionId || session.mergedIntoMainAt) continue;
     const settings = session.settings;
     const prefs = session.uiPrefs;
     let settingsChanged = false;
@@ -803,9 +892,9 @@ export function createOrGetStorySession(characterId: string, options: CreateStor
       activeBase = ownerSessions.find((item) => item.id === rememberedId);
     } catch { /* Invalid/stale remembered pages fall back to the supplied template. */ }
   }
-  const base = ownerSessions.find(item => !item.mergedIntoSessionId && item.sharedSettingsVersion === 1)
-    ?? (activeBase?.mergedIntoSessionId ? undefined : activeBase)
-    ?? ownerSessions.find((item) => !item.mergedIntoSessionId && item.id === options.baseSession?.id)
+  const base = ownerSessions.find(item => !item.mergedIntoSessionId && !item.mergedIntoMainAt && item.sharedSettingsVersion === 1)
+    ?? (activeBase?.mergedIntoSessionId || activeBase?.mergedIntoMainAt ? undefined : activeBase)
+    ?? ownerSessions.find((item) => !item.mergedIntoSessionId && !item.mergedIntoMainAt && item.id === options.baseSession?.id)
     ?? ownerSessions.find((item) => (item.branchId || "main") === "main");
   const session: StorySession = {
     id: generateId("story_sess"),
@@ -850,7 +939,7 @@ export async function mergeStoryPageIntoMain(sessionId: string): Promise<StorySe
     const result = await storyDb.transaction("rw", storyDb.sessions, storyDb.messages, async () => {
       const savedSource = await storyDb.sessions.get(source.id);
       const savedTarget = await storyDb.sessions.get(target.id);
-      if (!savedSource || !savedTarget || savedSource.mergedIntoSessionId || savedTarget.mergedIntoSessionId
+      if (!savedSource || !savedTarget || savedSource.mergedIntoSessionId || savedTarget.mergedIntoSessionId || savedSource.mergedIntoMainAt || savedTarget.mergedIntoMainAt
         || savedSource.independentStory || (savedSource.branchId || "main") === "main"
         || (savedTarget.branchId || "main") !== "main"
         || getStorySessionOwnerKey(savedSource) !== getStorySessionOwnerKey(savedTarget)
@@ -900,6 +989,33 @@ export function deleteStorySessions(sessionIds: string[], options?: { allowMain?
     await storyDb.sessions.bulkDelete(deletable);
     if (messageIds.length) await storyDb.messages.bulkDelete(messageIds);
   }).catch(() => undefined);
+}
+
+export type MergeStoryBranchesResult = {
+  mergedSessionIds: string[];
+  skippedSessionIds: string[];
+  copiedMessageCount: number;
+};
+
+/**
+ * 将普通分线按原始时间移入主线，沿用单页事务和只读归档规则。
+ * 独立剧情与已归档分页不参与批量合并。
+ */
+export async function mergeStoryBranchesIntoMain(ownerType: StoryOwnerType, ownerId: string, sourceSessionIds: string[]): Promise<MergeStoryBranchesResult> {
+  const sessions = loadStorySessionsForOwner(ownerType, ownerId);
+  const result: MergeStoryBranchesResult = { mergedSessionIds: [], skippedSessionIds: [], copiedMessageCount: 0 };
+  for (const id of new Set(sourceSessionIds)) {
+    const source = sessions.find(item => item.id === id);
+    if (!source || source.independentStory || source.mergedIntoSessionId || source.mergedIntoMainAt || (source.branchId || "main") === "main") {
+      result.skippedSessionIds.push(id);
+      continue;
+    }
+    const count = loadStoryMessages(id).length;
+    await mergeStoryPageIntoMain(id);
+    result.mergedSessionIds.push(id);
+    result.copiedMessageCount += count;
+  }
+  return result;
 }
 
 function sanitizeStoryGroup(raw: unknown): StoryGroup | null {
@@ -1000,7 +1116,7 @@ export function updateStorySession(sessionId: string, updates: Partial<StorySess
   assertStorySessionWritable(sessionId);
   const source = _sessionsCache.find(page => page.id === sessionId);
   if (!source) return null;
-  const peers = _sessionsCache.filter(page => !page.mergedIntoSessionId
+  const peers = _sessionsCache.filter(page => !page.mergedIntoSessionId && !page.mergedIntoMainAt
     && getStorySessionOwnerKey(page) === getStorySessionOwnerKey(source));
   // A preference write from a third page must not race an in-flight merge.
   peers.forEach(page => assertStorySessionWritable(page.id));
@@ -1124,6 +1240,7 @@ export function loadStoryProjectionEntries(
     if (item.mergedIntoSessionId) return false;
     const participants = item.participantIds?.length ? item.participantIds : [item.characterId];
     if (!participants.includes(characterId)) return false;
+    if (item.mergedIntoMainAt && (item.branchId || "main") !== "main") return false;
     return !item.independentStory || Boolean(item.includedInMemoryAt);
   });
   if (!sessions.length) return [];

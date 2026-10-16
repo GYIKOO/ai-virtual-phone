@@ -15,6 +15,8 @@ import { parseAIResponse } from "./rich-message-parser";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
 import { findUserAvatarChangeIntent, inferAvatarDecisionFromReply } from "./chat-avatar-intent";
 import { dismissDeletedProactive } from "./proactive-storage";
+import { loadChatScope } from "./chat-scope-storage";
+import type { Character } from "./character-types";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
@@ -38,6 +40,8 @@ export type ChatContact = {
 export type ChatSession = {
     id: string;
     contactId: string;
+    /** 独立聊天小号作用域；缺省表示主号。 */
+    chatAccountId?: string;
     lastMessageId?: string;
     lastMessagePreview?: string;
     unreadCount: number;
@@ -47,6 +51,8 @@ export type ChatSession = {
     backgroundImage?: string; // Add support for custom background
     /** 仅当前私聊里展示的用户头像；不修改用户身份、主页或其他会话 */
     userAvatarOverride?: string;
+    /** 仅当前私聊里展示的角色头像；不修改角色资料、剧情、动态或其他会话 */
+    characterAvatarOverride?: string;
     /** 用户更换当前会话头像后是否通知角色。未设置时默认开启 */
     notifyCharacterOnUserAvatarChange?: boolean;
     /** 角色给用户设置的私聊备注；会显示在“查手机”的真实私聊列表中。 */
@@ -259,6 +265,9 @@ export type ChatMessage = {
         fileName?: string;
         fileDuration?: number;
         useReferenceImage?: boolean; // AI photo tag: whether to send the character reference image to the generator
+        /** Permission to use the bound user's face reference when the model-authored description says the user appears. */
+        useUserReferenceImage?: boolean;
+        callEndMarker?: boolean;
         imageGenerationMediaRef?: string;
         imageGenerationPrompt?: string;
         imageGenerationUsedReference?: boolean;
@@ -388,6 +397,8 @@ export type ChatAppSettings = {
     /** 全局聊天提示音配置（新消息/发送消息/来电/致电/挂断），在“全局聊天信息”里设置 */
     globalChatSounds?: ChatSoundsConfig;
     floatingDockEnabled?: boolean; // 悬浮球贴边半隐藏收拢模式（默认关）
+    /** 用剧情 APP 取代聊天输入栏原“线下模式”入口。 */
+    storyAsOfflineMode?: boolean;
 };
 
 // ── 聊天提示音配置 ────────────────────────────────────────────────
@@ -456,12 +467,24 @@ export function resolveVisionImagePromptLimit(session: Pick<ChatSession, "vision
     return normalizeVisionImagePromptLimit(globalValue ?? session?.visionImagePromptLimit);
 }
 
-/** 聊天内用户头像：单独会话 > 全局聊天信息 > 用户资料头像，私聊与群聊通用。 */
+/**
+ * 聊天内用户头像：当前私聊专用头像 > 全局聊天头像 > 用户资料头像。
+ * 私聊专用头像不会进入群聊、朋友圈或其他 APP。
+ */
 export function resolveChatUserAvatar(
     session: Pick<ChatSession, "userAvatarOverride" | "isGroup"> | null | undefined,
     identityAvatar?: string | null,
 ): string {
-    return session?.userAvatarOverride || loadChatAppSettings().globalChatUserAvatar || identityAvatar || "";
+    const privateChatAvatar = session?.isGroup ? "" : session?.userAvatarOverride;
+    return privateChatAvatar || loadChatAppSettings().globalChatUserAvatar || identityAvatar || "";
+}
+
+/** 聊天 APP 内角色头像：专用聊天头像 > 角色卡头像；其他 APP 仍直接读取角色卡头像。 */
+export function resolveChatCharacterAvatar(
+    character: Pick<Character, "avatar" | "chatAvatar" | "chatAvatarEnabled"> | null | undefined,
+): string {
+    if (character?.chatAvatarEnabled && character.chatAvatar) return character.chatAvatar;
+    return character?.avatar || "";
 }
 
 /** 聊天背景：单独会话 > 全局聊天信息，私聊与群聊通用。 */
@@ -841,6 +864,7 @@ const DEFAULT_CHAT_APP_SETTINGS: ChatAppSettings = {
     enterToSendEnabled: false,
     offlineEnterToSendEnabled: false,
     floatingDockEnabled: false,
+    storyAsOfflineMode: false,
 };
 
 // ── In-Memory Caches (hydrated from IndexedDB on startup) ──────────
@@ -953,9 +977,10 @@ function normalizeChatSessions(sessions: ChatSession[]): NormalizedSessionList {
             continue;
         }
 
-        const existingIndex = privateIndexByContact.get(session.contactId);
+        const scopedContactKey = `${session.chatAccountId || "main"}::${session.contactId}`;
+        const existingIndex = privateIndexByContact.get(scopedContactKey);
         if (existingIndex === undefined) {
-            privateIndexByContact.set(session.contactId, normalized.length);
+            privateIndexByContact.set(scopedContactKey, normalized.length);
             normalized.push(session);
             continue;
         }
@@ -1019,6 +1044,7 @@ function restoreContactsForPrivateSessions(contacts: ChatContact[], sessions: Ch
     const removedByUser = loadRemovedContactIds();
     const privateSessionsWithMessages = sessions.filter(session =>
         !session.isGroup
+        && !session.chatAccountId
         && session.contactId
         && characterIds.has(session.contactId)
         && !removedByUser.has(session.contactId)
@@ -1347,14 +1373,16 @@ export function saveChatSessions(sessions: ChatSession[]) {
     else dbPutSessions(refreshed.items);
 }
 
-export function createOrGetSession(contactId: string): ChatSession {
+export function createOrGetSession(contactId: string, chatAccountId: string | null = loadChatScope().chatAccountId): ChatSession {
     const sessions = loadChatSessions();
-    const existing = sessions.find(s => s.contactId === contactId);
+    const normalizedAccountId = chatAccountId || undefined;
+    const existing = sessions.find(s => s.contactId === contactId && (s.chatAccountId || undefined) === normalizedAccountId);
     if (existing) return existing;
 
     const newSession: ChatSession = {
         id: `sess_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         contactId,
+        ...(normalizedAccountId ? { chatAccountId: normalizedAccountId } : {}),
         unreadCount: 0,
         updatedAt: new Date().toISOString(),
         isPinned: false,

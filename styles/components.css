@@ -2061,6 +2061,70 @@
   text-align: center;
 }
 
+.quick-action-model-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--c-panel-border) 72%, transparent);
+}
+
+.quick-action-model-tools[data-disabled] {
+  opacity: .55;
+}
+
+.quick-action-model-select {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--c-text);
+  font-size: calc(10.5px*var(--app-text-scale,1));
+  font-weight: 750;
+}
+
+.quick-action-model-select .quick-action-select-shell {
+  min-height: 40px;
+}
+
+.quick-action-model-buttons {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.quick-action-model-buttons button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 13px;
+  color: #116f72;
+  background: rgba(255,255,255,.5);
+  font-size: calc(11.5px*var(--app-text-scale,1));
+  font-weight: 800;
+}
+
+.quick-action-model-buttons button:disabled {
+  opacity: .4;
+}
+
+.quick-action-model-status {
+  margin: 0;
+  padding: 8px 9px;
+  border-radius: 11px;
+  color: var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger) 8%, transparent);
+  font-size: calc(10.5px*var(--app-text-scale,1));
+  line-height: 1.45;
+}
+
+.quick-action-model-status[data-success] {
+  color: #11756d;
+  background: rgba(126, 232, 205, .16);
+}
+
 /* ── Prompt Viewer Panel ── */
 .pv-panel {
   position: absolute;
@@ -5236,6 +5300,10 @@
   align-items: center;
 }
 
+.memory-header-delete-btn {
+  color: var(--c-danger);
+}
+
 .mem-detail .page-header-content {
   position: relative;
 }
@@ -5340,6 +5408,81 @@
 
 .mem-tl-card:active {
   transform: scale(0.97);
+}
+
+.mem-tl-card.is-selecting {
+  padding-right: 46px;
+}
+
+.mem-tl-card.is-selected {
+  border-color: color-mix(in srgb, var(--c-danger) 58%, var(--c-panel-border));
+  background: color-mix(in srgb, var(--c-danger) 7%, var(--c-card));
+}
+
+.mem-tl-select-indicator {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid color-mix(in srgb, var(--c-text) 28%, transparent);
+  border-radius: 50%;
+  color: #fff;
+  background: color-mix(in srgb, var(--c-card) 86%, transparent);
+  font-size: calc(14px*var(--app-text-scale,1));
+  font-weight: 800;
+}
+
+.mem-tl-select-indicator[data-selected] {
+  border-color: var(--c-danger);
+  background: var(--c-danger);
+}
+
+.memory-bulk-delete-bar {
+  position: absolute;
+  z-index: 12;
+  left: 34px;
+  right: 34px;
+  bottom: 112px;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 64px 1fr 64px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--c-panel-border) 78%, transparent);
+  border-radius: 18px;
+  color: var(--c-text-title);
+  background: color-mix(in srgb, var(--c-card) 91%, rgba(255,255,255,.72));
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 10px 30px rgba(20, 35, 55, .13);
+  font-size: calc(12px*var(--app-text-scale,1));
+  text-align: center;
+}
+
+.memory-bulk-delete-bar button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 12px;
+  font-size: calc(12px*var(--app-text-scale,1));
+  font-weight: 750;
+}
+
+.memory-bulk-delete-cancel {
+  color: var(--c-text);
+  background: transparent;
+}
+
+.memory-bulk-delete-confirm {
+  color: #fff;
+  background: var(--c-danger);
+}
+
+.memory-bulk-delete-confirm:disabled {
+  opacity: .35;
 }
 
 .memory-report-card {

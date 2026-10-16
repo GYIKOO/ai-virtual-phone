@@ -65,6 +65,10 @@ export function schedulePersonalityFollowUp(sessionId: string, count?: number): 
     if (session.isGroup && !config.groupFollowUpEnabled) return;
     const used = count ?? state.followupCount;
     const rules = loadFollowUpConfig();
+    if (!session.isGroup && rules.disableAllCharacters && !rules.allowCharacterIds?.includes(session.contactId)) {
+        saveProactiveState(sessionId, { ...state, followupAt: undefined, followupRules: JSON.stringify(rules) });
+        return;
+    }
     const history = loadChatMessages(sessionId);
     const latest = history.at(-1);
     if (!latest || latest.role !== "assistant") return;
@@ -133,6 +137,11 @@ export function pollNewProactive(now: number, legacyBusy: (sessionId: string) =>
 }
 
 async function fire(session: ChatSession, record: ProactiveRecord, source: ProactiveSource, isBusy: (sessionId: string) => boolean): Promise<void> {
+    const followUpAllowed = () => {
+        const rules = loadFollowUpConfig();
+        return source !== "followup" || session.isGroup || !rules.disableAllCharacters || !!rules.allowCharacterIds?.includes(session.contactId);
+    };
+    if (!followUpAllowed()) { schedulePersonalityFollowUp(session.id); return; }
     const controller = new AbortController();
     const { config } = record;
     const anchor = lastMessage(session.id);
@@ -152,7 +161,7 @@ async function fire(session: ChatSession, record: ProactiveRecord, source: Proac
     await flushProactive();
     active.set(session.id, controller);
     window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
-    const valid = () => !controller.signal.aborted && loadProactive(session.id)?.state.revision === state.revision
+    const valid = () => !controller.signal.aborted && followUpAllowed() && loadProactive(session.id)?.state.revision === state.revision
         && !isBusy(session.id)
         && (historicalAt === undefined || replayTime(record.state, source, Date.now(), getProactiveAbsence()) === historicalAt)
         && !isWithinPushQuietHours(Date.now())

@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { loadChatContacts } from "@/lib/chat-storage";
+import { loadChatContacts, resolveChatCharacterAvatar } from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
-import { resolveUserIdentity } from "@/lib/settings-storage";
+import { characterMatchesChatScope, resolveChatScopeUserIdentity } from "@/lib/chat-scope-storage";
 import { Character } from "@/lib/character-types";
 import { Input } from "@/components/ui/form";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
@@ -24,7 +24,7 @@ export function GroupCreateModal({ onClose, onCreate }: GroupCreateModalProps) {
 
     const enriched = contacts
         .map(c => ({ ...c, char: chars.find(ch => ch.id === c.characterId) }))
-        .filter(c => c.char) as (typeof contacts[number] & { char: Character })[];
+        .filter(c => c.char && characterMatchesChatScope(c.characterId)) as (typeof contacts[number] & { char: Character })[];
 
     const toggle = (id: string) => {
         setSelectedIds(prev => {
@@ -38,7 +38,7 @@ export function GroupCreateModal({ onClose, onCreate }: GroupCreateModalProps) {
         .map(id => chars.find(c => c.id === id))
         .filter(Boolean) as Character[];
 
-    const userName = resolveUserIdentity(undefined, "group_chat")?.name || "我";
+    const userName = resolveChatScopeUserIdentity(undefined, "group_chat")?.name || "我";
     const defaultName = isSpectator
         ? selectedChars.map(c => c.name).join("、")
         : [...selectedChars.map(c => c.name), userName].join("、");
@@ -62,8 +62,8 @@ export function GroupCreateModal({ onClose, onCreate }: GroupCreateModalProps) {
                                             onClick={() => toggle(c.characterId)}
                                         >
                                             <div className="chat-contact-avatar" style={isSelected ? { outline: "3px solid var(--c-success)", outlineOffset: "2px" } : undefined}>
-                                                {c.char.avatar ? (
-                                                    <img src={c.char.avatar} alt="" />
+                                                {resolveChatCharacterAvatar(c.char) ? (
+                                                    <img src={resolveChatCharacterAvatar(c.char)} alt="" />
                                                 ) : (
                                                     <ChatFallbackAvatar />
                                                 )}
@@ -102,8 +102,8 @@ export function GroupCreateModal({ onClose, onCreate }: GroupCreateModalProps) {
                             {selectedChars.map(c => (
                                 <div key={c.id} className="chat-contact-item">
                                     <div className="chat-contact-avatar">
-                                        {c.avatar ? (
-                                            <img src={c.avatar} alt="" />
+                                        {resolveChatCharacterAvatar(c) ? (
+                                            <img src={resolveChatCharacterAvatar(c)} alt="" />
                                         ) : (
                                             <ChatFallbackAvatar />
                                         )}

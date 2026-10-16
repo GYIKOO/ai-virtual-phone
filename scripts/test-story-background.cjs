@@ -26,6 +26,7 @@ async function run(mode, invalidate) {
   const context = { ...registry, ...storage, exports: {}, console, Date,
     activeSessionId: 's', activeCharacterId: 'c', isGenerating: false, isReadOnly: false, ready: true,
     currentSession: session, mergingPageRef: { current: false }, mountedRef: { current: true },
+    storyGlobalSettings: { streamingEnabled: false }, clearStoryStream() {}, appendStoryStreamDelta() {},
     autoStartedSessionIdsRef: { current: new Set() }, floatingChatContext: '', characters: [{ id: 'c', name: 'test' }],
     messages: rows, autoBottomLockRef: { current: false }, requestAnimationFrame: cb => cb(), scrollStoryToBottom() {},
     pushStoryMessage: row => { if (!mounted) savedWhileUnmounted++; const saved = { ...row, id: String(rows.length + 1) }; rows.push(saved); return saved; },

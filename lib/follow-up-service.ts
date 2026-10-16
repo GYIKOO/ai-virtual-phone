@@ -101,6 +101,26 @@ const backgroundReplyFiringSet = new Set<string>();
 // 聊天室挂载时查询它：中途进入也能立刻显示「正在输入」，补上事件错过的缝
 const backgroundGeneratingSessions = new Set<string>();
 const cancelledBackgroundSessions = new Set<string>();
+const backgroundAbortControllers = new Map<string, AbortController>();
+
+function beginBackgroundApiRun(sessionId: string): AbortController {
+    backgroundAbortControllers.get(sessionId)?.abort();
+    const controller = new AbortController();
+    backgroundAbortControllers.set(sessionId, controller);
+    return controller;
+}
+
+function finishBackgroundApiRun(sessionId: string, controller: AbortController | null): void {
+    if (controller && backgroundAbortControllers.get(sessionId) === controller) {
+        backgroundAbortControllers.delete(sessionId);
+    }
+}
+
+function isAbortLikeError(error: unknown): boolean {
+    if (!error) return false;
+    if (error instanceof DOMException && error.name === "AbortError") return true;
+    return error instanceof Error && (error.name === "AbortError" || /aborted|abort/i.test(error.message));
+}
 
 /** 该会话是否正有后台回复在生成（聊天室中途挂载时用来恢复输入中状态）。 */
 export function isBackgroundReplyGenerating(sessionId: string): boolean {
@@ -109,9 +129,11 @@ export function isBackgroundReplyGenerating(sessionId: string): boolean {
 
 export function cancelBackgroundGeneration(sessionId: string): void {
     cancelNewProactive(sessionId);
-    if (!backgroundGeneratingSessions.has(sessionId) && !firingSet.has(sessionId)) return;
+    const controller = backgroundAbortControllers.get(sessionId);
+    if (!backgroundGeneratingSessions.has(sessionId) && !firingSet.has(sessionId) && !controller) return;
     cancelledBackgroundSessions.add(sessionId);
     if (firingSet.has(sessionId)) cancelledWhileFiring.add(sessionId);
+    controller?.abort();
     cancelFollowUpBailout(sessionId);
 }
 
@@ -213,6 +235,12 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
         return;
     }
     const config = loadFollowUpConfig();
+    const targetSession = loadChatSessions().find(session => session.id === sessionId);
+    if (!targetSession || (config.disableAllCharacters && !config.allowCharacterIds.includes(targetSession.contactId))) {
+        clearFollowUpSchedule(sessionId);
+        cancelFollowUpBailout(sessionId);
+        return;
+    }
 
     // 会话级主动消息开关：关闭的会话不再排任何追发（在创建侧掐断，不留幽灵调用）
     const proactiveSession = loadChatSessions().find(s => s.id === sessionId);
@@ -264,8 +292,10 @@ export async function requestBackgroundChatReply(
     if (!session) return { ok: false, skipped: "missing_session" };
 
     backgroundReplyFiringSet.add(sessionId);
+    let backgroundController: AbortController | null = null;
     try {
         const latestMessages = loadChatMessages(session.id);
+        backgroundController = beginBackgroundApiRun(session.id);
         backgroundGeneratingSessions.add(session.id);
         window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
         const rounds = await generateBackgroundCompletionRounds(
@@ -275,6 +305,7 @@ export async function requestBackgroundChatReply(
                 appTags: session.isGroup ? undefined : ["chat", "text"],
                 // 定时查岗等事件可带一句「该怎么回应」，只作用于这一轮
                 ephemeralSystemNote: options?.ephemeralSystemNote,
+                signal: backgroundController.signal,
             },
         );
         if (isBackgroundGenerationCancelled(session.id)) return { ok: false, skipped: "cancelled" };
@@ -289,6 +320,10 @@ export async function requestBackgroundChatReply(
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
         return { ok: true };
     } catch (error: any) {
+        if (isAbortLikeError(error) || isBackgroundGenerationCancelled(sessionId)) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId } }));
+            return { ok: false, skipped: "cancelled" };
+        }
         console.error("[BackgroundReply] Error:", error);
         pushChatMessage({
             sessionId,
@@ -298,6 +333,7 @@ export async function requestBackgroundChatReply(
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId } }));
         return { ok: false };
     } finally {
+        finishBackgroundApiRun(sessionId, backgroundController);
         backgroundGeneratingSessions.delete(sessionId);
         cancelledBackgroundSessions.delete(sessionId);
         backgroundReplyFiringSet.delete(sessionId);
@@ -511,11 +547,14 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
 
     firingSet.add(sched.sessionId);
     clearFollowUpSchedule(sched.sessionId); // clear before firing
+    let backgroundController: AbortController | null = null;
 
     try {
         const sessions = loadChatSessions();
         const session = sessions.find(s => s.id === sched.sessionId);
         if (!session || session.proactiveDisabled || loadProactive(session.id)) return;
+        const followUpConfig = loadFollowUpConfig();
+        if (followUpConfig.disableAllCharacters && !followUpConfig.allowCharacterIds.includes(session.contactId)) return;
 
         const latestMessages = loadChatMessages(session.id);
 
@@ -562,6 +601,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
 
         // Notify UI that follow-up generation is starting (typing indicator)
         console.log("[FollowUp] Dispatching followup-started for session:", session.id);
+        backgroundController = beginBackgroundApiRun(session.id);
         backgroundGeneratingSessions.add(session.id);
         window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
 
@@ -572,7 +612,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
             rounds = await generateBackgroundCompletionRounds(
                 session,
                 messagesWithHint,
-                { followUpCount: count, followUpDelay: sched.delaySec ?? 60, appTags: ["chat", "text", "followup"] },
+                { followUpCount: count, followUpDelay: sched.delaySec ?? 60, appTags: ["chat", "text", "followup"], signal: backgroundController.signal },
             );
         } finally {
             stopBailoutHeartbeat();
@@ -601,6 +641,10 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
 
     } catch (error: any) {
+        if (isAbortLikeError(error) || isBackgroundGenerationCancelled(sched.sessionId)) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
+            return;
+        }
         console.error(`[FollowUp] Error:`, error);
         pushChatMessage({
             sessionId: sched.sessionId,
@@ -609,6 +653,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
     } finally {
+        finishBackgroundApiRun(sched.sessionId, backgroundController);
         backgroundGeneratingSessions.delete(sched.sessionId);
         cancelledBackgroundSessions.delete(sched.sessionId);
         firingSet.delete(sched.sessionId);
@@ -714,6 +759,7 @@ async function awaitServerGenerated(
 
 async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
     idleReconnectFiringSet.add(rule.id);
+    let backgroundController: AbortController | null = null;
     try {
         const session = loadChatSessions().find(s => s.id === rule.sessionId);
         if (!session || session.isGroup || session.contactId !== rule.characterId
@@ -739,6 +785,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         const latestMessages = loadChatMessages(session.id);
         const elapsedMinutes = Math.max(1, Math.round((Date.now() - lastUserAt) / 60000));
 
+        backgroundController = beginBackgroundApiRun(session.id);
         backgroundGeneratingSessions.add(session.id);
         window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
 
@@ -748,6 +795,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             {
                 appTags: ["chat", "text", "idle_wake"],
                 timedWakeElapsedMinutes: elapsedMinutes,
+                signal: backgroundController.signal,
             },
         );
 
@@ -775,9 +823,14 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
         const refreshed = loadIdleReconnectRules().find(item => item.id === rule.id);
         if (refreshed) void armIdleReconnectBailout(refreshed);
     } catch (error: unknown) {
+        if (isAbortLikeError(error) || isBackgroundGenerationCancelled(rule.sessionId)) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: rule.sessionId } }));
+            return;
+        }
         console.error("[IdleReconnect] Error:", error);
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: rule.sessionId } }));
     } finally {
+        finishBackgroundApiRun(rule.sessionId, backgroundController);
         backgroundGeneratingSessions.delete(rule.sessionId);
         cancelledBackgroundSessions.delete(rule.sessionId);
         idleReconnectFiringSet.delete(rule.id);
@@ -786,6 +839,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
 
 async function fireTimedWake(sched: TimedWakeSchedule) {
     timedWakeFiringSet.add(sched.id);
+    let backgroundController: AbortController | null = null;
     removeTimedWakeSchedule(sched.id);
     // 本地接手触发：撤销服务端兜底预约（生成中被杀由发送保险单接管）
     cancelBailoutKey(`timedwake:${sched.id}`);
@@ -812,6 +866,7 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
         }
 
         console.log("[TimedWake] Dispatching followup-started for session:", session.id);
+        backgroundController = beginBackgroundApiRun(session.id);
         backgroundGeneratingSessions.add(session.id);
         window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
 
@@ -824,6 +879,7 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
                 appTags: ["chat", "text", wakeTag],
                 timedWakeElapsedMinutes: elapsedMinutes,
                 timedWakeIntent: sched.intent,
+                signal: backgroundController.signal,
             },
         );
 
@@ -848,6 +904,10 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
 
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
     } catch (error: any) {
+        if (isAbortLikeError(error) || isBackgroundGenerationCancelled(sched.sessionId)) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
+            return;
+        }
         console.error("[TimedWake] Error:", error);
         const failureLabel = sched.source === "user" ? "定时主动消息" : "稍后主动联系";
         pushChatMessage({
@@ -857,6 +917,7 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: sched.sessionId } }));
     } finally {
+        finishBackgroundApiRun(sched.sessionId, backgroundController);
         backgroundGeneratingSessions.delete(sched.sessionId);
         cancelledBackgroundSessions.delete(sched.sessionId);
         timedWakeFiringSet.delete(sched.id);
@@ -870,6 +931,7 @@ async function fireMenstrualPeriodCare(input: {
 }) {
     const firingKey = `${input.characterId}:${input.event.cycleKey}`;
     periodCareFiringSet.add(firingKey);
+    let backgroundController: AbortController | null = null;
 
     try {
         const sessions = loadChatSessions();
@@ -883,6 +945,7 @@ async function fireMenstrualPeriodCare(input: {
         const latestMessages = loadChatMessages(session.id);
 
         console.log("[PeriodCare] Dispatching followup-started for session:", session.id);
+        backgroundController = beginBackgroundApiRun(session.id);
         backgroundGeneratingSessions.add(session.id);
         window.dispatchEvent(new CustomEvent("followup-started", { detail: { sessionId: session.id } }));
 
@@ -892,6 +955,7 @@ async function fireMenstrualPeriodCare(input: {
             {
                 appTags: ["chat", "text", "period_care"],
                 periodCareContext: input.event.context,
+                signal: backgroundController.signal,
             },
         );
 
@@ -922,6 +986,10 @@ async function fireMenstrualPeriodCare(input: {
 
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: session.id } }));
     } catch (error: any) {
+        if (isAbortLikeError(error) || isBackgroundGenerationCancelled(input.sessionId)) {
+            window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: input.sessionId } }));
+            return;
+        }
         console.error("[PeriodCare] Error:", error);
         pushChatMessage({
             sessionId: input.sessionId,
@@ -930,6 +998,7 @@ async function fireMenstrualPeriodCare(input: {
         });
         window.dispatchEvent(new CustomEvent("followup-fired", { detail: { sessionId: input.sessionId } }));
     } finally {
+        finishBackgroundApiRun(input.sessionId, backgroundController);
         backgroundGeneratingSessions.delete(input.sessionId);
         cancelledBackgroundSessions.delete(input.sessionId);
         periodCareFiringSet.delete(firingKey);

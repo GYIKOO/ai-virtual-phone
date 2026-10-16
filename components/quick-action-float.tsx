@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type CSSProperties } from "react";
-import { BookOpen, Check, ChevronDown, Code2, SlidersHorizontal, UserRound, X } from "lucide-react";
+import { BookOpen, Check, ChevronDown, Code2, FlaskConical, Loader2, RefreshCw, SlidersHorizontal, UserRound, X } from "lucide-react";
 import { CHAT_APP_SETTINGS_UPDATED_EVENT, loadChatAppSettings } from "@/lib/chat-storage";
 import {
     getFloatingDockState,
@@ -18,11 +18,14 @@ import {
     loadBindingConfig,
     loadWorldBooks,
     saveBindingConfig,
+    saveApiConfigs,
     setCharacterBinding,
 } from "@/lib/settings-storage";
 import type { ApiConfig, BindingConfig, BindingSlot, WorldBookConfig } from "@/lib/settings-types";
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
+import { determineBaseUrl, simpleLLMCall } from "@/lib/api-helpers";
+import { generateEmbedding, isEmbeddingModelName } from "@/lib/memory-embedding";
 
 type QuickScope = "global" | "character";
 type FloatingPosition = { left: number; top: number };
@@ -64,6 +67,9 @@ export function QuickActionFloat() {
     const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([]);
     const [worldBooks, setWorldBooks] = useState<WorldBookConfig[]>([]);
     const [characters, setCharacters] = useState<Character[]>([]);
+    const [fetchedModels, setFetchedModels] = useState<Record<string, string[]>>({});
+    const [modelBusy, setModelBusy] = useState<null | "fetch" | "test">(null);
+    const [modelStatus, setModelStatus] = useState<{ success: boolean; message: string } | null>(null);
     const [floatingPosition, setFloatingPosition] = useState<FloatingPosition | null>(null);
     const [popoverPosition, setPopoverPosition] = useState<PopoverPosition | null>(null);
     const [draggingFloatingButton, setDraggingFloatingButton] = useState(false);
@@ -211,6 +217,9 @@ export function QuickActionFloat() {
     const inheritedWorldBookNames = scope === "character"
         ? (config.globalDefaults.worldBookIds || []).map(id => itemName(worldBooks, id)).filter(Boolean)
         : [];
+    const activeApiConfigId = currentSlot.apiConfigId || (scope === "character" ? config.globalDefaults.apiConfigId : undefined);
+    const activeApiConfig = apiConfigs.find(api => api.id === activeApiConfigId) || null;
+    const activeFetchedModels = activeApiConfig ? (fetchedModels[activeApiConfig.id] || []) : [];
 
     const persistConfig = useCallback((next: BindingConfig) => {
         setConfig(next);
@@ -218,6 +227,7 @@ export function QuickActionFloat() {
     }, []);
 
     const updateApiConfig = useCallback((apiConfigId: string | undefined) => {
+        setModelStatus(null);
         if (scope === "global") {
             persistConfig({ ...config, globalDefaults: { ...config.globalDefaults, apiConfigId: apiConfigId || undefined } });
             return;
@@ -229,6 +239,79 @@ export function QuickActionFloat() {
             defaults: { ...binding.defaults, apiConfigId: apiConfigId || undefined },
         }));
     }, [config, persistConfig, scope, selectedCharId]);
+
+    const updateApiModel = useCallback((model: string) => {
+        if (!activeApiConfig || !model) return;
+        const next = apiConfigs.map(api => api.id === activeApiConfig.id ? { ...api, defaultModel: model } : api);
+        setApiConfigs(next);
+        saveApiConfigs(next);
+        setModelStatus({ success: true, message: `已选择模型：${model}` });
+    }, [activeApiConfig, apiConfigs]);
+
+    const fetchApiModels = useCallback(async () => {
+        if (!activeApiConfig || modelBusy) return;
+        setModelBusy("fetch");
+        setModelStatus(null);
+        try {
+            const baseUrl = determineBaseUrl(activeApiConfig);
+            if (!baseUrl) throw new Error("缺少 Base URL");
+            if (!activeApiConfig.apiKey) throw new Error("缺少 API Key");
+            const isGoogleNative = activeApiConfig.provider === "Google";
+            const modelsBase = baseUrl.replace(/\/$/, "").replace(/\/(chat\/completions|completions|embeddings|messages)$/i, "");
+            const modelsUrl = /\/models$/i.test(modelsBase) ? modelsBase : `${modelsBase}/models`;
+            const url = isGoogleNative ? `${modelsUrl}?key=${encodeURIComponent(activeApiConfig.apiKey)}` : modelsUrl;
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (!isGoogleNative) headers.Authorization = `Bearer ${activeApiConfig.apiKey}`;
+            const response = await fetch(url, { method: "GET", headers });
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                throw new Error(payload?.error?.message || `HTTP ${response.status}`);
+            }
+            const payload = await response.json();
+            const models = isGoogleNative && Array.isArray(payload?.models)
+                ? payload.models.map((item: { name?: string }) => String(item.name || "").replace(/^models\//, "")).filter(Boolean)
+                : Array.isArray(payload?.data)
+                    ? payload.data.map((item: { id?: string }) => String(item.id || "")).filter(Boolean)
+                    : [];
+            if (models.length === 0) throw new Error("接口没有返回可用模型");
+            setFetchedModels(previous => ({ ...previous, [activeApiConfig.id]: models }));
+            setModelStatus({ success: true, message: `已拉取 ${models.length} 个模型` });
+        } catch (error) {
+            setModelStatus({ success: false, message: `拉取失败：${error instanceof Error ? error.message : String(error)}` });
+        } finally {
+            setModelBusy(null);
+        }
+    }, [activeApiConfig, modelBusy]);
+
+    const testActiveApi = useCallback(async () => {
+        if (!activeApiConfig || modelBusy) return;
+        if (!activeApiConfig.defaultModel) {
+            setModelStatus({ success: false, message: "请先拉取并选择模型" });
+            return;
+        }
+        setModelBusy("test");
+        setModelStatus(null);
+        try {
+            if (isEmbeddingModelName(activeApiConfig.defaultModel)) {
+                const embedding = await generateEmbedding("你好", activeApiConfig, { throwOnError: true });
+                if (!embedding) throw new Error("接口未返回向量数据");
+                setModelStatus({ success: true, message: `测试成功，向量维度 ${embedding.length}` });
+            } else {
+                const result = await simpleLLMCall(
+                    activeApiConfig,
+                    [{ role: "user", content: "你好，请只回复：连接成功" }],
+                    { temperature: 0.2, max_tokens: 4096 },
+                );
+                if (result.error || !result.content) throw new Error(result.error || "模型返回为空");
+                const reply = result.content.replace(/\s+/g, " ").trim();
+                setModelStatus({ success: true, message: `测试成功：${reply.slice(0, 60)}${reply.length > 60 ? "…" : ""}` });
+            }
+        } catch (error) {
+            setModelStatus({ success: false, message: `测试失败：${error instanceof Error ? error.message : String(error)}` });
+        } finally {
+            setModelBusy(null);
+        }
+    }, [activeApiConfig, modelBusy]);
 
     const updateWorldBooks = useCallback((worldBookIds: string[]) => {
         const nextIds = worldBookIds.length > 0 ? worldBookIds : undefined;
@@ -543,6 +626,44 @@ export function QuickActionFloat() {
                                         {currentSlot.apiConfigId === api.id ? <Check size={15} /> : null}
                                     </button>
                                 ))}
+                            </div>
+                            <div className="quick-action-model-tools" data-disabled={!activeApiConfig ? "" : undefined}>
+                                <label className="quick-action-model-select">
+                                    <span>模型</span>
+                                    <div className="quick-action-select-shell">
+                                        <select
+                                            value={activeApiConfig?.defaultModel || ""}
+                                            disabled={!activeApiConfig || modelBusy !== null}
+                                            onChange={event => updateApiModel(event.target.value)}
+                                        >
+                                            {!activeApiConfig ? (
+                                                <option value="">先选择 API</option>
+                                            ) : (
+                                                <>
+                                                    {!activeApiConfig.defaultModel && <option value="">请选择模型</option>}
+                                                    {activeApiConfig.defaultModel && !activeFetchedModels.includes(activeApiConfig.defaultModel) ? (
+                                                        <option value={activeApiConfig.defaultModel}>{activeApiConfig.defaultModel}</option>
+                                                    ) : null}
+                                                    {activeFetchedModels.map(model => <option key={model} value={model}>{model}</option>)}
+                                                </>
+                                            )}
+                                        </select>
+                                        <ChevronDown size={15} />
+                                    </div>
+                                </label>
+                                <div className="quick-action-model-buttons">
+                                    <button type="button" disabled={!activeApiConfig || modelBusy !== null} onClick={() => void fetchApiModels()}>
+                                        {modelBusy === "fetch" ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+                                        <span>{modelBusy === "fetch" ? "拉取中" : "拉取模型"}</span>
+                                    </button>
+                                    <button type="button" disabled={!activeApiConfig || modelBusy !== null} onClick={() => void testActiveApi()}>
+                                        {modelBusy === "test" ? <Loader2 size={15} className="animate-spin" /> : <FlaskConical size={15} />}
+                                        <span>{modelBusy === "test" ? "测试中" : "测试模型"}</span>
+                                    </button>
+                                </div>
+                                {modelStatus ? (
+                                    <p className="quick-action-model-status" data-success={modelStatus.success ? "" : undefined}>{modelStatus.message}</p>
+                                ) : null}
                             </div>
                         </section>
 

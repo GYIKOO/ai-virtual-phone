@@ -22,6 +22,9 @@ const assembler = load('lib/llm-prompt-assembler.ts', {
   './character-time': { buildCharacterTimeContext: () => ({}) },
 });
 const marker = { identifier: 'charDescription', marker: true, enabled: true, role: 'system', content: '' };
+assert.equal(assembler.isContextMarkerEnabled({ prompts: [marker], prompt_order: [{ identifier: 'charDescription', enabled: false }] }, 'charDescription'), false);
+assert.equal(assembler.isContextMarkerEnabled({ prompts: [{ ...marker, enabled: false }], prompt_order: [{ identifier: 'charDescription', enabled: true }] }, 'charDescription'), true);
+assert.equal(assembler.isContextMarkerEnabled({ prompts: [] }, 'memoryCore'), false, 'ensemble must not invent missing memory slots');
 const input = { character: { id: 'a', name: '林舟', persona: '测试人物资料' }, history: [],
   preset: { prompts: [marker] }, worldBooks: [], regexes: [] };
 const text = options => assembler.assemblePromptPayload({ ...input, ...options }).map(m => m.content).join('\n');

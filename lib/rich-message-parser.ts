@@ -169,11 +169,20 @@ const RICH_PATTERNS: {
     },
     {
         regex: new RegExp(`\\[照片${C}(使用参考图|不使用参考图)${C}([^\\]]+)\\]`),
-        build: (m) => ({
-            content: "",
-            mediaType: "image",
-            mediaData: { label: m[2].trim(), useReferenceImage: m[1] === "使用参考图" },
-        }),
+        build: (m) => {
+            const label = m[2].trim();
+            return {
+                content: "",
+                mediaType: "image" as const,
+                mediaData: {
+                    label,
+                    useReferenceImage: m[1] === "使用参考图",
+                    // Permission gate only. The image service makes the final
+                    // decision from this text-model-authored description.
+                    useUserReferenceImage: true,
+                },
+            };
+        },
     },
     {
         regex: new RegExp(`\\[照片${C}([^\\]]+)\\]`),
@@ -185,6 +194,7 @@ const RICH_PATTERNS: {
                 mediaData: {
                     label,
                     useReferenceImage: /(?:自拍|对镜拍|selfie)/i.test(label),
+                    useUserReferenceImage: true,
                 },
             };
         },

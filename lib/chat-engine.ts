@@ -39,6 +39,7 @@ import {
     loadRegexes,
     resolveUserIdentity,
 } from "./settings-storage";
+import { resolveChatAccountUserIdentity } from "./chat-scope-storage";
 import { assemblePromptPayload, applyOutputRegex, type LLMMessage, type LLMContentPart } from "./llm-prompt-assembler";
 import { MacroEngine, postProcessTrim } from "./macro-engine";
 import { getStatusRegionConfig, resolveStatusRegionSection, resolveStatusRegionExampleLine, resolveStatusRegionComposition, resolveStatusRegionFullExample } from "./chat-status-region";
@@ -1890,7 +1891,9 @@ export async function buildChatPromptMessages(
         ? []
         : (activeSlot.regexIds || []).map(id => allRegexes.find(r => r.id === id)).filter(Boolean) as typeof allRegexes;
 
-    const userIdentity = resolveUserIdentity(character.id, resolvedAppId);
+    const userIdentity = resolvedAppId === "chat"
+        ? resolveChatAccountUserIdentity(session.chatAccountId, character.id, resolvedAppId)
+        : resolveUserIdentity(character.id, resolvedAppId);
     const attachedImages = config.enableImageRecognition === true ? options?.attachedImages : undefined;
     const historyForPrompt: ChatMessage[] = attachedImages?.length
         ? [

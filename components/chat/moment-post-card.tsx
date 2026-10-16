@@ -14,12 +14,13 @@ import {
     deleteMomentCommentThread,
 } from "@/lib/moments-storage";
 import { loadCharacters } from "@/lib/character-storage";
-import { resolveUserIdentity } from "@/lib/settings-storage";
+import { resolveChatCharacterAvatar } from "@/lib/chat-storage";
+import { loadChatScope, resolveChatAccountUserIdentity } from "@/lib/chat-scope-storage";
 import { buildTwoLevelMomentThreads } from "@/lib/moments-comment-threading";
 import { getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
 import { splitBilingualText } from "@/lib/bilingual-text";
 import { retryMomentGeneratedPhoto } from "@/lib/generated-image-retry";
-import { hasCharacterReferenceImage } from "@/lib/image-generation-service";
+import { hasCharacterReferenceImage, hasUserReferenceImage } from "@/lib/image-generation-service";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
 import { Trash2, MoreHorizontal, MapPin, Heart, MessageCircle, Pencil } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui";
@@ -45,7 +46,9 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
     const [photoRegenerating, setPhotoRegenerating] = useState(false);
     const characterId = post.authorType === "character" ? post.authorId : undefined;
     const [hasRef, setHasRef] = useState(() => hasCharacterReferenceImage(characterId));
+    const [hasUserRef, setHasUserRef] = useState(() => hasUserReferenceImage(characterId, "moments"));
     const [photoUseReferenceDraft, setPhotoUseReferenceDraft] = useState(post.photoUseReferenceImage === true);
+    const [photoUseUserReferenceDraft, setPhotoUseUserReferenceDraft] = useState(post.photoUseUserReferenceImage === true);
     const [showFallbackPreview, setShowFallbackPreview] = useState(false);
     // photoRetryError 只用于提示词弹窗内的即时校验；生成失败改用一次性弹窗，不再挂红字
     const [photoRetryError, setPhotoRetryError] = useState("");
@@ -57,6 +60,7 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
     const [postContentDraft, setPostContentDraft] = useState("");
     const [postPhotoDescDraft, setPostPhotoDescDraft] = useState("");
     const [postUseReferenceDraft, setPostUseReferenceDraft] = useState(false);
+    const [postUseUserReferenceDraft, setPostUseUserReferenceDraft] = useState(false);
     const [postLocationDraft, setPostLocationDraft] = useState("");
     const [editingComment, setEditingComment] = useState<MomentComment | null>(null);
     const [commentDraft, setCommentDraft] = useState("");
@@ -97,24 +101,24 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
 
     const chars = loadCharacters();
     // 朋友圈中的用户头像与主页、消息列表共用同一份用户资料头像。
-    const userIdentity = resolveUserIdentity();
+    const userIdentity = resolveChatAccountUserIdentity(post.chatAccountId);
 
     const getCharName = (charId: string): string => {
         return chars.find(c => c.id === charId)?.name ?? "未知";
     };
 
     const getCharAvatar = (charId: string): string | null => {
-        return chars.find(c => c.id === charId)?.avatar ?? null;
+        return resolveChatCharacterAvatar(chars.find(c => c.id === charId)) || null;
     };
 
-    const getAuthorName = (authorType: "user" | "character" | "npc", authorId: string, authorName?: string): string => {
+    const getAuthorName = (authorType: "user" | "character" | "npc", authorId: string, authorName?: string, chatAccountId?: string): string => {
         if (authorType === "npc") return authorName!;
-        return authorType === "user" ? (userIdentity?.name ?? "我") : getCharName(authorId);
+        return authorType === "user" ? (resolveChatAccountUserIdentity(chatAccountId)?.name ?? userIdentity?.name ?? "我") : getCharName(authorId);
     };
 
-    const getAuthorAvatar = (authorType: "user" | "character" | "npc", authorId: string): string | null => {
+    const getAuthorAvatar = (authorType: "user" | "character" | "npc", authorId: string, chatAccountId?: string): string | null => {
         if (authorType === "npc") return null;
-        return authorType === "user" ? (userIdentity?.avatarUrl ?? null) : getCharAvatar(authorId);
+        return authorType === "user" ? (resolveChatAccountUserIdentity(chatAccountId)?.avatarUrl ?? userIdentity?.avatarUrl ?? null) : getCharAvatar(authorId);
     };
 
     const authorName = getAuthorName(post.authorType, post.authorId);
@@ -124,12 +128,13 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
     const timeAgo = formatTimeAgo(post.createdAt);
 
     // Like handling
-    const isLikedByUser = post.likes.some(l => l.authorType === "user");
+    const currentChatAccountId = loadChatScope().chatAccountId || undefined;
+    const isLikedByUser = post.likes.some(l => l.authorType === "user" && (l.chatAccountId || undefined) === currentChatAccountId);
     const momentsConfig = loadMomentsConfig();
     const defaultTranslationExpanded = momentsConfig.collapseBilingualTranslation === true ? false : true;
 
     const handleLike = () => {
-        toggleMomentLike(post.id, "user", "user");
+        toggleMomentLike(post.id, "user", "user", currentChatAccountId);
         onUpdate();
     };
 
@@ -138,7 +143,7 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
     };
 
     const handleReply = (comment: MomentComment) => {
-        const name = getAuthorName(comment.authorType, comment.authorId, comment.authorName);
+        const name = getAuthorName(comment.authorType, comment.authorId, comment.authorName, comment.chatAccountId);
         onOpenReplyComposer?.(post, comment, name);
     };
 
@@ -164,6 +169,7 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
         setPostContentDraft(post.content);
         setPostPhotoDescDraft(post.photoDescription || "");
         setPostUseReferenceDraft(post.photoUseReferenceImage === true);
+        setPostUseUserReferenceDraft(post.photoUseUserReferenceImage === true);
         setPostLocationDraft(post.location || "");
         setShowPostActions(false);
         setEditingPostOpen(true);
@@ -177,6 +183,7 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
             content,
             photoDescription: photoDescription || undefined,
             photoUseReferenceImage: photoDescription ? postUseReferenceDraft : false,
+            photoUseUserReferenceImage: photoDescription ? postUseUserReferenceDraft : false,
             location: postLocationDraft.trim() || undefined,
         });
         setEditingPostOpen(false);
@@ -249,7 +256,7 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
     }, [post.id]);
 
     // Liked names list
-    const likeNames = post.likes.map(l => getAuthorName(l.authorType, l.authorId, l.authorName));
+    const likeNames = post.likes.map(l => getAuthorName(l.authorType, l.authorId, l.authorName, l.chatAccountId));
     const commentThreads = useMemo(() => buildTwoLevelMomentThreads(comments), [comments]);
     const fallbackPhotoDescription = post.photoDescription && !post.photoUrl
         ? post.photoDescription
@@ -260,12 +267,15 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
         && Boolean(post.photoDescription?.trim());
     const openPhotoPromptEditor = useCallback(() => {
         const latestHasRef = hasCharacterReferenceImage(characterId);
+        const latestHasUserRef = hasUserReferenceImage(characterId, "moments");
         setHasRef(latestHasRef);
+        setHasUserRef(latestHasUserRef);
         setPhotoPromptDraft(post.photoDescription?.trim() || "");
         setPhotoUseReferenceDraft(latestHasRef && post.photoUseReferenceImage === true);
+        setPhotoUseUserReferenceDraft(latestHasUserRef && post.photoUseUserReferenceImage === true);
         setPhotoRetryError("");
         setShowPhotoPromptEditor(true);
-    }, [characterId, post.photoDescription, post.photoUseReferenceImage]);
+    }, [characterId, post.photoDescription, post.photoUseReferenceImage, post.photoUseUserReferenceImage]);
     const handleRegeneratePhotoWithPrompt = useCallback(() => {
         const nextDescription = photoPromptDraft.trim();
         if (!nextDescription) {
@@ -276,7 +286,8 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
         setShowPhotoPromptEditor(false);
         setPhotoRegenerating(true);
         setPhotoRetryError("");
-        retryMomentGeneratedPhoto(post, nextDescription, latestHasRef ? photoUseReferenceDraft : undefined)
+        const latestHasUserRef = hasUserReferenceImage(characterId, "moments");
+        retryMomentGeneratedPhoto(post, nextDescription, latestHasRef ? photoUseReferenceDraft : undefined, latestHasUserRef ? photoUseUserReferenceDraft : false)
             .then(async (updated) => {
                 if (updated?.photoUrl?.startsWith("asset://")) {
                     const assetId = updated.photoUrl.slice(8);
@@ -299,7 +310,7 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
             .finally(() => {
                 setPhotoRegenerating(false);
             });
-    }, [characterId, onUpdate, photoPromptDraft, photoUseReferenceDraft, post]);
+    }, [characterId, onUpdate, photoPromptDraft, photoUseReferenceDraft, photoUseUserReferenceDraft, post]);
 
     return (
         <div data-moment-post-id={post.id} className="feed-post relative border-b-[2.5px] border-[var(--c-card-border)] pb-5 mb-5 w-full bg-transparent px-4 pt-2">
@@ -443,6 +454,19 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
                             ) : (
                                 <div className="chat-generated-image-prompt-empty-hint">该角色未配置参考图</div>
                             )}
+                            {hasUserRef ? (
+                                <label className="chat-generated-image-prompt-check">
+                                    <input
+                                        type="checkbox"
+                                        checked={photoUseUserReferenceDraft}
+                                        disabled={photoRegenerating}
+                                        onChange={e => setPhotoUseUserReferenceDraft(e.target.checked)}
+                                    />
+                                    <span>允许使用用户参考图（文字模型判断用户是否出镜）</span>
+                                </label>
+                            ) : (
+                                <div className="chat-generated-image-prompt-empty-hint">当前用户身份未配置参考图</div>
+                            )}
                             {photoRetryError && <div className="feed-post-photo-retry-error">{photoRetryError}</div>}
                         </div>
                         <div className="modal-footer" data-ui="modal-footer">
@@ -500,6 +524,15 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
                                     onChange={e => setPostUseReferenceDraft(e.target.checked)}
                                 />
                                 <span>图片使用角色参考图</span>
+                            </label>
+                            <label className="feed-post-edit-check">
+                                <input
+                                    type="checkbox"
+                                    checked={postUseUserReferenceDraft}
+                                    disabled={!postPhotoDescDraft.trim() || !hasUserReferenceImage(characterId, "moments")}
+                                    onChange={e => setPostUseUserReferenceDraft(e.target.checked)}
+                                />
+                                <span>允许使用用户参考图（由图片描述判断是否出镜）</span>
                             </label>
                             <label className="feed-post-edit-field">
                                 <span>地点</span>
@@ -614,8 +647,8 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
                     {comments.length > 0 && (
                         <div className="feed-comments flex flex-col gap-1 w-full mt-1">
                             {commentThreads.map(({ root, replies }) => {
-                                const rootName = getAuthorName(root.authorType, root.authorId, root.authorName);
-                                const rootAvatar = getAuthorAvatar(root.authorType, root.authorId);
+                                const rootName = getAuthorName(root.authorType, root.authorId, root.authorName, root.chatAccountId);
+                                const rootAvatar = getAuthorAvatar(root.authorType, root.authorId, root.chatAccountId);
                                 const rootReplyName = root.replyToAuthorId
                                     ? getAuthorName(root.replyToAuthorType || "character", root.replyToAuthorId, root.replyToAuthorName)
                                     : null;
@@ -700,8 +733,8 @@ export function MomentPostCard({ post, onUpdate, onRequestDelete, onOpenCommentC
                                         {replies.length > 0 && (
                                             <div className="feed-comment-replies flex flex-col gap-1 w-full mt-1 pl-[40px]">
                                                 {replies.map((reply) => {
-                                                    const replyName = getAuthorName(reply.authorType, reply.authorId, reply.authorName);
-                                                    const replyAvatar = getAuthorAvatar(reply.authorType, reply.authorId);
+                                                    const replyName = getAuthorName(reply.authorType, reply.authorId, reply.authorName, reply.chatAccountId);
+                                                    const replyAvatar = getAuthorAvatar(reply.authorType, reply.authorId, reply.chatAccountId);
                                                     const replyTargetName = reply.replyToAuthorId
                                                         ? getAuthorName(reply.replyToAuthorType || "character", reply.replyToAuthorId, reply.replyToAuthorName)
                                                         : null;

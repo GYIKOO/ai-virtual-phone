@@ -3,7 +3,15 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useRef } from "react";
 import { getAllPosts, deleteMomentPost, getUnreadMomentsNotifications, saveMomentsLastSeen, addMomentComment } from "@/lib/moments-storage";
 import { loadChatContacts } from "@/lib/chat-storage";
-import { resolveUserIdentity, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
+import { USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
+import {
+    CHAT_SCOPE_UPDATED_EVENT,
+    characterMatchesChatScope,
+    loadChatScope,
+    resolveChatScopeUserIdentity,
+    type ChatScopeState,
+} from "@/lib/chat-scope-storage";
+import { findChatAltAccount } from "@/lib/chat-alt-account-storage";
 import { saveChatImageToIndexedDB, getChatImageFromIndexedDB } from "@/lib/chat-asset-storage";
 import type { MomentComment, MomentPost } from "@/lib/moments-types";
 import { MomentPostCard } from "./moment-post-card";
@@ -16,8 +24,29 @@ import { onUserComment, MOMENT_PHOTO_GENERATION_FAILED_EVENT } from "@/lib/momen
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
 
 const COVER_ASSET_KEY = "moments_cover_asset_id";
+const IDENTITY_PROFILE_KEY = "moments_identity_profiles_v1";
 registerKvMigration(COVER_ASSET_KEY);
 registerKvMigration("moments_signature");
+registerKvMigration(IDENTITY_PROFILE_KEY);
+
+type MomentsIdentityProfile = { coverAssetId?: string; signature?: string };
+
+function loadIdentityProfiles(): Record<string, MomentsIdentityProfile> {
+    try {
+        const raw = kvGet(IDENTITY_PROFILE_KEY);
+        return raw ? JSON.parse(raw) as Record<string, MomentsIdentityProfile> : {};
+    } catch {
+        return {};
+    }
+}
+
+function saveIdentityProfile(identityId: string, patch: MomentsIdentityProfile): void {
+    const profiles = loadIdentityProfiles();
+    kvSet(IDENTITY_PROFILE_KEY, JSON.stringify({
+        ...profiles,
+        [identityId]: { ...(profiles[identityId] || {}), ...patch },
+    }));
+}
 
 const MOMENTS_INITIAL_POST_COUNT = 10;
 const MOMENTS_LOAD_MORE_COUNT = 10;
@@ -39,9 +68,11 @@ type ActiveMomentComposer = {
 
 type MomentsFeedProps = {
     onCloseApp: () => void;
+    compact?: boolean;
+    onUserPublished?: (post: MomentPost) => void;
 };
 
-export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
+export function MomentsFeed({ onCloseApp, compact = false, onUserPublished }: MomentsFeedProps) {
     const [posts, setPosts] = useState<MomentPost[]>([]);
     const [showCompose, setShowCompose] = useState(false);
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -50,7 +81,8 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
     const [coverUrl, setCoverUrl] = useState<string | null>(null);
     const coverInputRef = useRef<HTMLInputElement>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
-    const [userIdentity, setUserIdentity] = useState(() => resolveUserIdentity());
+    const [chatScope, setChatScope] = useState<ChatScopeState>(() => loadChatScope());
+    const [userIdentity, setUserIdentity] = useState(() => resolveChatScopeUserIdentity());
     const [signature, setSignature] = useState(() => {
         if (typeof window !== "undefined") {
             return kvGet("moments_signature") || "make every day count (●ˇ∀ˇ●)";
@@ -59,16 +91,28 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
     });
 
     useEffect(() => {
-        const syncIdentity = () => setUserIdentity(resolveUserIdentity());
+        const syncIdentity = () => {
+            setChatScope(loadChatScope());
+            setUserIdentity(resolveChatScopeUserIdentity());
+        };
         window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
-        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+        window.addEventListener(CHAT_SCOPE_UPDATED_EVENT, syncIdentity);
+        window.addEventListener("settings-bindings-updated", syncIdentity);
+        window.addEventListener("character-worlds-updated", syncIdentity);
+        return () => {
+            window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+            window.removeEventListener(CHAT_SCOPE_UPDATED_EVENT, syncIdentity);
+            window.removeEventListener("settings-bindings-updated", syncIdentity);
+            window.removeEventListener("character-worlds-updated", syncIdentity);
+        };
     }, []);
     const [editingSignature, setEditingSignature] = useState(false);
     const sigInputRef = useRef<HTMLInputElement>(null);
     const handleSignatureSubmit = (val: string) => {
         const trimmed = val.trim() || "make every day count (●ˇ∀ˇ●)";
         setSignature(trimmed);
-        kvSet("moments_signature", trimmed);
+        if (userIdentity?.id) saveIdentityProfile(userIdentity.id, { signature: trimmed });
+        else kvSet("moments_signature", trimmed);
         setEditingSignature(false);
     };
 
@@ -105,10 +149,17 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
     useEffect(() => stopLoadMoreAnchorTracking, [stopLoadMoreAnchorTracking]);
 
     const refreshPosts = useCallback(() => {
-        const contactIds = new Set(loadChatContacts().map(c => c.characterId));
-        setPosts(getAllPosts().filter(p => p.authorType === "user" || contactIds.has(p.authorId)));
+        const altAccount = findChatAltAccount(chatScope.chatAccountId);
+        const contactIds = new Set(altAccount ? altAccount.friendCharacterIds : loadChatContacts().map(c => c.characterId));
+        setPosts(getAllPosts().filter(post => {
+            if (post.authorType === "user") {
+                if ((post.chatAccountId || null) !== chatScope.chatAccountId) return false;
+                return Boolean(chatScope.chatAccountId) || !chatScope.userIdentityId || !post.userIdentityId || post.userIdentityId === chatScope.userIdentityId;
+            }
+            return contactIds.has(post.authorId) && characterMatchesChatScope(post.authorId, chatScope);
+        }));
         setUnreadNotifs(getUnreadMomentsNotifications());
-    }, []);
+    }, [chatScope]);
 
     const captureScrollAnchor = useCallback((): MomentScrollAnchorSnapshot | null => {
         const el = getScrollElement();
@@ -243,6 +294,7 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
             postId: target.postId,
             authorType: "user",
             authorId: "user",
+            chatAccountId: chatScope.chatAccountId || undefined,
             content: text,
             replyToCommentId: target.replyTo?.commentId,
             replyToAuthorId: target.replyTo?.authorId,
@@ -253,7 +305,7 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         refreshPosts();
         window.dispatchEvent(new CustomEvent("moments-updated"));
         onUserComment(target.postId);
-    }, [activeComposer, closeComposer, composerText, refreshPosts]);
+    }, [activeComposer, chatScope.chatAccountId, closeComposer, composerText, refreshPosts]);
 
     useEffect(() => {
         if (!activeComposer) return;
@@ -305,19 +357,25 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         };
         window.addEventListener(MOMENT_PHOTO_GENERATION_FAILED_EVENT, photoFailureHandler);
 
-        // Load saved cover image
-        const savedId = kvGet(COVER_ASSET_KEY);
-        if (savedId) {
-            getChatImageFromIndexedDB(savedId).then(url => {
-                if (url) setCoverUrl(url);
-            });
-        }
-
         return () => {
             window.removeEventListener("moments-updated", handler);
             window.removeEventListener(MOMENT_PHOTO_GENERATION_FAILED_EVENT, photoFailureHandler);
         };
     }, [refreshPosts]);
+
+    useEffect(() => {
+        let cancelled = false;
+        const identityProfile = userIdentity?.id ? loadIdentityProfiles()[userIdentity.id] : undefined;
+        setSignature(identityProfile?.signature || kvGet("moments_signature") || "make every day count (●ˇ∀ˇ●)");
+        const savedId = identityProfile?.coverAssetId || kvGet(COVER_ASSET_KEY);
+        setCoverUrl(null);
+        if (savedId) {
+            getChatImageFromIndexedDB(savedId).then(url => {
+                if (!cancelled && url) setCoverUrl(url);
+            });
+        }
+        return () => { cancelled = true; };
+    }, [userIdentity?.id]);
 
     // Hide tab bar only when the full compose page is open.
     useEffect(() => {
@@ -337,10 +395,11 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
         }
     };
 
-    const handlePublished = () => {
+    const handlePublished = (post: MomentPost) => {
         setShowCompose(false);
         refreshPosts();
         window.dispatchEvent(new CustomEvent("moments-updated"));
+        onUserPublished?.(post);
     };
 
     const handleCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -365,7 +424,8 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                 URL.revokeObjectURL(objectUrl);
                 if (!blob) return;
                 saveChatImageToIndexedDB(blob).then(assetId => {
-                    kvSet(COVER_ASSET_KEY, assetId);
+                    if (userIdentity?.id) saveIdentityProfile(userIdentity.id, { coverAssetId: assetId });
+                    else kvSet(COVER_ASSET_KEY, assetId);
                     getChatImageFromIndexedDB(assetId).then(url => {
                         if (url) setCoverUrl(url);
                     });
@@ -403,7 +463,7 @@ export function MomentsFeed({ onCloseApp }: MomentsFeedProps) {
                     </svg>
                 </button>
             }
-            className={`moments-feed-page ${headerScrolled ? "is-scrolled" : ""} ${activeComposer ? "has-comment-modal" : ""}`}
+            className={`moments-feed-page ${compact ? "moments-feed-compact" : ""} ${headerScrolled ? "is-scrolled" : ""} ${activeComposer ? "has-comment-modal" : ""}`}
             bodyRef={scrollRef}
             footer={showCompose ? (
                 <MomentsCompose

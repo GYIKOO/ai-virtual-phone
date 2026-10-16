@@ -20,6 +20,7 @@ import { generateBriefPersonaText, isBriefPersonaStale } from "@/lib/brief-perso
 import { generateSupportingCharacters, materializeSupportingCharacter, type GeneratedSupportingCharacter } from "@/lib/npc-generator";
 import {
   addCharacterWorldRelation,
+  addUserIdentityToCharacterWorld,
   createCharacterWorldGroup,
   deleteCharacterWorldGroup,
   deleteCharacterWorldRelation,
@@ -28,6 +29,10 @@ import {
   moveCharacterToWorld,
   renameCharacterWorldGroup,
   updateCharacterWorldDescription,
+  updateCharacterWorldUserNodePosition,
+  CHARACTER_WORLD_USER_NODE_ID,
+  getCharacterWorldUserIdentityId,
+  getCharacterWorldUserNodeId,
   CHARACTER_WORLDS_UPDATED_EVENT,
   DEFAULT_CHARACTER_WORLD_ID,
   type CharacterWorldGroup,
@@ -38,7 +43,7 @@ import { loadMomentsConfig, saveMomentsConfig } from "@/lib/moments-storage";
 import type { CanvasBgItem } from "@/lib/character-types";
 import { PageShell } from "@/components/ui/page-shell";
 import { ConfirmDialog } from "@/components/ui/modal";
-import { AlertCircle, History } from "lucide-react";
+import { AlertCircle, Check, Download, History, Plus, UserPlus, X } from "lucide-react";
 import {
   backupCharacterVersion,
   clearCharacterVersions,
@@ -54,6 +59,21 @@ import { notifyMascotPageContext } from "@/lib/mascot-events";
 import { kvGet, kvSet } from "@/lib/kv-db";
 import { normalizeTimeZone } from "@/lib/character-time";
 import { removeCharacterChatReferences } from "@/lib/character-chat-cleanup";
+import {
+  getCharacterBinding,
+  loadBindingConfig,
+  loadUserIdentities,
+  resolveUserIdentity,
+  saveBindingConfig,
+  saveUserIdentities,
+  setCharacterBinding,
+  USER_IDENTITIES_UPDATED_EVENT,
+} from "@/lib/settings-storage";
+import {
+  createEmptyUserIdentity,
+  UserIdentityEditorSheet,
+  type UserIdentity,
+} from "@/components/settings/user-identity-editor-sheet";
 
 type ViewType = "list" | "detail";
 
@@ -210,7 +230,13 @@ export function PhoneCharacterApp({ onClose, onNotice }: PhoneCharacterAppProps)
   useEffect(() => {
     const reload = () => setWorldGroups(loadCharacterWorldGroups());
     window.addEventListener(CHARACTER_WORLDS_UPDATED_EVENT, reload);
-    return () => window.removeEventListener(CHARACTER_WORLDS_UPDATED_EVENT, reload);
+    window.addEventListener("settings-bindings-updated", reload);
+    window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, reload);
+    return () => {
+      window.removeEventListener(CHARACTER_WORLDS_UPDATED_EVENT, reload);
+      window.removeEventListener("settings-bindings-updated", reload);
+      window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, reload);
+    };
   }, []);
   // 记忆的世界可能已被删除 → 回落默认卷宗
   const safeWorldId = worldGroups.some(g => g.id === currentWorldId) ? currentWorldId : DEFAULT_CHARACTER_WORLD_ID;
@@ -506,6 +532,19 @@ function CharListView({
   const fileRef = useRef<HTMLInputElement>(null);
   const [showNpcGen, setShowNpcGen] = useState(false);
   const [activeMoveChar, setActiveMoveChar] = useState<Character | null>(null);
+  const [userIdentities, setUserIdentities] = useState<UserIdentity[]>(() => loadUserIdentities());
+  const [showIdentityActions, setShowIdentityActions] = useState(false);
+  const [showIdentityImport, setShowIdentityImport] = useState(false);
+  const [identityDraft, setIdentityDraft] = useState<UserIdentity | null>(null);
+  const [identityEditorMode, setIdentityEditorMode] = useState<"create" | "edit">("edit");
+  const [bindingIdentityId, setBindingIdentityId] = useState<string | null>(null);
+  const [selectedBindingCharacterIds, setSelectedBindingCharacterIds] = useState<string[]>([]);
+  const [bindingConflictNames, setBindingConflictNames] = useState<string[]>([]);
+  useEffect(() => {
+    const refreshIdentity = () => setUserIdentities(loadUserIdentities());
+    window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, refreshIdentity);
+    return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, refreshIdentity);
+  }, []);
 
   // ── 世界卷宗：当前世界派生数据 ──
   const currentGroup = worldGroups.find(g => g.id === currentWorldId)
@@ -516,6 +555,23 @@ function CharListView({
   const worldBgItems = (bgItems || []).filter(item => (item.worldId ?? DEFAULT_CHARACTER_WORLD_ID) === currentWorldId);
   const memberCounts = new Map(worldGroups.map(g => [g.id, g.memberIds.length]));
   const nameById = new Map(characters.map(c => [c.id, c.name || "未命名"]));
+  const visibleUserIdentities = (() => {
+    const ids = new Set<string>([
+      ...Object.keys(currentGroup?.userNodes ?? {}),
+      ...(currentGroup?.userIdentityIds ?? []),
+      ...worldCharacters.map(character => resolveUserIdentity(character.id)?.id).filter((id): id is string => Boolean(id)),
+    ]);
+    if (ids.size === 0) {
+      const fallbackId = resolveUserIdentity()?.id;
+      if (fallbackId) ids.add(fallbackId);
+    }
+    return [...ids]
+      .map(id => userIdentities.find(identity => identity.id === id))
+      .filter((identity): identity is UserIdentity => Boolean(identity));
+  })();
+  for (const identity of visibleUserIdentities) {
+    nameById.set(getCharacterWorldUserNodeId(identity.id), identity.name?.trim() || "用户");
+  }
   // 连线与世界观关系同步：同一对角色的多条关系合并为一条线
   const relationLines: CanvasRelationLine[] = (() => {
     const pairs = new Map<string, CanvasRelationLine>();
@@ -687,6 +743,9 @@ function CharListView({
     const points: { x: number; y: number }[] = [];
     for (const c of worldCharacters) {
       if (c.canvasX !== undefined) points.push({ x: c.canvasX, y: c.canvasY || 0 });
+    }
+    for (const node of Object.values(currentGroup?.userNodes ?? {})) {
+      points.push({ x: node.canvasX, y: node.canvasY });
     }
     for (const b of worldBgItems) points.push({ x: b.x, y: b.y });
     let next: { x: number; y: number; zoom: number };
@@ -888,6 +947,86 @@ function CharListView({
     };
   }, []);
 
+  function openCreateIdentity() {
+    setIdentityEditorMode("create");
+    setIdentityDraft(createEmptyUserIdentity());
+    setShowIdentityActions(false);
+    setShowIdentityImport(false);
+  }
+
+  function openEditIdentity(identity: UserIdentity) {
+    setIdentityEditorMode("edit");
+    setIdentityDraft({ ...identity });
+  }
+
+  function persistIdentity(identity: UserIdentity) {
+    const current = loadUserIdentities();
+    const exists = current.some(item => item.id === identity.id);
+    saveUserIdentities(exists
+      ? current.map(item => item.id === identity.id ? identity : item)
+      : [identity, ...current]
+    );
+    setUserIdentities(loadUserIdentities());
+  }
+
+  function finishIdentityEditor() {
+    if (!identityDraft || !currentGroup) return;
+    const saved = { ...identityDraft, name: identityDraft.name.trim() || "未命名身份" };
+    persistIdentity(saved);
+    addUserIdentityToCharacterWorld(currentGroup.id, saved.id);
+    setIdentityDraft(null);
+    if (identityEditorMode === "create") {
+      setBindingIdentityId(saved.id);
+      setSelectedBindingCharacterIds([]);
+    } else {
+      onNotice("用户信息已同步到设置与角色绑定");
+    }
+  }
+
+  function chooseImportedIdentity(identityId: string) {
+    if (!currentGroup) return;
+    addUserIdentityToCharacterWorld(currentGroup.id, identityId);
+    setShowIdentityImport(false);
+    setBindingIdentityId(identityId);
+    setSelectedBindingCharacterIds([]);
+  }
+
+  function applyIdentityBindings(identityId: string, characterIds: string[]) {
+    let config = loadBindingConfig();
+    for (const characterId of characterIds) {
+      const binding = getCharacterBinding(config, characterId);
+      config = setCharacterBinding(config, {
+        ...binding,
+        defaults: { ...binding.defaults, userIdentityId: identityId },
+      });
+    }
+    saveBindingConfig(config);
+    setBindingIdentityId(null);
+    setSelectedBindingCharacterIds([]);
+    setBindingConflictNames([]);
+    const identity = loadUserIdentities().find(item => item.id === identityId);
+    onNotice(characterIds.length > 0
+      ? `已将「${identity?.name || "用户身份"}」绑定到 ${characterIds.length} 个角色`
+      : `已将「${identity?.name || "用户身份"}」加入当前世界`
+    );
+  }
+
+  function requestIdentityBindings() {
+    if (!bindingIdentityId) return;
+    const conflicts = selectedBindingCharacterIds.flatMap(characterId => {
+      const existing = resolveUserIdentity(characterId);
+      const character = characters.find(item => item.id === characterId);
+      return existing && existing.id !== bindingIdentityId && character
+        ? [`${character.name || "未命名角色"}（当前：${existing.name || "未命名身份"}）`]
+        : [];
+    });
+    if (conflicts.length > 0) {
+      setBindingConflictNames(conflicts);
+      return;
+    }
+    applyIdentityBindings(bindingIdentityId, selectedBindingCharacterIds);
+  }
+
 
   // Wheel zoom (desktop) — use native event to allow preventDefault on non-passive listener
   useEffect(() => {
@@ -912,6 +1051,12 @@ function CharListView({
 
   function handleDragEndChar(id: string, newX: number, newY: number) {
     onUpdateChars(characters.map(c => c.id === id ? { ...c, canvasX: newX, canvasY: newY } : c));
+  }
+  function handleDragEndUserNode(id: string, newX: number, newY: number) {
+    if (!currentGroup) return;
+    const identityId = getCharacterWorldUserIdentityId(id);
+    if (!identityId) return;
+    updateCharacterWorldUserNodePosition(currentGroup.id, identityId, newX, newY);
   }
   function handleDragEndBg(id: string, newX: number, newY: number) {
     onUpdateBgItems((bgItems || []).map(b => b.id === id ? { ...b, x: newX, y: newY } : b));
@@ -1098,7 +1243,16 @@ function CharListView({
           </div>
         }
         footer={
-          <div className="char-bottom-bar flex justify-center pb-8">
+          <div className="char-bottom-bar relative flex justify-center pb-8">
+            <button
+              type="button"
+              className="char-identity-add-button"
+              onClick={() => setShowIdentityActions(true)}
+              aria-label="添加用户身份"
+              title="添加用户身份"
+            >
+              <Plus size={20} strokeWidth={2.2} />
+            </button>
             <div className="wt-bottom-pill">
               <button className="wt-bottom-pill-btn" onClick={() => { pendingActionRef.current = 'import'; setShowStylePicker(true); }}>
                 <IconImport />
@@ -1161,7 +1315,7 @@ function CharListView({
             正在从 <strong>{nameById.get(linkFromId) ?? "?"}</strong> 拉线 · 点另一张照片牵上关系，点空白处取消
           </div>
         )}
-        {worldCharacters.length === 0 && worldBgItems.length === 0 ? (
+        {worldCharacters.length === 0 && worldBgItems.length === 0 && visibleUserIdentities.length === 0 ? (
           <div className="char-empty" style={{ zIndex: 100 }}>
             <div className="char-empty-icon">
               <IconCamera size={44} />
@@ -1187,6 +1341,46 @@ function CharListView({
                 {renderBgContent(item)}
               </DraggableNode>
             ))}
+
+            {visibleUserIdentities.map((identity, index) => {
+              const nodeId = getCharacterWorldUserNodeId(identity.id);
+              const node = currentGroup?.userNodes?.[identity.id] || {
+                canvasX: 70 + index * 150,
+                canvasY: 90 + (index % 2) * 180,
+                canvasRot: -3 + index * 2,
+                canvasZIndex: 180 + index,
+              };
+              const userName = identity.name?.trim() || "用户";
+              return (
+                <DraggableNode
+                  key={`${currentGroup?.id || currentWorldId}-${identity.id}`}
+                  id={nodeId}
+                  x={node.canvasX}
+                  y={node.canvasY}
+                  rot={node.canvasRot}
+                  zIndex={node.canvasZIndex}
+                  onDragEnd={handleDragEndUserNode}
+                  onClick={isEditing ? undefined : () => openEditIdentity(identity)}
+                  onEditTap={handleCharEditTap}
+                  className={`char-polaroid char-polaroid-board-item char-user-identity-card ratio-portrait ${linkFromId === nodeId ? "wt-link-source" : ""}`}
+                  w={122}
+                  isEditing={isEditing}
+                  use2dTransform
+                  onDragActiveChange={setIsAnyDragging}
+                  onOverTrashChange={setOverTrashBin}
+                  zoom={pan.zoom}
+                  pinchRef={pinchRef}
+                >
+                  <div className="char-polaroid-tape-base char-polaroid-tape-red" style={{ top: -10, width: 46, transform: "translateX(-50%) rotate(-3deg)" }} />
+                  <div className="char-user-identity-badge">USER</div>
+                  <div className="char-polaroid-img-wrapper">
+                    {identity.avatarUrl ? <img src={identity.avatarUrl} alt={userName} className="char-polaroid-img" draggable={false} /> : <CharAvatarFallback name={userName} size="100%" />}
+                  </div>
+                  <div className="char-polaroid-text">{userName}</div>
+                  <div className="char-user-identity-summary">{identity.occupation || identity.bio || "当前用户身份"}</div>
+                </DraggableNode>
+              );
+            })}
 
             {worldCharacters.map((char, idx) => {
               if (char.canvasX === undefined) return null;
@@ -1257,8 +1451,21 @@ function CharListView({
             {/* 把拉线放在所有卡片的最后渲染，并设置超高 zIndex，使其盖在所有照片之上 */}
             <svg className="absolute top-0 left-0 w-[10000px] h-[10000px] pointer-events-none overflow-visible" style={{ zIndex: 99999 }}>
               {relationLines.map(line => {
-                const a = worldCharacters.find(c => c.id === line.aId);
-                const b = worldCharacters.find(c => c.id === line.bId);
+                const resolveCanvasNode = (id: string) => {
+                  const identityId = getCharacterWorldUserIdentityId(id);
+                  if (identityId) {
+                    const node = currentGroup?.userNodes?.[identityId];
+                    return node ? { id, canvasX: node.canvasX, canvasY: node.canvasY } : undefined;
+                  }
+                  if (id === CHARACTER_WORLD_USER_NODE_ID) {
+                    const fallback = visibleUserIdentities[0];
+                    const node = fallback ? currentGroup?.userNodes?.[fallback.id] : undefined;
+                    return node ? { id, canvasX: node.canvasX, canvasY: node.canvasY } : undefined;
+                  }
+                  return worldCharacters.find(c => c.id === id);
+                };
+                const a = resolveCanvasNode(line.aId);
+                const b = resolveCanvasNode(line.bId);
                 if (!a || !b || a.canvasX === undefined || a.canvasY === undefined || b.canvasX === undefined || b.canvasY === undefined) return null;
                 const x1 = a.canvasX + 60, y1 = a.canvasY + 60;
                 const x2 = b.canvasX + 60, y2 = b.canvasY + 60;
@@ -1631,6 +1838,156 @@ function CharListView({
             </div>
           </div>
         </div>
+      )}
+
+      {showIdentityActions && (
+        <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onPointerDown={() => setShowIdentityActions(false)}>
+          <div className="modal-sheet" data-ui="modal-sheet" onPointerDown={(event) => event.stopPropagation()}>
+            <div className="modal-header" data-ui="modal-header">
+              <button type="button" className="modal-header-btn modal-header-btn-muted" onClick={() => setShowIdentityActions(false)} aria-label="关闭">
+                <X size={18} />
+              </button>
+              <span className="modal-header-title">添加用户身份</span>
+              <span className="w-9" />
+            </div>
+            <div className="modal-body flex flex-col gap-3 pb-8" data-ui="modal-body">
+              <button type="button" className="flex w-full items-center gap-3 rounded-2xl border border-[var(--c-card-border)] bg-[var(--c-input)] p-3 text-left" onClick={openCreateIdentity}>
+                <span className="ui-icon-circle shrink-0"><UserPlus size={20} /></span>
+                <span className="min-w-0 flex-1">
+                  <span className="menu-label block">创建新用户信息</span>
+                  <span className="menu-desc block">填写头像与身份资料，完成后选择要绑定的角色</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-2xl border border-[var(--c-card-border)] bg-[var(--c-input)] p-3 text-left"
+                onClick={() => { setShowIdentityActions(false); setShowIdentityImport(true); }}
+              >
+                <span className="ui-icon-circle shrink-0"><Download size={20} /></span>
+                <span className="min-w-0 flex-1">
+                  <span className="menu-label block">从设置已有用户信息导入</span>
+                  <span className="menu-desc block">加入当前世界，角色绑定可以跳过</span>
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showIdentityImport && (
+        <div className="modal-overlay modal-overlay-bottom" data-ui="modal" onPointerDown={() => setShowIdentityImport(false)}>
+          <div className="modal-sheet" data-ui="modal-sheet" onPointerDown={(event) => event.stopPropagation()}>
+            <div className="modal-header" data-ui="modal-header">
+              <button type="button" className="modal-header-btn modal-header-btn-muted" onClick={() => setShowIdentityImport(false)} aria-label="取消">
+                <X size={18} />
+              </button>
+              <span className="modal-header-title">导入已有用户信息</span>
+              <span className="w-9" />
+            </div>
+            <div className="modal-body hide-scrollbar flex flex-col gap-2 pb-8" data-ui="modal-body">
+              {userIdentities.length === 0 ? (
+                <div className="ui-empty py-10">
+                  <span className="menu-label">设置中还没有用户信息</span>
+                  <button type="button" className="ui-btn ui-btn-primary" onClick={openCreateIdentity}>直接创建</button>
+                </div>
+              ) : userIdentities.map(identity => (
+                <button key={identity.id} type="button" className="flex w-full items-center gap-3 rounded-2xl border border-[var(--c-card-border)] bg-[var(--c-input)] p-3 text-left" onClick={() => chooseImportedIdentity(identity.id)}>
+                  {identity.avatarUrl ? (
+                    <img src={identity.avatarUrl} alt="" className="h-11 w-11 shrink-0 rounded-full object-cover" />
+                  ) : (
+                    <span className="ui-icon-circle h-11 w-11 shrink-0">{(identity.name || "用")[0]}</span>
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="menu-label block truncate">{identity.name || "未命名身份"}</span>
+                    <span className="menu-desc block truncate">{identity.occupation || identity.bio || "未填写身份信息"}</span>
+                  </span>
+                  <Plus size={18} className="shrink-0 text-[var(--c-icon)]" />
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {identityDraft && (
+        <UserIdentityEditorSheet
+          identity={identityDraft}
+          title={identityEditorMode === "create" ? "创建用户信息" : "编辑用户信息"}
+          onChange={(updates) => setIdentityDraft(current => current ? { ...current, ...updates } : current)}
+          onCancel={() => setIdentityDraft(null)}
+          onConfirm={finishIdentityEditor}
+        />
+      )}
+
+      {bindingIdentityId && (() => {
+        const identity = userIdentities.find(item => item.id === bindingIdentityId)
+          || loadUserIdentities().find(item => item.id === bindingIdentityId);
+        return (
+          <div className="modal-overlay modal-overlay-bottom" data-ui="modal">
+            <div className="modal-sheet" data-ui="modal-sheet">
+              <div className="modal-header" data-ui="modal-header">
+                <button type="button" className="modal-header-btn modal-header-btn-muted" onClick={() => { setBindingIdentityId(null); setSelectedBindingCharacterIds([]); }} aria-label="暂不绑定">
+                  <X size={18} />
+                </button>
+                <span className="modal-header-title">选择绑定角色</span>
+                <button type="button" className="modal-header-btn modal-header-btn-action" onClick={requestIdentityBindings} aria-label="完成绑定">
+                  <Check size={18} />
+                </button>
+              </div>
+              <div className="modal-body hide-scrollbar flex flex-col gap-3 pb-8" data-ui="modal-body">
+                <div className="rounded-2xl bg-[var(--c-input)] p-3">
+                  <div className="menu-label">{identity?.name || "用户身份"}</div>
+                  <div className="menu-desc mt-1">选择要绑定的已有角色；不选择可直接完成。身份已经加入当前世界，并同步到设置。</div>
+                </div>
+                {characters.length === 0 ? (
+                  <div className="ui-empty py-8"><span className="menu-desc">暂无可绑定角色</span></div>
+                ) : characters.map(character => {
+                  const selected = selectedBindingCharacterIds.includes(character.id);
+                  const existing = resolveUserIdentity(character.id);
+                  return (
+                    <button
+                      key={character.id}
+                      type="button"
+                      className="flex w-full items-center gap-3 rounded-2xl border border-[var(--c-card-border)] bg-[var(--c-input)] p-3 text-left"
+                      onClick={() => setSelectedBindingCharacterIds(current => selected
+                        ? current.filter(id => id !== character.id)
+                        : [...current, character.id]
+                      )}
+                    >
+                      {character.avatar ? (
+                        <img src={character.avatar} alt="" className="h-11 w-11 shrink-0 rounded-full object-cover" />
+                      ) : (
+                        <span className="ui-icon-circle h-11 w-11 shrink-0">{(character.name || "角")[0]}</span>
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className="menu-label block truncate">{character.name || "未命名角色"}</span>
+                        <span className="menu-desc block truncate">当前身份：{existing?.name || "未绑定"}</span>
+                      </span>
+                      <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-full border ${selected ? "border-black bg-black text-white" : "border-[var(--c-card-border)] text-transparent"}`}>
+                        <Check size={14} />
+                      </span>
+                    </button>
+                  );
+                })}
+                <button type="button" className="ui-btn ui-btn-primary w-full" onClick={requestIdentityBindings}>
+                  {selectedBindingCharacterIds.length > 0 ? `绑定 ${selectedBindingCharacterIds.length} 个角色` : "暂不绑定，完成"}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {bindingIdentityId && bindingConflictNames.length > 0 && (
+        <ConfirmDialog
+          title="替换已有角色绑定？"
+          message={`以下角色已经绑定其他用户身份：${bindingConflictNames.join("、")}。继续后将统一替换为新选择的身份。`}
+          icon={AlertCircle}
+          confirmLabel="确认替换"
+          cancelLabel="返回选择"
+          onConfirm={() => applyIdentityBindings(bindingIdentityId, selectedBindingCharacterIds)}
+          onCancel={() => setBindingConflictNames([])}
+        />
       )}
 
       {/* 转移世界 Modal */}

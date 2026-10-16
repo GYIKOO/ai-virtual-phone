@@ -30,12 +30,12 @@ import {
 import type { MomentPost, MomentComment, PendingReaction } from "./moments-types";
 import {
     resolveBinding,
+    resolveUserIdentity,
     loadBindingConfig,
     loadApiConfigs,
     loadPresets,
     loadWorldBooks,
     loadRegexes,
-    resolveUserIdentity,
 } from "./settings-storage";
 import type { PresetConfig, ApiConfig } from "./settings-types";
 import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
@@ -362,6 +362,7 @@ async function triggerAIPost(characterId: string): Promise<void> {
             content: parsed.content,
             photoDescription: parsed.photoDescription,
             photoUseReferenceImage: parsed.photoUseReferenceImage === true,
+            photoUseUserReferenceImage: parsed.photoUseUserReferenceImage === true,
             photoGenerationStatus: parsed.photoDescription ? "pending" : undefined,
             visibility,
         });
@@ -371,7 +372,7 @@ async function triggerAIPost(characterId: string): Promise<void> {
         }
 
         if (parsed.photoDescription) {
-            attachMomentPhotoInBackground(post.id, parsed.photoDescription, characterId, parsed.photoUseReferenceImage === true);
+            attachMomentPhotoInBackground(post.id, parsed.photoDescription, characterId, parsed.photoUseReferenceImage === true, parsed.photoUseUserReferenceImage === true);
         }
 
         // Increment event counter for auto-summarization (native data read at summarization time)
@@ -1158,6 +1159,7 @@ export function parseMomentPostResponse(rawText: string): {
     content: string;
     photoDescription?: string;
     photoUseReferenceImage?: boolean;
+    photoUseUserReferenceImage?: boolean;
 } | null {
     const blockMatch = rawText.match(/\[朋友圈\]\s*([\s\S]*?)\s*\[\/朋友圈\]/);
     const text = blockMatch ? blockMatch[1] : rawText;
@@ -1172,6 +1174,10 @@ export function parseMomentPostResponse(rawText: string): {
         : legacyPhotoMatch
             ? /(?:自拍|对镜拍|selfie)/i.test(photoDescription || "")
             : false;
+    // This is the permission gate. The image service reads the bound identity
+    // and decides from the text-model-authored description whether the user is
+    // actually present, so scenery/object photos do not receive the user face.
+    const photoUseUserReferenceImage = Boolean(photoDescription);
 
     const content = text
         .replace(/\[照片[:：]\s*(?:使用参考图|不使用参考图)\s*[:：]\s*[\s\S]*?\]/g, "")
@@ -1181,7 +1187,7 @@ export function parseMomentPostResponse(rawText: string): {
 
     if (!content) return null;
 
-    return { content, photoDescription, photoUseReferenceImage };
+    return { content, photoDescription, photoUseReferenceImage, photoUseUserReferenceImage };
 }
 
 // ── Helpers ──
@@ -1195,6 +1201,7 @@ export function attachMomentPhotoInBackground(
     description: string,
     characterId: string,
     useReferenceImage: boolean,
+    useUserReferenceImage: boolean,
     signal?: AbortSignal,
 ): void {
     void (async () => {
@@ -1202,7 +1209,7 @@ export function attachMomentPhotoInBackground(
         let errorMessage: string | undefined;
         let aborted = false;
         try {
-            photoUrl = await generateMomentPhotoUrl(description, characterId, useReferenceImage, signal);
+            photoUrl = await generateMomentPhotoUrl(description, characterId, useReferenceImage, useUserReferenceImage, signal);
         } catch (error) {
             aborted = isAbortError(error);
             errorMessage = error instanceof Error ? error.message : String(error);
@@ -1228,6 +1235,7 @@ export async function generateMomentPhotoUrl(
     description: string,
     characterId: string,
     useReferenceImage: boolean,
+    useUserReferenceImage: boolean,
     signal?: AbortSignal,
 ): Promise<string | undefined> {
     try {
@@ -1237,6 +1245,7 @@ export async function generateMomentPhotoUrl(
             characterId,
             appId: "moments",
             useReferenceImage,
+            includeUserReferenceImage: useUserReferenceImage ? undefined : false,
             signal,
         });
         throwIfAborted(signal);

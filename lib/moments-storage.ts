@@ -209,13 +209,14 @@ export function toggleMomentLike(
     postId: string,
     authorType: "user" | "character",
     authorId: string,
+    chatAccountId?: string,
 ): boolean {
     const posts = loadMomentPosts();
     const post = posts.find(p => p.id === postId);
     if (!post) return false;
 
     const existingIdx = post.likes.findIndex(
-        l => l.authorType === authorType && l.authorId === authorId
+        l => l.authorType === authorType && l.authorId === authorId && (authorType !== "user" || (l.chatAccountId || undefined) === (chatAccountId || undefined))
     );
 
     if (existingIdx >= 0) {
@@ -226,6 +227,7 @@ export function toggleMomentLike(
         post.likes.push({
             authorType,
             authorId,
+            ...(authorType === "user" && chatAccountId ? { chatAccountId } : {}),
             createdAt: new Date().toISOString(),
         });
         dbPutPost(post);

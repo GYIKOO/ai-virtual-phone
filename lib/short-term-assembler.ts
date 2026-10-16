@@ -42,6 +42,11 @@ import {
     resolvePromptTimeAware,
     type PromptTimestampOptions,
 } from "./prompt-time";
+import { kvGet, kvSet, registerDynamicPrefix } from "./kv-db";
+
+const HIDDEN_SHORT_TERM_MEMORY_PREFIX = "ai_phone_hidden_short_term_memory:";
+const MAX_HIDDEN_SHORT_TERM_KEYS = 12000;
+registerDynamicPrefix(HIDDEN_SHORT_TERM_MEMORY_PREFIX);
 
 function formatPhotoDirectiveForPrompt(msg: ChatMessage): string {
     const description = msg.mediaData?.label?.trim() || "图片";
@@ -84,6 +89,45 @@ export type NativeMomentMeta = {
     photoDescription?: string;
     comments: NativeMomentComment[];
 };
+
+/**
+ * 短期记忆来自各 APP 的真实记录。这里保存“从角色短期记忆中排除”的稳定键，
+ * 只影响记忆页和后续提示词，不会误删原聊天、朋友圈或剧情内容。
+ */
+export function getNativeTimelineEntryKey(entry: NativeTimelineEntry): string {
+    return [
+        entry.sourceApp,
+        entry.sourceDetail ?? "",
+        entry.sessionId ?? "",
+        entry.groupSessionId ?? "",
+        entry.customAppId ?? "",
+        entry.id,
+    ].join(":");
+}
+
+function hiddenShortTermMemoryStorageKey(characterId: string): string {
+    return `${HIDDEN_SHORT_TERM_MEMORY_PREFIX}${characterId}`;
+}
+
+function loadHiddenShortTermMemoryKeys(characterId: string): Set<string> {
+    if (!characterId || typeof window === "undefined") return new Set();
+    try {
+        const parsed = JSON.parse(kvGet(hiddenShortTermMemoryStorageKey(characterId)) || "[]") as unknown;
+        return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []);
+    } catch {
+        return new Set();
+    }
+}
+
+export function hideNativeTimelineEntries(characterId: string, entries: NativeTimelineEntry[]): number {
+    if (!characterId || entries.length === 0 || typeof window === "undefined") return 0;
+    const hidden = loadHiddenShortTermMemoryKeys(characterId);
+    const before = hidden.size;
+    for (const entry of entries) hidden.add(getNativeTimelineEntryKey(entry));
+    const compacted = Array.from(hidden).slice(-MAX_HIDDEN_SHORT_TERM_KEYS);
+    kvSet(hiddenShortTermMemoryStorageKey(characterId), JSON.stringify(compacted));
+    return Math.max(0, hidden.size - before);
+}
 
 /** A single feature's recent data block for prompt injection. */
 export type RecentBlock = {
@@ -789,9 +833,15 @@ export function loadNativeTimeline(
         });
     }
 
+    // 删除短期记忆只建立排除标记，不破坏原 APP 内容；提示词组装也统一经过这里。
+    const hiddenKeys = loadHiddenShortTermMemoryKeys(characterId);
+    const visibleEntries = hiddenKeys.size > 0
+        ? entries.filter(entry => !hiddenKeys.has(getNativeTimelineEntryKey(entry)))
+        : entries;
+
     // Sort by timestamp ascending
-    entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    return entries;
+    visibleEntries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    return visibleEntries;
 }
 
 // Fixed order — lower = further from LLM output (appears higher in prompt)
@@ -1196,7 +1246,7 @@ export function prepareShortTermContext(
 }
 
 function buildNativeTimelineKey(entry: NativeTimelineEntry): string {
-    return [entry.sourceApp, entry.sourceDetail ?? "", entry.groupSessionId ?? "", entry.id].join(":");
+    return getNativeTimelineEntryKey(entry);
 }
 
 export function prepareGroupShortTermContext(

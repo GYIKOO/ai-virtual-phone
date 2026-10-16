@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useSyncExternalStore } from "react";
 import { ChevronLeft } from "lucide-react";
-import { CHAT_MESSAGE_PUSHED_EVENT, loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview } from "@/lib/chat-storage";
+import { CHAT_MESSAGE_PUSHED_EVENT, loadChatSessions, loadChatContacts, ChatSession, createOrGetSession, createGroupSession, pushChatMessage, addChatContact, loadChatMessages, getLastVisibleSessionMessage, getChatMessagePreview, resolveChatCharacterAvatar } from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { Character } from "@/lib/character-types";
 import { resolveUserIdentity, USER_IDENTITIES_UPDATED_EVENT } from "@/lib/settings-storage";
@@ -23,6 +23,16 @@ import {
 } from "@/lib/chat-session-merge";
 import { kvSet } from "@/lib/kv-db";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
+import {
+    CHAT_SCOPE_UPDATED_EVENT,
+    characterMatchesChatScope,
+    groupMatchesChatScope,
+    loadChatScope,
+    resolveChatScopeUserIdentity,
+    sessionMatchesChatScope,
+    type ChatScopeState,
+} from "@/lib/chat-scope-storage";
+import { addChatAltAccountFriend, findChatAltAccount } from "@/lib/chat-alt-account-storage";
 import {
     getMascotLastPreview,
     getMascotChatSnapshot,
@@ -109,15 +119,27 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
     const [mergePrompt, setMergePrompt] = useState<DuplicateSessionGroup[] | null>(null);
     const [mergeSelected, setMergeSelected] = useState<Set<string>>(new Set());
     const [identity, setIdentity] = useState<UserIdentity | null>(null);
+    const [chatScope, setChatScope] = useState<ChatScopeState>(() => loadChatScope());
     const mascotSettings = useSyncExternalStore(subscribeMascotSettings, getMascotSettingsSnapshot, getMascotSettingsSnapshot);
     const mascotChat = useSyncExternalStore(subscribeMascotChat, getMascotChatSnapshot, getMascotChatSnapshot);
     const [mascotAvatarUrl, setMascotAvatarUrl] = useState(mascotSettings.avatarImage || DEFAULT_MASCOT_AVATAR);
 
     useEffect(() => {
-        setIdentity(resolveUserIdentity());
-        const syncIdentity = () => setIdentity(resolveUserIdentity());
+        setIdentity(resolveChatScopeUserIdentity());
+        const syncIdentity = () => {
+            setChatScope(loadChatScope());
+            setIdentity(resolveChatScopeUserIdentity());
+        };
         window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
-        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+        window.addEventListener(CHAT_SCOPE_UPDATED_EVENT, syncIdentity);
+        window.addEventListener("settings-bindings-updated", syncIdentity);
+        window.addEventListener("character-worlds-updated", syncIdentity);
+        return () => {
+            window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+            window.removeEventListener(CHAT_SCOPE_UPDATED_EVENT, syncIdentity);
+            window.removeEventListener("settings-bindings-updated", syncIdentity);
+            window.removeEventListener("character-worlds-updated", syncIdentity);
+        };
     }, []);
 
     useEffect(() => {
@@ -204,7 +226,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                     </div>
                 }
                 rightAction={
-                    <span className="relative" ref={plusMenuRef}>
+                    <span className="relative flex items-center gap-1" ref={plusMenuRef}>
                         <button
                             onClick={() => setShowPlusMenu(!showPlusMenu)}
                             className="page-back-btn"
@@ -278,7 +300,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                 </div>
                 <div className="px-5 pt-2 flex flex-col">
                     {(() => {
-                            const contactIds = new Set(loadChatContacts().map(c => c.characterId));
+                            const altAccount = findChatAltAccount(chatScope.chatAccountId);
+                            const contactIds = new Set(altAccount ? altAccount.friendCharacterIds : loadChatContacts().map(c => c.characterId));
                             const allChars = loadCharacters();
                             const keyword = listFilter.trim().toLowerCase();
                             const showMascot = mascotSettings.chatEnabled
@@ -286,10 +309,14 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                 && (!keyword || (mascotSettings.nickname || "AI助手").toLowerCase().includes(keyword));
                             const regularItems = [...sessions]
                             .filter(s => {
+                                if (!sessionMatchesChatScope(s, chatScope)) return false;
                                 if (!(s.isGroup || contactIds.has(s.contactId))) return false;
-                                // 私货：不按「有无内容」过滤。上游 hasSessionListContent 仍会隐藏一条消息都没有的
-                                // 新会话（建群后删掉系统消息就退出那种），而角色侧该群仍存活，用户找不到入口。
-                                // 空会话的预览与排序已有 updatedAt / getLastNonEmptyPreview 兜底。
+                                if (s.isGroup) {
+                                    if (!groupMatchesChatScope(s.participantIds, chatScope)) return false;
+                                } else if (!characterMatchesChatScope(s.contactId, chatScope)) {
+                                    return false;
+                                }
+
                                 if (listTab === "private" && s.isGroup) return false;
                                 if (listTab === "group" && !s.isGroup) return false;
                                 if (!keyword) return true;
@@ -367,7 +394,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                         className="menu-item"
                                         onClick={() => {
                                             const chars = loadCharacters();
-                                            const found = chars.find(c => c.wechatID === searchQuery.trim() || c.id === searchQuery.trim());
+                                            const found = chars.find(c => (c.wechatID === searchQuery.trim() || c.id === searchQuery.trim()) && characterMatchesChatScope(c.id, chatScope));
                                             setSearchResult(found || null);
                                         }}
                                     >
@@ -383,8 +410,9 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
 
                             {/* 备选：已有角色卡但还不在联系人里，点击直接填入号码 */}
                             {(() => {
-                                const contactIds = new Set(loadChatContacts().map(c => c.characterId));
-                                const candidates = loadCharacters().filter(c => !contactIds.has(c.id));
+                                const altAccount = findChatAltAccount(chatScope.chatAccountId);
+                                const contactIds = new Set(altAccount ? altAccount.friendCharacterIds : loadChatContacts().map(c => c.characterId));
+                                const candidates = loadCharacters().filter(c => !contactIds.has(c.id) && characterMatchesChatScope(c.id, chatScope));
                                 if (candidates.length === 0 && mascotSettings.chatEnabled) return null;
                                 return (
                                     <div className="menu-group" style={{ marginTop: 12 }}>
@@ -421,8 +449,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                                 }}
                                             >
                                                 <div className="add-friend-avatar" style={{ width: 36, height: 36, borderRadius: 8, overflow: "hidden", flexShrink: 0 }}>
-                                                    {c.avatar ? (
-                                                        <img src={c.avatar} className="w-full h-full object-cover" alt="" />
+                                                    {resolveChatCharacterAvatar(c) ? (
+                                                        <img src={resolveChatCharacterAvatar(c)} className="w-full h-full object-cover" alt="" />
                                                     ) : (
                                                         <div className="w-full h-full flex items-center justify-center bg-[var(--c-page-body-bg)] text-[var(--c-icon)]" style={{ fontSize: 14 }}>
                                                             {c.name.slice(0, 1)}
@@ -452,8 +480,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                             <div className="menu-group">
                                 <div className="menu-item !items-start">
                                     <div className="add-friend-avatar">
-                                        {searchResult.avatar ? (
-                                            <img src={searchResult.avatar} className="w-full h-full object-cover" alt="" />
+                                        {resolveChatCharacterAvatar(searchResult) ? (
+                                            <img src={resolveChatCharacterAvatar(searchResult)} className="w-full h-full object-cover" alt="" />
                                         ) : (
                                             <ChatFallbackAvatar />
                                         )}
@@ -495,7 +523,8 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                 <button
                                     onClick={() => {
                                         // 1. Add to contacts
-                                        addChatContact(searchResult.id);
+                                        if (chatScope.chatAccountId) addChatAltAccountFriend(chatScope.chatAccountId, searchResult.id);
+                                        else addChatContact(searchResult.id);
                                         clearRequestsForCharacter(searchResult.id);
                                         dispatchFriendRequestUpdated();
                                         // 2. Create or get session
@@ -505,7 +534,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                                         const isReAdd = loadChatMessages(newSession.id).length > 0;
 
                                         // Resolve character-bound user identity
-                                        const charIdentity = resolveUserIdentity(searchResult.id, "chat");
+                                        const charIdentity = resolveChatScopeUserIdentity(searchResult.id, "chat");
                                         const userName = charIdentity?.name || identity?.name || "你";
 
                                         // 3. Insert system message(s)
@@ -634,7 +663,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
                     onClose={() => setShowGroupCreate(false)}
                     onCreate={(groupName, participantIds, isSpectator) => {
                         const newSession = createGroupSession(groupName, participantIds, { isSpectator });
-                        const userName = resolveUserIdentity()?.name ?? "用户";
+                                        const userName = resolveChatScopeUserIdentity(undefined, "group_chat")?.name ?? "用户";
                         const allChars = loadCharacters();
                         const memberNames = participantIds
                             .map(id => allChars.find(c => c.id === id)?.name ?? "未知")
@@ -657,7 +686,7 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
 
             {/* User Profile Panel */}
             {showUserProfile && (
-                <UserProfilePanel onClose={() => { setShowUserProfile(false); setIdentity(resolveUserIdentity()); }} className="absolute inset-0 z-[100]" />
+                <UserProfilePanel onClose={() => { setShowUserProfile(false); setIdentity(resolveChatScopeUserIdentity()); }} className="absolute inset-0 z-[100]" />
             )}
         </div>
     );
@@ -710,12 +739,16 @@ function MascotSessionItem({
 }
 
 function ContactPicker({ onClose, onSelect }: { onClose: () => void; onSelect: (charId: string) => void }) {
-    const contacts = loadChatContacts();
+    const currentScope = loadChatScope();
+    const altAccount = findChatAltAccount(currentScope.chatAccountId);
+    const contacts = altAccount
+        ? altAccount.friendCharacterIds.map(characterId => ({ id: `alt-contact:${altAccount.id}:${characterId}`, characterId, addedAt: altAccount.createdAt }))
+        : loadChatContacts();
     const chars = loadCharacters();
 
     const enrichedContacts = contacts
         .map(c => ({ ...c, char: chars.find(ch => ch.id === c.characterId) }))
-        .filter(c => c.char) as (typeof contacts[number] & { char: Character })[];
+        .filter(c => c.char && characterMatchesChatScope(c.characterId, currentScope)) as (typeof contacts[number] & { char: Character })[];
 
     return (
         <div className="modal-overlay" onClick={onClose}>
@@ -732,8 +765,8 @@ function ContactPicker({ onClose, onSelect }: { onClose: () => void; onSelect: (
                                 onClick={() => onSelect(c.characterId)}
                             >
                                 <div className="chat-contact-avatar">
-                                    {c.char.avatar ? (
-                                        <img src={c.char.avatar} alt="" />
+                                    {resolveChatCharacterAvatar(c.char) ? (
+                                        <img src={resolveChatCharacterAvatar(c.char)} alt="" />
                                     ) : (
                                         <ChatFallbackAvatar />
                                     )}
@@ -769,7 +802,7 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
             ...((session.participantIds || [])
                 .map(id => chars.find(c => c.id === id))
                 .filter(Boolean) as Character[])
-                .map(c => ({ id: c.id, name: c.name, avatar: c.avatar || "" })),
+                .map(c => ({ id: c.id, name: c.name, avatar: resolveChatCharacterAvatar(c) })),
         ].slice(0, 4)
         : [];
 
@@ -795,8 +828,8 @@ function SessionItem({ session, onSelect, isPinned }: { session: ChatSession, on
                 </div>
             ) : (
                 <div className="minimal-avatar-wrapper">
-                    {character?.avatar ? (
-                        <img src={character.avatar} className="w-full h-full object-cover pointer-events-none rounded-full" alt="" />
+                    {resolveChatCharacterAvatar(character) ? (
+                        <img src={resolveChatCharacterAvatar(character)} className="w-full h-full object-cover pointer-events-none rounded-full" alt="" />
                     ) : (
                         <ChatFallbackAvatar className="pointer-events-none rounded-full" />
                     )}

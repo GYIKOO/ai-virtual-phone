@@ -7,10 +7,15 @@ import {
     saveFollowUpConfig,
     getDefaultFollowUpConfig,
     loadUserIdentities,
-    resolveUserIdentity,
     saveUserIdentities,
     USER_IDENTITIES_UPDATED_EVENT,
 } from "@/lib/settings-storage";
+import {
+    CHAT_SCOPE_UPDATED_EVENT,
+    characterMatchesChatScope,
+    loadChatScope,
+    resolveChatScopeUserIdentity,
+} from "@/lib/chat-scope-storage";
 import { fileToUserAvatarDataUrl } from "@/lib/user-avatar-image";
 import { loadChatAppSettings, saveChatAppSettings } from "@/lib/chat-storage";
 import type { UserIdentity } from "@/components/settings/user-identity";
@@ -27,7 +32,7 @@ import { GlobalChatInfoSettings } from "./global-chat-info-settings";
 import { ProactiveManager } from "./proactive-manager";
 import { WalletPanel } from "./wallet-panel";
 import { loadMomentsConfig, saveMomentsConfig, DEFAULT_MOMENTS_CONFIG, type MomentsInteractionConfig, getAllPosts } from "@/lib/moments-storage";
-import { loadChatContacts } from "@/lib/chat-storage";
+import { loadChatContacts, resolveChatCharacterAvatar } from "@/lib/chat-storage";
 import { loadCharacters } from "@/lib/character-storage";
 import { triggerImmediatePost } from "@/lib/moments-engine";
 import type { Character } from "@/lib/character-types";
@@ -43,6 +48,8 @@ import { addChatContact, createOrGetSession } from "@/lib/chat-storage";
 import { kvGet, kvSet, kvRemove } from "@/lib/kv-db";
 import { formatWalletAmount, getWalletBalance, loadWalletState, WALLET_UPDATED_EVENT } from "@/lib/wallet-storage";
 import { ChatFallbackAvatar } from "./chat-fallback-avatar";
+import { ChatScopeSwitcher } from "./chat-scope-switcher";
+import { findChatAltAccount } from "@/lib/chat-alt-account-storage";
 import {
     Loader2,
     Bell,
@@ -155,6 +162,23 @@ function isBrowserNotificationGranted(): boolean {
     return isNotificationPermissionGranted();
 }
 
+function readScopedUserStats() {
+    const scope = loadChatScope();
+    const altAccount = findChatAltAccount(scope.chatAccountId);
+    const contactsCount = (altAccount
+        ? altAccount.friendCharacterIds
+        : loadChatContacts().map(contact => contact.characterId))
+        .filter(characterId => characterMatchesChatScope(characterId, scope)).length;
+    const userPostsCount = getAllPosts().filter(post => post.authorType === "user"
+        && (post.chatAccountId || null) === scope.chatAccountId
+        && (Boolean(scope.chatAccountId) || !scope.userIdentityId || !post.userIdentityId || post.userIdentityId === scope.userIdentityId)).length;
+    return {
+        chats: contactsCount,
+        moments: userPostsCount,
+        visitors: 1234 + contactsCount * 17 + userPostsCount * 43,
+    };
+}
+
 /* ══════════════════════════════════════════
    Main export
    ══════════════════════════════════════════ */
@@ -187,7 +211,7 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
     });
 
     useEffect(() => {
-        setIdentity(resolveUserIdentity());
+        setIdentity(resolveChatScopeUserIdentity());
         const settings = loadChatAppSettings();
         const browserGranted = isBrowserNotificationGranted();
         setNotifEnabled(settings.browserNotificationsEnabled === true && browserGranted);
@@ -204,35 +228,37 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
         });
 
         // Fetch dynamic user stats
-        try {
-            const contactsCount = loadChatContacts().length;
-            const userPostsCount = getAllPosts().filter(p => p.authorType === "user").length;
-            setUserStats({
-                chats: contactsCount,
-                moments: userPostsCount,
-                visitors: 1234 + contactsCount * 17 + userPostsCount * 43 // simple deterministic mock equation
-            });
-        } catch (e) { }
+        try { setUserStats(readScopedUserStats()); } catch { }
     }, []);
 
     useEffect(() => {
-        const syncIdentity = () => setIdentity(resolveUserIdentity());
+        const syncIdentity = () => {
+            setIdentity(resolveChatScopeUserIdentity());
+            try { setUserStats(readScopedUserStats()); } catch { }
+        };
         window.addEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
-        return () => window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+        window.addEventListener(CHAT_SCOPE_UPDATED_EVENT, syncIdentity);
+        return () => {
+            window.removeEventListener(USER_IDENTITIES_UPDATED_EVENT, syncIdentity);
+            window.removeEventListener(CHAT_SCOPE_UPDATED_EVENT, syncIdentity);
+        };
     }, []);
 
     const handleProfileAvatarChange = async (file?: File) => {
         if (!file) return;
-        const currentIdentity = resolveUserIdentity();
+        const currentIdentity = resolveChatScopeUserIdentity();
         if (!currentIdentity) {
             window.alert("请先在设置的“用户信息”中创建用户身份");
             return;
         }
         try {
             const avatarUrl = await fileToUserAvatarDataUrl(file);
+            const currentScope = loadChatScope();
+            const altAccount = findChatAltAccount(currentScope.chatAccountId);
+            const targetIdentityId = altAccount?.userIdentityId || currentIdentity.id;
             const identities = loadUserIdentities();
             saveUserIdentities(identities.map(item => (
-                item.id === currentIdentity.id ? { ...item, avatarUrl } : item
+                item.id === targetIdentityId ? { ...item, avatarUrl } : item
             )));
         } catch (error) {
             console.error("更新用户资料头像失败", error);
@@ -380,7 +406,12 @@ export function UserProfilePanel({ onClose, className }: UserProfilePanelProps) 
                     display: none;
                 }
             `}</style>
-            <PageShell title="" onBack={onClose} className={`user-profile-page-root ${className || ""}`}>
+            <PageShell
+                title=""
+                onBack={onClose}
+                rightAction={<ChatScopeSwitcher />}
+                className={`user-profile-page-root ${className || ""}`}
+            >
                 <div className="relative z-[1] w-full max-w-2xl mx-auto flex flex-col pb-8">
                     
                     {/* User Info & Stats Block */}
@@ -632,6 +663,7 @@ function ChatCSSEditor({ onBack }: { onBack: () => void }) {
 function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
     const defaults = getDefaultFollowUpConfig();
     const [config, setConfig] = useState<FollowUpConfig>(defaults);
+    const characters = loadCharacters();
 
     useEffect(() => {
         setConfig(loadFollowUpConfig());
@@ -652,6 +684,38 @@ function FollowUpSettingsEditor({ onBack }: { onBack: () => void }) {
         <PageShell title="追发规则" onBack={onBack} className="absolute inset-0 z-[100]">
             <div className="page-menu profile-settings-menu">
                 <p className="menu-group-desc mx-2">角色的人设倾向与本轮跟进意愿共同决定是否追发。这里只调整全局边界，不改变角色的人设。次数上限为0时关闭新版追发。</p>
+                <div className="menu-group">
+                    <div className="menu-item">
+                        <ProfileSettingsIcon icon={MessageSquare} color={CONTENT_APP_ACCENTS.chat} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">关闭角色追发消息</span>
+                            <span className="menu-desc">开启后所有角色默认不再追发</span>
+                        </div>
+                        <Toggle checked={config.disableAllCharacters} onChange={value => updateConfig({ disableAllCharacters: value })} />
+                    </div>
+                    {config.disableAllCharacters && characters.map(character => {
+                        const allowed = config.allowCharacterIds.includes(character.id);
+                        return (
+                            <div className="menu-item" key={character.id}>
+                                <div className="h-9 w-9 shrink-0 overflow-hidden rounded-full bg-[var(--c-input)]">
+                                    {resolveChatCharacterAvatar(character) ? <img src={resolveChatCharacterAvatar(character)} alt="" className="h-full w-full object-cover" /> : <ChatFallbackAvatar />}
+                                </div>
+                                <div className="menu-label-group">
+                                    <span className="menu-label">{character.name || "未命名角色"}</span>
+                                    <span className="menu-desc">{allowed ? "例外：允许追发" : "跟随全局：关闭追发"}</span>
+                                </div>
+                                <Toggle
+                                    checked={allowed}
+                                    onChange={value => updateConfig({
+                                        allowCharacterIds: value
+                                            ? Array.from(new Set([...config.allowCharacterIds, character.id]))
+                                            : config.allowCharacterIds.filter(id => id !== character.id),
+                                    })}
+                                />
+                            </div>
+                        );
+                    })}
+                </div>
                 <p className="menu-group-desc mx-2">
                     跟进意愿越高，等待通常越短；克制的角色门槛更高、等待更久。实际等待保持在设置的范围内，免打扰可能使发送顺延。没有本轮明确输出的数值时不追发。
                 </p>
@@ -1200,7 +1264,7 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                         <div key={c.characterId}>
                             <div className="menu-item" style={{ cursor: "default" }}>
                                 <div className="chat-contact-avatar" style={{ width: 32, height: 32 }}>
-                                    {c.char.avatar ? <img src={c.char.avatar} alt="" /> : <ChatFallbackAvatar />}
+                                    {resolveChatCharacterAvatar(c.char) ? <img src={resolveChatCharacterAvatar(c.char)} alt="" /> : <ChatFallbackAvatar />}
                                 </div>
                                 <div className="menu-label-group">
                                     <span className="menu-label">{c.char.name}</span>
@@ -1242,8 +1306,8 @@ function InlineMomentsSettings({ onBack }: { onBack: () => void }) {
                                     <div className="chat-contact-avatar"
                                         style={selectedIds.has(c.characterId) ? { outline: "3px solid var(--c-success)", outlineOffset: "2px" } : undefined}
                                     >
-                                        {c.char.avatar ? (
-                                            <img src={c.char.avatar} alt="" />
+                                        {resolveChatCharacterAvatar(c.char) ? (
+                                            <img src={resolveChatCharacterAvatar(c.char)} alt="" />
                                         ) : (
                                             <ChatFallbackAvatar />
                                         )}

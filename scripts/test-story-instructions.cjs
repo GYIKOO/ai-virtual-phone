@@ -35,8 +35,12 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
 
 (async () => {
   let captured, contextOptions, schemes = {}, saved = [user, director, reply];
+  let disabledMarkers = new Set();
+  const participantContexts = [];
   const engine = load('lib/story-engine.ts', {
     './story-tag-settings': load('lib/story-tag-settings.ts'),
+    './prompt-time': { formatPromptTimestamp: () => '2026-10-15T12:00:00Z' },
+    './character-world-storage': { formatCharacterRelationsForPrompt: () => '' },
     './story-instructions': instructions,
     './story-constraints': constraints,
     './character-storage': { loadCharacters: () => [{ id: 'char', name: '角色' }, { id: 'other', name: '配角' }] },
@@ -44,11 +48,12 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
       loadBindingConfig: () => ({ characterBindings: [] }), resolveBinding: () => ({ apiConfigId: 'api', presetId: 'p' }),
       loadApiConfigs: () => [{ id: 'api' }], loadPresets: () => [{ id: 'p' }], loadRegexes: () => [], loadWorldBooks: () => [], resolveUserIdentity: () => ({ name: 'user' }),
     },
-    './llm-prompt-assembler': { assemblePromptPayload: ({ history }) => history.map(m => ({ role: m.role, content: m.content })) },
+    './llm-prompt-assembler': { isContextMarkerEnabled: (_p, id) => !disabledMarkers.has(id), assemblePromptPayload: ({ history }) => history.map(m => ({ role: m.role, content: m.content })) },
     './chat-engine': { ChatEngineError: Error, previewMessagesForApi: (_c, _p, messages) => messages, sendLLMRequestPreferStream: async (_c, _p, messages) => { captured = messages; return '<content>正文</content><summary>事件</summary>'; } },
     './memory-storage': { loadMemoryConfig: () => ({}) },
-    './memory-service': { retrieveCoreMemoriesForPrompt: async () => null, retrieveMemoriesForPrompt: async () => null },
-    './short-term-assembler': { prepareShortTermContext: (_c, _a, options) => { contextOptions = options; return { truncatedHistory: options.history, recentBlocks: [], unifiedRecentItems: [], wbActivationContext: '' }; } },
+    './memory-service': { retrieveCoreMemoriesForPrompt: async id => `CORE_${id}`, retrieveMemoriesForPrompt: async id => `LONG_${id}` },
+    './memory-injector': { formatCoreMemories: value => value, formatLongTermMemories: value => value },
+    './short-term-assembler': { prepareShortTermContext: (id, _a, options) => { contextOptions = options; participantContexts.push({ id, options }); return { truncatedHistory: options.history, recentBlocks: [{ tag: 'events', content: `RECENT_${id}` }], unifiedRecentItems: [], wbActivationContext: '' }; } },
     './calendar-storage': { buildCalendarScheduleMarker: () => '', getCurrentCalendarScheduleForPrompt: () => '' },
     './calendar-utils': { getWeekStartIso: () => '' },
     './story-parser': { parseStoryResponse: rawText => ({ rawText, renderedText: '正文', summaryText: '事件' }) },
@@ -109,6 +114,22 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   assert.match(combined(), /配角/);
   assert.ok(!combined().includes('不要代替用户'));
   assert.ok(!combined().includes('语音清单'));
+  for (const id of ['char', 'other']) {
+    assert.ok(combined().includes(`RECENT_${id}`), 'all ensemble participants contribute recent events');
+    assert.ok(combined().includes(`CORE_${id}`), 'all ensemble participants contribute core memory');
+    assert.ok(combined().includes(`LONG_${id}`), 'all ensemble participants contribute long-term memory');
+    assert.ok(participantContexts.findLast(item => item.id === id).options.excludeStoryMessageIds.includes('a'), 'each participant excludes current-page projections and retry suffixes');
+  }
+  disabledMarkers = new Set(['shortTermMemory', 'chatHistory', 'memoryCore', 'memoryLongTerm']);
+  await engine.generateStoryCompletion('char', saved, { participantIds: ['char', 'other'], settings: {} });
+  assert.ok(!combined().includes('RECENT_'), 'disabled recent markers are not reinjected by the ensemble roster');
+  assert.ok(!combined().includes('CORE_') && !combined().includes('LONG_'), 'disabled memory markers remain absent');
+  disabledMarkers.clear();
+  const beforeIndependent = participantContexts.length;
+  await engine.generateStoryCompletion('char', saved, { participantIds: ['char', 'other'], storyMemory: { independent: true }, settings: {} });
+  assert.ok(!combined().includes('RECENT_'));
+  assert.ok(!combined().includes('CORE_') && !combined().includes('LONG_'), 'independent stories have no mainline core or long-term memory');
+  assert.equal(participantContexts.length, beforeIndependent, 'independent stories never query native recent memory');
   await engine.generateStoryCompletion('char', saved, { settings: { preventUserControl: true, enforceVoiceFormat: true } });
   assert.match(combined(), /不要代替用户/);
   assert.match(combined(), /语音清单/);

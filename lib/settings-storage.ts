@@ -703,6 +703,7 @@ export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
         presets: [DEFAULT_NOVELAI_PRESET],
     },
     characterReferences: {},
+    userReferences: {},
     imageHosting: {
         provider: "none",
         imgbbApiKey: "",
@@ -758,8 +759,48 @@ function normalizeImageGenerationSettings(settings: Partial<ImageGenerationSetti
             assetId: typeof rawRef.assetId === "string" && rawRef.assetId ? rawRef.assetId : undefined,
             updatedAt: typeof rawRef.updatedAt === "number" ? rawRef.updatedAt : Date.now(),
             featurePrompt: typeof rawRef.featurePrompt === "string" ? rawRef.featurePrompt : "",
+            novelAiFeaturePromptEnabled: rawRef.novelAiFeaturePromptEnabled !== false,
             enabled: rawRef.enabled !== false,
             selfieOnly: rawRef.selfieOnly !== false,
+            faceCrop: crop && typeof crop.x === "number" && typeof crop.y === "number"
+                ? {
+                    x: Math.max(0, Math.min(1, crop.x)),
+                    y: Math.max(0, Math.min(1, crop.y)),
+                    size,
+                }
+                : { x: 0.27, y: 0.12, size: 0.46 },
+            anchors: Array.isArray(rawRef.anchors)
+                ? rawRef.anchors.flatMap((anchor, index) => {
+                    if (!anchor || typeof anchor !== "object") return [];
+                    const category = anchor.category === "accessory" || anchor.category === "clothing"
+                        || anchor.category === "feature" || anchor.category === "other"
+                        ? anchor.category
+                        : "other";
+                    return [{
+                        id: typeof anchor.id === "string" && anchor.id ? anchor.id : `anchor_${characterId}_${index}`,
+                        name: typeof anchor.name === "string" ? anchor.name : "未命名锚点",
+                        category,
+                        description: typeof anchor.description === "string" ? anchor.description : "",
+                        assetId: typeof anchor.assetId === "string" && anchor.assetId ? anchor.assetId : undefined,
+                        enabled: anchor.enabled !== false,
+                        updatedAt: typeof anchor.updatedAt === "number" ? anchor.updatedAt : Date.now(),
+                    }];
+                })
+                : [],
+        };
+    }
+    const rawUserRefs = settings?.userReferences && typeof settings.userReferences === "object"
+        ? settings.userReferences
+        : {};
+    const userReferences: NonNullable<ImageGenerationSettings["userReferences"]> = {};
+    for (const [identityId, rawRef] of Object.entries(rawUserRefs)) {
+        if (!rawRef || typeof rawRef !== "object") continue;
+        const crop = rawRef.faceCrop;
+        const size = crop && typeof crop.size === "number" ? Math.max(0.18, Math.min(1, crop.size)) : 0.46;
+        userReferences[identityId] = {
+            assetId: typeof rawRef.assetId === "string" && rawRef.assetId ? rawRef.assetId : undefined,
+            updatedAt: typeof rawRef.updatedAt === "number" ? rawRef.updatedAt : Date.now(),
+            enabled: rawRef.enabled !== false,
             faceCrop: crop && typeof crop.x === "number" && typeof crop.y === "number"
                 ? {
                     x: Math.max(0, Math.min(1, crop.x)),
@@ -837,6 +878,7 @@ function normalizeImageGenerationSettings(settings: Partial<ImageGenerationSetti
         activeOpenAiPresetId,
         novelai,
         characterReferences: refs,
+        userReferences,
         imageHosting: {
             ...DEFAULT_IMAGE_GENERATION_SETTINGS.imageHosting,
             ...hosting,
@@ -1123,6 +1165,9 @@ type LegacyOverride = {
 export type FollowUpConfig = {
     followUpFieldName: string;  // New scheduler: independent of legacy anxiety state.
     maxConsecutive: number;
+    /** 开启后默认关闭所有角色追发，仅 allowCharacterIds 中的角色例外。 */
+    disableAllCharacters: boolean;
+    allowCharacterIds: string[];
     prompt: string;              // 追发提示词，支持 {{count}} {{delay}} 占位符
     anxietyThreshold: number;    // 触发阈值（默认 50，0-100）
     anxietyFieldName: string;    // 状态值字段名（默认 "焦虑值"）
@@ -1141,6 +1186,8 @@ const DEFAULT_FOLLOW_UP_PROMPT = `你已经在未收到{{user}}回复的情况�
 
 export function getDefaultFollowUpConfig(): FollowUpConfig {
     return {
+        disableAllCharacters: false,
+        allowCharacterIds: [],
         prompt: DEFAULT_FOLLOW_UP_PROMPT,
         anxietyThreshold: 50,
         anxietyFieldName: "焦虑值",
@@ -1165,6 +1212,10 @@ export function loadFollowUpConfig(): FollowUpConfig {
         const parsed = JSON.parse(raw) as Partial<FollowUpConfig>;
         const defaults = getDefaultFollowUpConfig();
         return {
+            disableAllCharacters: parsed.disableAllCharacters === true,
+            allowCharacterIds: Array.isArray(parsed.allowCharacterIds)
+                ? Array.from(new Set(parsed.allowCharacterIds.filter((id): id is string => typeof id === "string" && !!id.trim()).map(id => id.trim())))
+                : defaults.allowCharacterIds,
             prompt: typeof parsed.prompt === "string" && parsed.prompt.trim() ? parsed.prompt : defaults.prompt,
             anxietyThreshold: typeof parsed.anxietyThreshold === "number" ? Math.max(0, Math.min(100, parsed.anxietyThreshold)) : defaults.anxietyThreshold,
             anxietyFieldName: typeof parsed.anxietyFieldName === "string" && parsed.anxietyFieldName.trim() ? parsed.anxietyFieldName : defaults.anxietyFieldName,

@@ -316,6 +316,7 @@ async function dispatchMomentsPost(action: ActionTag, context: ActionContext): P
         content: parsed.content,
         photoDescription: parsed.photoDescription,
         photoUseReferenceImage: parsed.photoUseReferenceImage === true,
+        photoUseUserReferenceImage: parsed.photoUseUserReferenceImage === true,
         photoGenerationStatus: parsed.photoDescription ? "pending" : undefined,
         visibility,
     });
@@ -325,7 +326,7 @@ async function dispatchMomentsPost(action: ActionTag, context: ActionContext): P
     }
 
     if (parsed.photoDescription) {
-        attachMomentPhotoInBackground(post.id, parsed.photoDescription, context.characterId, parsed.photoUseReferenceImage === true, context.signal);
+        attachMomentPhotoInBackground(post.id, parsed.photoDescription, context.characterId, parsed.photoUseReferenceImage === true, parsed.photoUseUserReferenceImage === true, context.signal);
     }
 
     console.log(`[ActionParser] Created moments post from ${context.sourceEngine} engine`);

@@ -65,6 +65,11 @@ export function loadCharacters(): Character[] {
         char.avatar = null;
         needsSave = true;
       }
+      if (char.chatAvatar && !char.chatAvatar.startsWith("data:") && !char.chatAvatar.startsWith("http://") && !char.chatAvatar.startsWith("https://")) {
+        char.chatAvatar = null;
+        char.chatAvatarEnabled = false;
+        needsSave = true;
+      }
       return char as Character;
     });
 

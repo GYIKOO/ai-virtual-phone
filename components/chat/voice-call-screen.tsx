@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, type CSSProperties } from "react";
-import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues, updateChatMessage, deleteChatMessage } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues, resolveChatCharacterAvatar, updateChatMessage, deleteChatMessage } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
@@ -1043,7 +1043,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     if (minimized) {
         return (
             <CallMiniWindow
-                imageUrl={bgImageResolved || character.avatar || null}
+                imageUrl={bgImageResolved || resolveChatCharacterAvatar(character) || null}
                 title={character.name}
                 meta={[callState === "ENDED" ? "通话已结束" : "语音通话", formatTime(callDuration)]}
                 ariaLabel={`返回与${character.name}的语音通话`}
@@ -1130,7 +1130,6 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                     <button
                         type="button"
                         aria-label="自动搭话设置"
-                        title="拖动可移动 · 点一下展开设置"
                         title={
                             autoChatConfig.enabled
                                 ? `自动搭话：静默 ${autoChatConfig.minSeconds}~${autoChatConfig.maxSeconds} 秒随机开口`
@@ -1262,9 +1261,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                             className="voicecall-avatar"
                             {...(callState === "AI_SPEAKING" ? { "data-speaking": "" } : {})}
                         >
-                            {character.avatar ? (
+                            {resolveChatCharacterAvatar(character) ? (
                                 <img
-                                    src={character.avatar}
+                                    src={resolveChatCharacterAvatar(character)}
                                     alt={character.name}
                                     className="w-full h-full object-cover"
                                 />

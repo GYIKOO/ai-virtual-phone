@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, updateChatMessage, deleteChatMessage, getLatestCharacterStateValues, resolveChatUserAvatar } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, updateChatMessage, deleteChatMessage, getLatestCharacterStateValues, resolveChatCharacterAvatar, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import type { StateValue } from "@/lib/chat-storage";
 import { parseStateValues, mergeStateValues } from "@/lib/state-value-parser";
@@ -867,7 +867,7 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
     if (minimized) {
         return (
             <CallMiniWindow
-                imageUrl={bgImageResolved || character.avatar || null}
+                imageUrl={bgImageResolved || resolveChatCharacterAvatar(character) || null}
                 title={character.name}
                 meta={["视频通话", formatTime(callDuration)]}
                 ariaLabel={`返回与${character.name}的视频通话`}
@@ -907,8 +907,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 style={{
                     backgroundImage: bgImageResolved
                         ? `url(${bgImageResolved})`
-                        : character.avatar
-                            ? `url(${character.avatar})`
+                        : resolveChatCharacterAvatar(character)
+                            ? `url(${resolveChatCharacterAvatar(character)})`
                             : "linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%)",
                 }}
             />
@@ -937,9 +937,9 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                             <span className="ts-60 text-[var(--c-icon)]">{userNameRef.current?.[0] || "?"}</span>
                         </div>
                     )
-                ) : character.avatar ? (
+                ) : resolveChatCharacterAvatar(character) ? (
                     <img
-                        src={character.avatar}
+                        src={resolveChatCharacterAvatar(character)}
                         alt={character.name}
                         className="w-full h-full object-cover transition-opacity duration-500 ease-in-out"
                         style={{
@@ -962,8 +962,8 @@ export function VideoCallScreen({ session, character, onEnd, onConnect, initiato
                 title="点击切换大小画面"
             >
                 {pipSwapped ? (
-                    character.avatar ? (
-                        <img src={character.avatar} alt={character.name} className="w-full h-full object-cover" />
+                    resolveChatCharacterAvatar(character) ? (
+                        <img src={resolveChatCharacterAvatar(character)} alt={character.name} className="w-full h-full object-cover" />
                     ) : (
                         <span className="ts-18 text-[var(--c-icon)]">{character.name?.[0] || "?"}</span>
                     )

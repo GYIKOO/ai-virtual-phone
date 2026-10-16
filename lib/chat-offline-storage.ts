@@ -3,7 +3,9 @@ import { formatChatTimestamp } from "./llm-prompt-assembler";
 import { kvGet, kvRemove, kvSet, registerDynamicPrefix } from "./kv-db";
 
 const CHAT_OFFLINE_TURNS_PREFIX = "ai_phone_chat_offline_turns:";
+const CHAT_OFFLINE_MIGRATED_SUMMARIES_PREFIX = "ai_phone_chat_offline_migrated_summaries:";
 registerDynamicPrefix(CHAT_OFFLINE_TURNS_PREFIX);
+registerDynamicPrefix(CHAT_OFFLINE_MIGRATED_SUMMARIES_PREFIX);
 
 export type ChatOfflineTurn = {
     id: string;
@@ -38,6 +40,44 @@ export type ParsedOfflineResponse = {
 
 function storageKey(sessionId: string): string {
     return `${CHAT_OFFLINE_TURNS_PREFIX}${sessionId}`;
+}
+
+function migratedSummaryKey(sessionId: string): string {
+    return `${CHAT_OFFLINE_MIGRATED_SUMMARIES_PREFIX}${sessionId}`;
+}
+
+function loadMigratedSummaryEntries(sessionId: string): ChatOfflineProjectionEntry[] {
+    try {
+        const parsed = JSON.parse(kvGet(migratedSummaryKey(sessionId)) || "[]") as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter((item): item is ChatOfflineProjectionEntry => Boolean(
+            item && typeof item === "object"
+            && typeof (item as ChatOfflineProjectionEntry).id === "string"
+            && typeof (item as ChatOfflineProjectionEntry).timestamp === "string"
+            && typeof (item as ChatOfflineProjectionEntry).content === "string",
+        ));
+    } catch {
+        return [];
+    }
+}
+
+/** 清空旧线下正文前，把已有摘要转成独立的短期事件投影。 */
+export function preserveChatOfflineSummaries(sessionId: string): number {
+    const existing = loadMigratedSummaryEntries(sessionId);
+    const known = new Set(existing.map((item) => item.id));
+    const additions = loadChatOfflineTurns(sessionId).flatMap((turn): ChatOfflineProjectionEntry[] => {
+        const summaryText = compactProjectionText(turn.summary, 500);
+        const id = `chat_offline_migrated_${turn.id}`;
+        if (!summaryText || known.has(id)) return [];
+        return [{
+            id,
+            sessionId,
+            timestamp: turn.createdAt,
+            content: `[事件 ${formatChatTimestamp(turn.createdAt)}] ${summaryText}`,
+        }];
+    });
+    if (additions.length) kvSet(migratedSummaryKey(sessionId), JSON.stringify([...existing, ...additions]));
+    return additions.length;
 }
 
 function createTurnId(): string {
@@ -192,6 +232,7 @@ export function loadChatOfflineProjectionEntries(
 
     const entries: ChatOfflineProjectionEntry[] = [];
     for (const session of sessions) {
+        entries.push(...loadMigratedSummaryEntries(session.id));
         for (const turn of loadChatOfflineTurns(session.id)) {
             if (options?.afterTimestamp && turn.createdAt <= options.afterTimestamp) continue;
             const summaryText = compactProjectionText(turn.summary, 500);

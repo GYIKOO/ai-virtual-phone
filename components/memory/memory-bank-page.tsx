@@ -22,7 +22,7 @@ import {
     getLastCoreSummarizedTimestamp,
 } from "@/lib/memory-storage";
 import { hydrateChatStorage } from "@/lib/chat-storage";
-import { loadNativeTimeline, type NativeTimelineEntry } from "@/lib/short-term-assembler";
+import { hideNativeTimelineEntries, loadNativeTimeline, type NativeTimelineEntry } from "@/lib/short-term-assembler";
 import { runSummarizationPipeline } from "@/lib/memory-summarizer";
 import { runCoreMemoryPipeline } from "@/lib/core-memory-builder";
 import { resolveAuxiliaryApiConfig, resolveUserIdentity } from "@/lib/settings-storage";
@@ -184,7 +184,8 @@ type Props = {
     onNotice?: (msg: string) => void;
     filterOpen?: boolean;
     onFilterOpenChange?: (open: boolean) => void;
-    onFilterStateChange?: (state: { visible: boolean; activeCount: number }) => void;
+    onFilterStateChange?: (state: { visible: boolean; activeCount: number; bulkDeleteVisible: boolean; bulkSelecting: boolean }) => void;
+    bulkDeleteRequest?: number;
 };
 
 export function MemoryBankPage({
@@ -195,6 +196,7 @@ export function MemoryBankPage({
     filterOpen = false,
     onFilterOpenChange,
     onFilterStateChange,
+    bulkDeleteRequest = 0,
 }: Props) {
     const [config, setConfig] = useState<MemoryConfig>(loadMemoryConfig);
     const [characters, setCharacters] = useState<CharacterMemoryInfo[]>([]);
@@ -218,6 +220,9 @@ export function MemoryBankPage({
     const [summarizeRangeOpen, setSummarizeRangeOpen] = useState(false);
     const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
     const [activeTimelineTags, setActiveTimelineTags] = useState<Set<string>>(new Set());
+    const [bulkSelectMode, setBulkSelectMode] = useState(false);
+    const [selectedTimelineIds, setSelectedTimelineIds] = useState<Set<string>>(new Set());
+    const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
 
     const disabledSourceCount = MEMORY_SOURCE_OPTIONS
         .filter(source => (config.shortTermAllowedSources ?? {})[source.key] === false).length;
@@ -241,11 +246,26 @@ export function MemoryBankPage({
     const timelineFilterVisible = view === "detail" && (activeTab === "short" || activeTab === "shared");
 
     useEffect(() => {
-        onFilterStateChange?.({ visible: timelineFilterVisible, activeCount: activeTimelineTags.size });
-    }, [activeTimelineTags.size, onFilterStateChange, timelineFilterVisible]);
+        onFilterStateChange?.({
+            visible: timelineFilterVisible,
+            activeCount: activeTimelineTags.size,
+            bulkDeleteVisible: timelineFilterVisible && filterEvents.length > 0,
+            bulkSelecting: bulkSelectMode,
+        });
+    }, [activeTimelineTags.size, bulkSelectMode, filterEvents.length, onFilterStateChange, timelineFilterVisible]);
+
+    useEffect(() => {
+        if (!bulkDeleteRequest || !timelineFilterVisible || filterEvents.length === 0) return;
+        setBulkSelectMode(true);
+        setSelectedTimelineIds(new Set());
+        onFilterOpenChange?.(false);
+    }, [bulkDeleteRequest, filterEvents.length, onFilterOpenChange, timelineFilterVisible]);
 
     useEffect(() => {
         setActiveTimelineTags(new Set());
+        setBulkSelectMode(false);
+        setSelectedTimelineIds(new Set());
+        setConfirmBulkDelete(false);
         onFilterOpenChange?.(false);
     }, [activeTab, onFilterOpenChange, selectedCharId]);
 
@@ -368,6 +388,33 @@ export function MemoryBankPage({
         else setLongTermEntries([]);
         loadCharacterList();
     };
+
+    const toggleTimelineCluster = useCallback((eventIds: string[]) => {
+        setSelectedTimelineIds(previous => {
+            const next = new Set(previous);
+            const allSelected = eventIds.every(id => next.has(id));
+            for (const id of eventIds) {
+                if (allSelected) next.delete(id);
+                else next.add(id);
+            }
+            return next;
+        });
+    }, []);
+
+    const cancelBulkSelect = useCallback(() => {
+        setBulkSelectMode(false);
+        setSelectedTimelineIds(new Set());
+        setConfirmBulkDelete(false);
+    }, []);
+
+    const handleBulkDeleteTimeline = useCallback(() => {
+        if (!selectedCharId || selectedTimelineIds.size === 0) return;
+        const selectedEntries = filterEvents.filter(event => selectedTimelineIds.has(event.id));
+        const removed = hideNativeTimelineEntries(selectedCharId, selectedEntries);
+        cancelBulkSelect();
+        loadDetailData(selectedCharId);
+        onNotice?.(removed > 0 ? `已从短期记忆中删除 ${removed} 条记录` : "所选记录已不在短期记忆中");
+    }, [cancelBulkSelect, filterEvents, loadDetailData, onNotice, selectedCharId, selectedTimelineIds]);
 
     const showNotice = (msg: string) => {
         onNotice?.(msg);
@@ -719,6 +766,9 @@ export function MemoryBankPage({
                                 events={shortTermEvents}
                                 userName={resolveUserIdentity(selectedCharId!)?.name || "用户"}
                                 activeTags={activeTimelineTags}
+                                selectionMode={bulkSelectMode}
+                                selectedEventIds={selectedTimelineIds}
+                                onToggleCluster={toggleTimelineCluster}
                             />
                         </>
                     ) : activeTab === "shared" ? (
@@ -732,6 +782,9 @@ export function MemoryBankPage({
                                 events={sharedEvents}
                                 userName={resolveUserIdentity(selectedCharId!)?.name || "用户"}
                                 activeTags={activeTimelineTags}
+                                selectionMode={bulkSelectMode}
+                                selectedEventIds={selectedTimelineIds}
+                                onToggleCluster={toggleTimelineCluster}
                             />
                         )
                     ) : activeTab === "core" ? (
@@ -742,6 +795,21 @@ export function MemoryBankPage({
                     )}
                     </MemoryDetailBoundary>
                 </div>
+
+                {bulkSelectMode ? (
+                    <div className="memory-bulk-delete-bar" role="toolbar" aria-label="批量删除短期记忆">
+                        <button type="button" className="memory-bulk-delete-cancel" onClick={cancelBulkSelect}>取消</button>
+                        <span>已选择 {selectedTimelineIds.size} 条</span>
+                        <button
+                            type="button"
+                            className="memory-bulk-delete-confirm"
+                            disabled={selectedTimelineIds.size === 0}
+                            onClick={() => setConfirmBulkDelete(true)}
+                        >
+                            删除
+                        </button>
+                    </div>
+                ) : null}
 
                 {/* Bottom tab bar — floating above bottom */}
                 <div className="chat-tab-bar" style={{ position: "absolute", bottom: 40, left: 40, right: 40, zIndex: 10, borderRadius: 28, borderTop: "none", padding: "10px 0" }}>
@@ -890,6 +958,21 @@ export function MemoryBankPage({
                             setConfirmDeleteEntryId(null);
                         }}
                         onCancel={() => setConfirmDeleteEntryId(null)}
+                    />
+                )}
+
+                {confirmBulkDelete && (
+                    <ConfirmDialog
+                        title="删除短期记忆？"
+                        message={`将删除所选 ${selectedTimelineIds.size} 条短期记忆。删除后可能会导致角色记忆缺失，是否继续？`}
+                        icon={AlertCircle}
+                        variant="danger"
+                        confirmLabel="继续删除"
+                        onConfirm={() => {
+                            setConfirmBulkDelete(false);
+                            handleBulkDeleteTimeline();
+                        }}
+                        onCancel={() => setConfirmBulkDelete(false)}
                     />
                 )}
 

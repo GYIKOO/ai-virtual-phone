@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, updateChatMessage, getLatestCharacterStateValues, resolveChatUserAvatar } from "@/lib/chat-storage";
+import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, updateChatMessage, getLatestCharacterStateValues, resolveChatCharacterAvatar, resolveChatUserAvatar } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import { generateGroupChatCompletion } from "@/lib/group-chat-engine";
 import { parseAIResponse } from "@/lib/rich-message-parser";
@@ -822,9 +822,9 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                             <div key={char.id} className="gcall-video-tile"
                                 style={tileBg ? { backgroundImage: `url(${tileBg})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
                             >
-                                {!tileBg && (char.avatar ? (
+                                {!tileBg && (resolveChatCharacterAvatar(char) ? (
                                     <img
-                                        src={char.avatar}
+                                        src={resolveChatCharacterAvatar(char)}
                                         alt={char.name}
                                         className={`w-full h-full object-cover transition-opacity duration-300 ${callState === "CONNECTING" ? "gcall-video-avatar-dim" : "gcall-video-avatar-bright"}`}
                                     />
@@ -963,8 +963,8 @@ export function GroupCallScreen({ type, session, characters, onEnd, initiator = 
                         return (
                             <div key={char.id} className="gcall-tile" {...(isSpeaking ? { "data-speaking": "" } : {})}>
                                 <div className="gcall-tile-avatar">
-                                    {char.avatar ? (
-                                        <img src={char.avatar} alt={char.name} />
+                                    {resolveChatCharacterAvatar(char) ? (
+                                        <img src={resolveChatCharacterAvatar(char)} alt={char.name} />
                                     ) : (
                                         <span className="gcall-tile-initial">{char.name?.[0] || "?"}</span>
                                     )}

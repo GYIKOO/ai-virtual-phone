@@ -259,6 +259,27 @@ export type ImageGenerationSettings = {
             y: number;
             size: number;
         };
+        /** 该角色的服装、配饰与稳定特征锚点。 */
+        anchors?: Array<{
+            id: string;
+            name: string;
+            category: "accessory" | "clothing" | "feature" | "other";
+            description: string;
+            assetId?: string;
+            enabled: boolean;
+            updatedAt: number;
+        }>;
+    }>;
+    /** 用户身份专属参考图；按角色当前绑定的用户身份自动选择。 */
+    userReferences?: Record<string, {
+        assetId?: string;
+        updatedAt: number;
+        enabled?: boolean;
+        faceCrop?: {
+            x: number;
+            y: number;
+            size: number;
+        };
     }>;
     imageHosting: ImageHostingSettings;
 };

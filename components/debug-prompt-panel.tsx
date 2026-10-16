@@ -26,7 +26,7 @@ import { loadCharacters } from "@/lib/character-storage";
 import { getAllPosts } from "@/lib/moments-storage";
 import type { LLMMessage } from "@/lib/llm-prompt-assembler";
 import { getWeekStartIso } from "@/lib/calendar-utils";
-import { loadStorySessions, loadStoryMessages } from "@/lib/story-storage";
+import { getStorySessionOwnerKey, hydrateStoryStorage, loadStoryGlobalSettings, loadStoryGroups, loadStorySessions, loadStoryMessages } from "@/lib/story-storage";
 import { previewStoryPromptPayload } from "@/lib/story-engine";
 import { loadVnSessions, loadVnMessages } from "@/lib/vn-storage";
 import { previewVnPromptPayload } from "@/lib/vn-engine";
@@ -143,7 +143,8 @@ export function DebugPromptPanel() {
         model: string;
         presetName: string;
     } | null>(null);
-    const [storyCharacterId, setStoryCharacterId] = useState<string>("");
+    const [storyOwnerKey, setStoryOwnerKey] = useState<string>("");
+    const [storySessionId, setStorySessionId] = useState<string>("");
 
     // VN state
     const [vnResult, setVnResult] = useState<{
@@ -187,7 +188,7 @@ export function DebugPromptPanel() {
     const [sessionsVersion, setSessionsVersion] = useState(0);
     useEffect(() => {
         let cancelled = false;
-        void hydrateChatStorage().then(() => {
+        void Promise.all([hydrateChatStorage(), hydrateStoryStorage()]).then(() => {
             if (!cancelled) setSessionsVersion(v => v + 1);
         });
         return () => { cancelled = true; };
@@ -435,24 +436,43 @@ export function DebugPromptPanel() {
     }
 
     async function handleStoryPreview() {
-        if (!storyCharacterId) return;
+        const session = storySessionOptions.find(item => item.id === storySessionId);
+        if (!session) return;
         setError(null);
         setLoading(true);
         try {
-            const session = loadStorySessions().find(s => s.characterId === storyCharacterId);
-            const history = session ? loadStoryMessages(session.id) : [];
-            const result = await previewStoryPromptPayload(storyCharacterId, history, {
-                sessionContextExcludedTags: session?.contextExcludedTags,
-                sessionId: session?.id,
-                settings: session?.settings,
-                participantIds: session?.participantIds,
+            const history = loadStoryMessages(session.id);
+            let floatingChatContext = "";
+            if (!session.independentStory && session.settings?.floatingPhoneInContext) {
+                const group = session.ownerType === "group" ? loadStoryGroups().find(item => item.id === session.ownerId) : null;
+                const chatSession = group
+                    ? loadChatSessions().find(item => item.isGroup && group.characterIds.every(id => item.participantIds?.includes(id)))
+                    : loadChatSessions().find(item => !item.isGroup && item.contactId === session.characterId);
+                const identity = resolveUserIdentity(session.characterId, "story");
+                const character = loadCharacters().find(item => item.id === session.characterId);
+                if (chatSession) {
+                    floatingChatContext = loadChatMessages(chatSession.id)
+                        .filter(message => message.role === "user" || message.role === "assistant")
+                        .slice(-30)
+                        .map(message => `${new Date(message.createdAt).toLocaleString()} ${message.role === "user" ? (identity?.name || "用户") : (message.senderName || character?.name || "角色")}：${message.content.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}`)
+                        .join("\n");
+                }
+            }
+            const result = await previewStoryPromptPayload(session.characterId, history, {
+                sessionContextExcludedTags: session.contextExcludedTags,
+                sessionId: session.id,
+                settings: session.settings,
+                globalSettings: loadStoryGlobalSettings(),
+                floatingChatContext,
+                participantIds: session.participantIds || [session.characterId],
                 storyMemory: {
-                    independent: session?.independentStory,
-                    inheritRecentMemory: session?.inheritRecentMemory ?? true,
-                    startedAt: session?.createdAt,
+                    independent: session.independentStory,
+                    inheritRecentMemory: session.inheritRecentMemory ?? true,
+                    startedAt: session.createdAt,
                 },
             });
-            setStoryResult(result);
+            const ownerLabel = storyOwnerOptions.find(item => item.key === storyOwnerKey)?.label.replace(/^.+? · /, "") || result.characterName;
+            setStoryResult({ ...result, characterName: `${ownerLabel} · ${session.branchName || "主线剧情"}` });
             setExpandedIdx(new Set()); setBadgesShownIdx(new Set());
             requestAnimationFrame(() => { scrollRef.current?.scrollTo(0, 0); });
         } catch (e) {
@@ -781,6 +801,29 @@ export function DebugPromptPanel() {
         chars.forEach(c => map.set(c.id, c.name));
         return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
     }, []);
+
+    const storyOwnerOptions = useMemo(() => {
+        if (typeof window === "undefined") return [] as { key: string; label: string }[];
+        const chars = loadCharacters().map(character => ({ key: `single:${character.id}`, label: `单人 · ${character.name}` }));
+        const groups = loadStoryGroups().map(group => ({ key: `group:${group.id}`, label: `多人组 · ${group.name}` }));
+        return [...chars, ...groups];
+    }, [sessionsVersion, enabled]);
+    const storySessionOptions = useMemo(() => {
+        if (!storyOwnerKey) return [];
+        return loadStorySessions()
+            .filter(session => getStorySessionOwnerKey(session) === storyOwnerKey)
+            .sort((a, b) => (a.branchOrder ?? 0) - (b.branchOrder ?? 0));
+    }, [storyOwnerKey, sessionsVersion]);
+
+    useEffect(() => {
+        if (storyOwnerKey && storyOwnerOptions.some(item => item.key === storyOwnerKey)) return;
+        setStoryOwnerKey(storyOwnerOptions[0]?.key || "");
+    }, [storyOwnerKey, storyOwnerOptions]);
+
+    useEffect(() => {
+        if (storySessionId && storySessionOptions.some(item => item.id === storySessionId)) return;
+        setStorySessionId(storySessionOptions.find(item => (item.branchId || "main") === "main")?.id || storySessionOptions[0]?.id || "");
+    }, [storySessionId, storySessionOptions]);
 
     const readingBookOptions = useMemo(() => {
         if (typeof window === "undefined") return [];
@@ -1160,8 +1203,15 @@ export function DebugPromptPanel() {
                 )}
                 {mode === "story" && (
                     <>
-                        {renderCharSelect(storyCharacterId, setStoryCharacterId)}
-                        {renderPreviewBtn(handleStoryPreview, loading || !storyCharacterId)}
+                        <select value={storyOwnerKey} onChange={e => setStoryOwnerKey(e.target.value)} className="pv-select">
+                            <option value="">选择角色或多人组...</option>
+                            {storyOwnerOptions.map(item => <option key={item.key} value={item.key}>{item.label}</option>)}
+                        </select>
+                        <select value={storySessionId} onChange={e => setStorySessionId(e.target.value)} className="pv-select" disabled={!storyOwnerKey}>
+                            <option value="">选择主线/分线...</option>
+                            {storySessionOptions.map(item => <option key={item.id} value={item.id}>{(item.branchId || "main") === "main" ? "主线" : `分线 ${item.branchOrder ?? ""}`} · {item.branchName || "未命名"}{item.independentStory ? "（独立）" : ""}</option>)}
+                        </select>
+                        {renderPreviewBtn(handleStoryPreview, loading || !storySessionId)}
                     </>
                 )}
                 {mode === "vn" && (
