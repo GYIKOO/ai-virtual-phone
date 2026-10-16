@@ -4,10 +4,36 @@
 import type { MemoryConfig, MemoryEntry } from "./memory-types";
 import { loadMemoryEntriesByType } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
-import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity } from "./memory-embedding";
+import { generateEmbedding, resolveEmbeddingModel, cosineSimilarity, keywordSearch } from "./memory-embedding";
 import { estimateTokens } from "./token-counter";
 import { knownAt } from "./proactive-replay";
 import { formatMemoryEntry, memoryEventRange } from "./memory-time";
+
+/** One scene query/vector shared by every participant. Does not change single-chat retrieval. */
+export function createStoryMemoryRanker(query: string, config: MemoryConfig) {
+    let vector: Promise<number[] | null> | undefined;
+    return async (characterId: string, type: "long_term" | "core") => {
+        const entries = await loadMemoryEntriesByType(characterId, type);
+        const keywordScores = new Map(keywordSearch(query, entries, entries.length).map(hit => [hit.entry.id, hit.score]));
+        let queryVector: number[] | null = null;
+        if (type === "long_term" && query.trim() && config.vectorRecallEnabled && entries.some(entry => entry.embedding?.length)) {
+            const api = resolveAuxiliaryApiConfig("embeddingApiConfigId");
+            if (api && resolveEmbeddingModel(api)) {
+                vector ??= generateEmbedding(query, api).catch(() => null);
+                queryVector = await vector;
+            }
+        }
+        return entries.map(entry => {
+            const keyword = keywordScores.get(entry.id) ?? 0;
+            const compatible = queryVector && entry.embedding?.length === queryVector.length;
+            const semantic = compatible ? Math.max(0, cosineSimilarity(queryVector!, entry.embedding!)) : 0;
+            return { entry, relevant: keyword > 0 || semantic >= 0.25,
+                score: Math.max(keyword, semantic) + (type === "core" && entry.metadata?.active ? 0.25 : 0) };
+        }).filter(hit => type === "core" || hit.relevant).sort((a, b) => b.score - a.score
+            || (memoryEventRange(b.entry)?.end ?? Date.parse(b.entry.createdAt)) - (memoryEventRange(a.entry)?.end ?? Date.parse(a.entry.createdAt))
+            || a.entry.id.localeCompare(b.entry.id)).slice(0, type === "core" ? 6 : 12);
+    };
+}
 
 /**
  * Retrieve relevant long-term memories for prompt injection.

@@ -138,6 +138,8 @@ export type RecentBlock = {
 export type UnifiedRecentItem =
     | {
         kind: "event";
+        /** Stable native source identity, used for cross-character deduplication. */
+        entryId?: string;
         timestamp: string;
         sourceApp: NativeTimelineEntry["sourceApp"];
         sourceTag: string;
@@ -988,6 +990,8 @@ export function prepareShortTermContext(
         promptTimestampOptions?: PromptTimestampOptions;
         /** Story rerolls exclude superseded projections without deleting the saved story first. */
         excludeStoryMessageIds?: string[];
+        /** Callers with a shared budget collect candidates before trimming. Zero means untrimmed. */
+        tokenBudget?: number;
     },
 ): {
     recentBlocks: RecentBlock[];
@@ -1015,7 +1019,7 @@ export function prepareShortTermContext(
     }
     timeline = filterTimelineByAllowedSources(timeline, memConfig.shortTermAllowedSources);
 
-    const budget = memConfig.shortTermTokenBudget;
+    const budget = options?.tokenBudget ?? memConfig.shortTermTokenBudget;
     const currentTag = getFeatureTag(appId);
     const history = (options?.history ?? []).filter(m => options?.historicalAt === undefined || Date.parse(m.createdAt) <= options.historicalAt);
     const currentStoryProjectionIds = new Set(appId === "story" ? history.map(message => `story_projection_${message.id}`) : []);
@@ -1225,6 +1229,7 @@ export function prepareShortTermContext(
             if (!meta) continue;
             unifiedRecentItems.push({
                 kind: "event",
+                entryId: item.entryId,
                 timestamp: item.timestamp,
                 sourceApp: meta.entry.sourceApp,
                 sourceTag: meta.sourceTag,

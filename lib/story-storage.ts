@@ -1267,3 +1267,27 @@ export function loadStoryProjectionEntries(
 
   return projections;
 }
+
+/** Read-only narrative turns; use the same page eligibility as native story projections. */
+export function loadStoryRecallTurns(characterId: string, afterTimestamp?: string): {
+  id: string; timestamp: string; summary: string; messages: StoryMessage[];
+}[] {
+  const result: { id: string; timestamp: string; summary: string; messages: StoryMessage[] }[] = [];
+  for (const session of _sessionsCache) {
+    const participants = session.participantIds?.length ? session.participantIds : [session.characterId];
+    if (!participants.includes(characterId) || session.mergedIntoSessionId
+      || (session.mergedIntoMainAt && (session.branchId || "main") !== "main")
+      || (session.independentStory && !session.includedInMemoryAt)) continue;
+    let pending: StoryMessage[] = [];
+    for (const message of loadStoryMessages(session.id)) {
+      if (message.kind === "director" || message.role === "system") continue;
+      if (message.role === "user") { pending.push(message); continue; }
+      const messages = [...pending, message].filter(item => !afterTimestamp || item.createdAt > afterTimestamp);
+      pending = [];
+      if (afterTimestamp && message.createdAt <= afterTimestamp) continue;
+      result.push({ id: `story_projection_${message.id}`, timestamp: message.createdAt,
+        summary: message.storySummary || "", messages });
+    }
+  }
+  return result;
+}

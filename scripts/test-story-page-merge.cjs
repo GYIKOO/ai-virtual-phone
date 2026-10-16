@@ -28,7 +28,7 @@ const mocks = {
 function load(name) {
   if (mocks[name]) return mocks[name];
   if (modules.has(name)) return modules.get(name);
-  if (!['./story-storage', './story-tag-settings', './short-term-assembler', './story-engine', './story-instructions', './story-constraints'].includes(name)) {
+  if (!['./story-storage', './story-tag-settings', './short-term-assembler', './story-engine', './story-instructions', './story-constraints', './story-context-budget', './story-ensemble-context'].includes(name)) {
     return new Proxy({}, { get: () => () => [] }); // All unrelated app stores are empty.
   }
   const exports = {};
@@ -124,19 +124,21 @@ const json = value => JSON.parse(JSON.stringify(value));
   Object.assign(mocks['./settings-storage'], { loadBindingConfig: () => ({characterBindings:[]}), resolveBinding: () => ({ apiConfigId:'local' }),
     loadApiConfigs: () => [{ id:'local', defaultModel:'offline' }], loadPresets: () => [], loadRegexes: () => [], loadWorldBooks: () => [] });
   Object.assign(mocks['./llm-prompt-assembler'], { isContextMarkerEnabled: () => true,
-    assemblePromptPayload: ({history}) => history.map(m => ({role:m.role,content:m.content})) });
+    assemblePromptPayload: ({history, unifiedRecentItems}) => unifiedRecentItems?.length ? unifiedRecentItems.map(item => item.kind === 'event' ? {role:'system', content:item.text} : {role:history[item.historyIndex].role, content:history[item.historyIndex].content}) : history.map(m => ({role:m.role,content:m.content})) });
   mocks['./chat-engine'] = { ChatEngineError:Error, previewMessagesForApi: (_a,_p,messages) => messages };
-  mocks['./memory-service'] = { retrieveMemoriesForPrompt: async()=>null, retrieveCoreMemoriesForPrompt:async()=>null };
+  mocks['./memory-service'] = { retrieveMemoriesForPrompt: async()=>null, retrieveCoreMemoriesForPrompt:async()=>null, createStoryMemoryRanker: () => async () => [] };
   mocks['./calendar-storage'] = { buildCalendarScheduleMarker:()=>'', getCurrentCalendarScheduleForPrompt:()=>'' };
   mocks['./character-world-storage'] = { formatCharacterRelationsForPrompt:()=>'' };
   modules.delete('./short-term-assembler');
   const engine = load('./story-engine');
   const preview = await engine.previewStoryPromptPayload('d', [], { sessionId:dabc.id, participantIds:['d','a','b','c'] });
   const assembled = preview.messages.map(m=>m.content).join('\n');
-  assert.ok(assembled.includes('ABC三人车站见面事件'), 'ABC scene is available when D leads the new ensemble');
-  assert.ok(!assembled.split('## 角色 2：')[0].includes('ABC三人车站见面事件'), 'D does not acquire the event as its personal memory');
+  assert.equal(assembled.split('三人曾在车站见面。').length - 1, 1, 'ABC scene full prose is available once when D leads the new ensemble');
+  assert.ok(!assembled.includes('ABC三人车站见面事件'), 'full prose replaces its summary');
+  assert.match(assembled, /记录归属：A、B、C/);
+  assert.ok(!assembled.includes('记录归属：A、B、C、D'), 'D does not acquire the event as its personal memory');
   const isolated = await engine.previewStoryPromptPayload('d', [], { sessionId:dabc.id, participantIds:['d','a','b','c'], storyMemory:{independent:true} });
-  assert.ok(!isolated.messages.some(m=>m.content.includes('ABC三人车站见面事件')));
+  assert.ok(!isolated.messages.some(m=>m.content.includes('三人曾在车站见面。')));
   console.log('PASS: ABC -> DABC real stored event reaches ensemble request through shared participants, not D; isolated story excludes it');
   console.log('PASS: group pages merge only within the same owner and participant set');
   console.log('PASS: cross-page chronological memory, current-page deduplication, retry exclusion, IF/character isolation and creation-time boundary');

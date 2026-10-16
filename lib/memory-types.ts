@@ -26,6 +26,7 @@ export type MemoryConfig = {
     shortTermTokenBudget: number;           // token limit for short-term event log
     coreMemoryTokenBudget: number;          // token limit for injected core memories
     longTermTokenBudget: number;            // token limit for injected long-term memories
+    storyContextTokenLimit?: number;       // whole ensemble request window, including output reserve
     summarizationPrompt: string;            // user-editable prompt template for memory summarization
     coreMemoryPrompt: string;               // user-editable prompt template for core-memory extraction
     vnSummaryPrompt: string;                // user-editable prompt for VN chapter summarization
@@ -113,6 +114,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     shortTermTokenBudget: 100000,
     coreMemoryTokenBudget: 100000,
     longTermTokenBudget: 100000,
+    storyContextTokenLimit: 32768,
     summarizationPrompt: DEFAULT_SUMMARIZATION_PROMPT,
     coreMemoryPrompt: DEFAULT_CORE_MEMORY_PROMPT,
     vnSummaryPrompt: "",

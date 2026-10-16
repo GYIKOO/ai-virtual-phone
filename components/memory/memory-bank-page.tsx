@@ -1184,6 +1184,24 @@ export function MemoryBankPage({
                 </div>
 
                 {/* Token budget sliders */}
+                <p className="menu-group-desc mx-2">多人剧情总容量</p>
+                <div className="menu-group">
+                    <MemorySettingsSliderItem
+                        icon={Users}
+                        color={BINDING_ACCENTS.memory}
+                        label="多人剧情上下文容量"
+                        desc="全员共用，含设定、记忆与输出预留；设为不高于模型容量，同时受预设容量约束"
+                        value={config.storyContextTokenLimit ?? 32768}
+                        min={2048}
+                        max={262144}
+                        step={1024}
+                        onChange={value => {
+                            const next = { ...config, storyContextTokenLimit: value };
+                            setConfig(next);
+                            saveMemoryConfig(next);
+                        }}
+                    />
+                </div>
                 <p className="menu-group-desc mx-2">控制截断量</p>
                 <div className="menu-group">
                     <MemorySettingsSliderItem

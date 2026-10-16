@@ -37,7 +37,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   let captured, contextOptions, schemes = {}, saved = [user, director, reply];
   let disabledMarkers = new Set();
   const participantContexts = [];
-  const engine = load('lib/story-engine.ts', {
+  const deps = {
     './story-tag-settings': load('lib/story-tag-settings.ts'),
     './prompt-time': { formatPromptTimestamp: () => '2026-10-15T12:00:00Z' },
     './character-world-storage': { formatCharacterRelationsForPrompt: () => '' },
@@ -48,18 +48,28 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
       loadBindingConfig: () => ({ characterBindings: [] }), resolveBinding: () => ({ apiConfigId: 'api', presetId: 'p' }),
       loadApiConfigs: () => [{ id: 'api' }], loadPresets: () => [{ id: 'p' }], loadRegexes: () => [], loadWorldBooks: () => [], resolveUserIdentity: () => ({ name: 'user' }),
     },
-    './llm-prompt-assembler': { isContextMarkerEnabled: (_p, id) => !disabledMarkers.has(id), assemblePromptPayload: ({ history }) => history.map(m => ({ role: m.role, content: m.content })) },
+    './llm-prompt-assembler': { isContextMarkerEnabled: (_p, id) => !disabledMarkers.has(id), assemblePromptPayload: ({ history, unifiedRecentItems, coreMemories, longTermMemories }) => [
+      ...history.map(m => ({ role: m.role, content: m.content })),
+      ...(unifiedRecentItems || []).filter(item => item.kind === 'event').map(item => ({ role: 'system', content: item.text })),
+      ...[coreMemories, longTermMemories].filter(Boolean).map(content => ({role:'system',content})),
+    ] },
     './chat-engine': { ChatEngineError: Error, previewMessagesForApi: (_c, _p, messages) => messages, sendLLMRequestPreferStream: async (_c, _p, messages) => { captured = messages; return '<content>正文</content><summary>事件</summary>'; } },
     './memory-storage': { loadMemoryConfig: () => ({}) },
-    './memory-service': { retrieveCoreMemoriesForPrompt: async id => `CORE_${id}`, retrieveMemoriesForPrompt: async id => `LONG_${id}` },
+    './memory-service': { retrieveCoreMemoriesForPrompt: async id => `CORE_${id}`, retrieveMemoriesForPrompt: async id => `LONG_${id}`,
+      createStoryMemoryRanker: () => async (id,type) => [{ entry: { id, content: `${type === 'core' ? 'CORE' : 'LONG'}_${id}`, createdAt: user.createdAt }, score: 1 }] },
+    './memory-time': { memoryEventRange: () => undefined, formatMemoryEntry: entry => entry.content },
     './memory-injector': { formatCoreMemories: value => value, formatLongTermMemories: value => value },
-    './short-term-assembler': { prepareShortTermContext: (id, _a, options) => { contextOptions = options; participantContexts.push({ id, options }); return { truncatedHistory: options.history, recentBlocks: [{ tag: 'events', content: `RECENT_${id}` }], unifiedRecentItems: [], wbActivationContext: '' }; } },
+    './short-term-assembler': { prepareShortTermContext: (id, _a, options) => { contextOptions = options; participantContexts.push({ id, options }); return { truncatedHistory: options.history, recentBlocks: [{ tag: 'events', content: `RECENT_${id}` }], unifiedRecentItems: [{kind:'event',entryId:id,sourceApp:'story',sourceTag:'events',timestamp:user.createdAt,text:`RECENT_${id}`}], wbActivationContext: '' }; } },
     './calendar-storage': { buildCalendarScheduleMarker: () => '', getCurrentCalendarScheduleForPrompt: () => '' },
     './calendar-utils': { getWeekStartIso: () => '' },
     './story-parser': { parseStoryResponse: rawText => ({ rawText, renderedText: '正文', summaryText: '事件' }) },
-    './story-storage': { loadStoryMessages: () => saved, resolveActiveStorySchemes: () => schemes },
+    './story-storage': { loadStoryMessages: () => saved, resolveActiveStorySchemes: () => schemes, loadStoryRecallTurns: () => [] },
     './macro-engine': { MacroEngine: class {} },
-  });
+  };
+  deps['./token-counter'] = load('lib/token-counter.ts');
+  deps['./story-context-budget'] = load('lib/story-context-budget.ts', deps);
+  deps['./story-ensemble-context'] = load('lib/story-ensemble-context.ts', deps);
+  const engine = load('lib/story-engine.ts', deps);
   await engine.generateStoryCompletion('char', [user, director], { retryInstruction: '不要下雨' });
   assert.equal(contextOptions.history.length, 1, 'director excluded from narrative history');
   assert.ok(contextOptions.excludeStoryMessageIds.includes('a'), 'discarded reply projection excluded before generation');
