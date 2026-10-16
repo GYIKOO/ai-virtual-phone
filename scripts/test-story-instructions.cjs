@@ -45,7 +45,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
       loadApiConfigs: () => [{ id: 'api' }], loadPresets: () => [{ id: 'p' }], loadRegexes: () => [], loadWorldBooks: () => [], resolveUserIdentity: () => ({ name: 'user' }),
     },
     './llm-prompt-assembler': { assemblePromptPayload: ({ history }) => history.map(m => ({ role: m.role, content: m.content })) },
-    './chat-engine': { ChatEngineError: Error, previewMessagesForApi: (_c, _p, messages) => messages, sendLLMRequest: async (_c, _p, messages) => { captured = messages; return '<content>正文</content><summary>事件</summary>'; } },
+    './chat-engine': { ChatEngineError: Error, previewMessagesForApi: (_c, _p, messages) => messages, sendLLMRequestPreferStream: async (_c, _p, messages) => { captured = messages; return '<content>正文</content><summary>事件</summary>'; } },
     './memory-storage': { loadMemoryConfig: () => ({}) },
     './memory-service': { retrieveCoreMemoriesForPrompt: async () => null, retrieveMemoriesForPrompt: async () => null },
     './short-term-assembler': { prepareShortTermContext: (_c, _a, options) => { contextOptions = options; return { truncatedHistory: options.history, recentBlocks: [], unifiedRecentItems: [], wbActivationContext: '' }; } },
