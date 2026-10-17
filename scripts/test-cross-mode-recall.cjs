@@ -33,10 +33,13 @@ const preset = {id:'preset',openai_max_context:100000,openai_max_tokens:1000,pro
 ]};
 const emptyStore = new Proxy({}, { get: () => () => [] });
 const mocks = {
+  './calendar-sync':{createCalendarSync:()=>undefined,calendarSyncPrompt:()=>''},
   dexie:Dexie,
   './kv-db': {hydrateKvDb:async()=>{}, registerKvMigration(){},registerDynamicPrefix(){}, kvGet:k=>kv.get(k),kvSet:(k,v)=>kv.set(k,v),kvRemove:k=>kv.delete(k)},
   './character-storage': {loadCharacters:()=>characters},
-  './chat-storage': {loadChatSessions:()=>sessions,loadChatMessages:id=>chatRows.get(id)||[], isReadingDiscussMessage:()=>false,isSystemInstructionMessage:()=>false,loadChatAppSettings:()=>({timeAware:true})},
+  './chat-storage': {loadChatSessions:()=>sessions,loadChatMessages:id=>chatRows.get(id)||[], isReadingDiscussMessage:()=>false,
+    isSystemInstructionMessage:msg=>msg.role==='system'&&msg.mediaType==='system_instruction',
+    getSystemInstructionPromptContent:content=>content,loadChatAppSettings:()=>({timeAware:true})},
   './settings-storage': {loadBindingConfig:()=>({characterBindings:[]}),resolveBinding:()=>({apiConfigId:'api',presetId:'preset'}),
     loadApiConfigs:()=>[{id:'api',defaultModel:'test'}],loadPresets:()=>[preset],loadRegexes:()=>[],loadWorldBooks:()=>[],resolveUserIdentity:()=>({id:'u',name:'用户'})},
   './memory-storage': {loadMemoryConfig:()=>config},
@@ -49,7 +52,7 @@ const mocks = {
 const real = new Set(['prompt-memory-budget','narrative-context','memory-context-policy','story-storage','story-tag-settings','chat-offline-storage','short-term-assembler','story-engine',
   'story-instructions','story-constraints','story-context-budget','story-ensemble-context','story-preset-selection','story-preparation',
   'llm-prompt-assembler','story-default-prompt','macro-engine','character-time','prompt-time','recent-time-context',
-  'prompt-sanitizer','state-value-parser','token-counter','character-relation-context']);
+  'prompt-sanitizer','state-value-parser','token-counter','character-relation-context','memory-rounds']);
 function load(name) {
   if (mocks[name]) return mocks[name];
   if (modules.has(name)) return modules.get(name);
@@ -64,6 +67,7 @@ const text = messages => messages.map(m=>m.content).join('\n');
 const count = (haystack,needle)=>haystack.split(needle).length-1;
 function loadChatBuilders(short, assembler) {
   const globals={exports:{},console,Date,
+    ...mocks['./calendar-sync'],
     ...mocks['./chat-storage'],...mocks['./character-storage'],...mocks['./settings-storage'],...mocks['./memory-storage'],
     ...mocks['./memory-service'],...mocks['./memory-injector'],...mocks['./calendar-storage'],...short,...assembler,
     ...load('./character-time'),...load('./prompt-time'),...load('./prompt-memory-budget'),
@@ -264,5 +268,28 @@ function loadChatBuilders(short, assembler) {
     ...storyOptions('single',['a']),storyMemory:{independent:true}})).messages);
   assert.ok(!isolatedReturn.includes('NEW_MULTIPERSON_PROGRESS') && !isolatedReturn.includes('ONLINE_NEW_PROGRESS'));
   assert.equal(retrievalQuery,'','independent stories do not retrieve native memories');
+  // Instructions stay in their online history, but neither summary counting nor
+  // summary material may treat them as experiences (single and group alike).
+  for (const id of ['direct','group']) {
+    chatRows.set(id,[...chatRows.get(id),{id:'instruction-'+id,sessionId:id,role:'system',mediaType:'system_instruction',
+      content:'OUT_OF_STORY_'+id,createdAt:newTime},
+      {id:'avatar-'+id,sessionId:id,role:'system',mediaType:'system_instruction',
+        mediaData:{shortTermMemoryEvent:true},content:'AVATAR_EVENT_'+id,createdAt:newTime}]);
+    assert.ok(text(await consumers['online-'+id]()).includes('OUT_OF_STORY_'+id),'recent instruction stays active');
+  }
+  story.pushStoryMessage({sessionId:'multi',role:'user',kind:'director',rawContent:'SECRET_DIRECTOR',createdAt:newTime});
+  const native=short.loadNativeTimeline('a');
+  const summarize=load('./memory-rounds').selectMemorySummarySources(native);
+  for(const id of ['direct','group']) {
+    assert.ok(native.some(row=>row.content.includes('OUT_OF_STORY_'+id)),'timeline still contains direction');
+    assert.ok(!JSON.stringify(summarize).includes('OUT_OF_STORY_'+id),'summary excludes direction');
+    assert.ok(JSON.stringify(summarize).includes('AVATAR_EVENT_'+id),'real system event retained');
+  }
+  assert.ok(!JSON.stringify(summarize).includes('SECRET_DIRECTOR'));
+  assert.ok(!JSON.stringify(summarize).includes('DIRECTOR_ONLY'));
+  assert.ok(summarize.some(row=>row.sourceDetail==='chat_offline'),'offline accepted events retained');
+  assert.ok(summarize.some(row=>row.sourceDetail==='story'),'story accepted events retained');
+  assert.ok(story.loadStoryMessages('multi').some(row=>row.kind==='director'),'director notes remain stored');
+  console.log('PASS: stored/recent online directions preserved, single/group summary exclusion, factual system events and accepted offline/story experiences retained');
   console.log('PASS: Oct 15 00:03 -> Oct 16 20:00 single-page return; real stores/engine/assembler retain old prose, retrieve new multi/online/offline events, activate new lore and resolve timestamped macros; director/no-clock/IF boundaries');
 })().catch(error=>{console.error(error);process.exitCode=1;});

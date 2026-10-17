@@ -233,8 +233,8 @@ export async function buildEnsembleStoryPrompt(options: {
               score, sourceApp: entry.sourceApp, sourceIds: sources });
           }
         }
-        const currentSchedule = marker("calendarSchedule") ? getCurrentCalendarScheduleForPrompt("character", character.id, now) : "";
-        const weekSchedule = marker("calendarSchedule") ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now)) : "";
+        const currentSchedule = marker("calendarSchedule") ? getCurrentCalendarScheduleForPrompt("character", character.id, now, resolveUserIdentity(character.id,"story")?.id || "") : "";
+        const weekSchedule = marker("calendarSchedule") ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now), resolveUserIdentity(character.id,"story")?.id || "") : "";
         for (const [key, text, score] of [["current", currentSchedule, 2], ["week", weekSchedule, 0]] as const) {
           if (text) candidates.push({ id: `life:${character.id}:${key}`, kind: "core", owners: [character.id],
             timestamp: now.toISOString(), text, sourceApp: "日程", score, background: key });

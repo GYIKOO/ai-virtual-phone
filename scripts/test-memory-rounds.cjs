@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
 const modules=new Map();
-let timeline=[],saved=[],watermark=null,calls=0,core=0,removed=[],failAt=0,writeFailure=false,editDuringCall=false;
+let timeline=[],saved=[],watermark=null,calls=0,core=0,removed=[],failAt=0,writeFailure=false,editDuringCall=false,requests=[],vectors=[];
 let config={autoSummarizeEnabled:true,summarizationRoundInterval:2,summarizationEventInterval:80,vectorRecallEnabled:false,maxLongTermEntries:1};
 const retained=[{id:'core',type:'core',createdAt:'2020-01-01'}, {id:'manual',type:'long_term',metadata:{origin:'user_manual'},createdAt:'2020-01-01'},
  {id:'old-auto',type:'long_term',createdAt:'2020-01-01'}];
@@ -11,8 +11,8 @@ const mocks={
  './settings-storage':{resolveAuxiliaryApiConfig:()=>({id:'fake-api'})},
  './short-term-assembler':{loadNativeTimeline:(_id,opts)=>timeline.filter(e=>!opts?.afterTimestamp||e.timestamp>opts.afterTimestamp),filterTimelineByAllowedSources:rows=>rows,
   formatTimelineForSummarization:rows=>({eventsText:rows.map(r=>r.content).join('\n'),earliest:rows[0].startTimestamp||rows[0].timestamp,latest:rows.at(-1).timestamp})},
- './api-helpers':{simpleLLMCall:async()=>{calls++;if(editDuringCall)timeline=timeline.map((row,i)=>i?row:{...row,content:row.content+' edited'});return {content:'总结'+calls,wasTruncated:calls===failAt};}},
- './memory-embedding':{},'./core-memory-builder':{maybeRunCoreMemoryPipeline:async()=>{}},
+ './api-helpers':{simpleLLMCall:async(_api,messages)=>{calls++;requests.push(messages);if(editDuringCall)timeline=timeline.map((row,i)=>i?row:{...row,content:row.content+' edited'});return {content:'总结'+calls,wasTruncated:calls===failAt};}},
+ './memory-embedding':{resolveEmbeddingModel:()=> 'fixture',generateEmbedding:async text=>{vectors.push(text);return [1,2];}},'./core-memory-builder':{maybeRunCoreMemoryPipeline:async()=>{}},
  './memory-writer-lock':{assertNoMemoryRebuild:async()=>{},withMemoryWriterLock:async(_id,fn)=>fn()},
 };
 function load(name){if(mocks[name])return mocks[name];if(modules.has(name))return modules.get(name);
@@ -33,7 +33,7 @@ assert.equal(groupMemoryRounds([...rows,msg('answer',8,'assistant','answer')]).l
 assert.equal(groupMemoryRounds([...rows,msg('b',7,'assistant','r','b')]).length,4,'different sessions cannot collapse');
 const original=JSON.stringify(rows);groupMemoryRounds(rows);assert.equal(JSON.stringify(rows),original);
 const {maybeRunSummarization,runSummarizationPipeline}=load('./memory-summarizer');
-function reset(){saved=[];watermark=null;calls=0;core=0;removed=[];failAt=0;writeFailure=false;editDuringCall=false;}
+function reset(){saved=[];watermark=null;calls=0;core=0;removed=[];failAt=0;writeFailure=false;editDuringCall=false;requests=[];vectors=[];}
 (async()=>{
  timeline=Array.from({length:5},(_,i)=>({id:`story${i}`,sourceApp:'story',timestamp:at(i),content:`剧情${i}`}));
  await maybeRunSummarization('a','A');
@@ -47,5 +47,23 @@ function reset(){saved=[];watermark=null;calls=0;core=0;removed=[];failAt=0;writ
  reset();editDuringCall=true;assert.equal((await runSummarizationPipeline('a','A')).success,false);assert.equal(saved.length,0);assert.equal(watermark,null,'source edits prevent stale summary activation');
  reset();config={...config,summarizationRoundInterval:undefined};await maybeRunSummarization('a','A');
  assert.equal(calls,0,'legacy event threshold is not silently reinterpreted');
+ for(const interval of [2,undefined]) {
+  reset();config={...config,summarizationRoundInterval:interval,vectorRecallEnabled:true};
+  timeline=Array.from({length:5},(_,i)=>({id:`fact${i}`,sourceApp:'chat',timestamp:at(i),content:`FACT_${i}`}));
+  timeline.splice(1,0,{id:'instruction',sourceApp:'chat',timestamp:at(1),content:'SECRET_DIRECTION',excludeFromSummary:true});
+  timeline.push({id:'last-instruction',sourceApp:'chat',timestamp:at(10),content:'SECRET_DIRECTION',excludeFromSummary:true});
+  assert.equal((await runSummarizationPipeline('a','A')).success,true);
+  assert.ok(!JSON.stringify(requests).includes('SECRET_DIRECTION'));
+  assert.ok(saved.every(entry=>!entry.sourceMessageIds.includes('instruction')&&!entry.sourceMessageIds.includes('last-instruction')));
+  assert.equal(watermark,at(4),'instructions do not advance summary watermark');
+  assert.equal(vectors.length,saved.length);assert.ok(!vectors.join().includes('SECRET_DIRECTION'));
+ }
+ reset();config={...config,summarizationRoundInterval:2};
+ timeline=[{id:'fact',sourceApp:'chat',timestamp:at(0),content:'FACT'},
+  ...Array.from({length:10},(_,i)=>({id:'direction'+i,sourceApp:'chat',timestamp:at(i+1),content:'SECRET_DIRECTION',excludeFromSummary:true}))];
+ await maybeRunSummarization('a','A');assert.equal(calls,0,'directions cannot fill automatic round threshold');
+ reset();timeline=timeline.filter(row=>row.excludeFromSummary);
+ assert.equal((await runSummarizationPipeline('a','A',{force:true})).success,false);
+ assert.equal(calls,0);assert.equal(vectors.length,0,'instruction-only history generates neither summaries nor vectors');
  console.log('PASS persisted-round grouping, active follow-ups, pending input, legacy counters, batched summaries, atomic failure, tail preservation and protected retention');
 })().catch(e=>{console.error(e);process.exitCode=1;});

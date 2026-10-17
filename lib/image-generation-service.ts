@@ -801,6 +801,8 @@ export async function generateImageFromConfiguredApi(params: {
   /** 内容所属 APP；用于按“角色 > APP > 全局”解析生图方案。 */
   appId?: string;
   useReferenceImage?: boolean;
+  /** 默认跟随角色参考标记；纯场景关闭人物外观、锚点及角色参考图。 */
+  includeCharacterAppearance?: boolean;
   /** 强制是否加入角色当前绑定用户的参考图；未传时根据合照/用户照片语义自动判断。 */
   includeUserReferenceImage?: boolean;
   settings?: ImageGenerationSettings;
@@ -818,6 +820,12 @@ export async function generateImageFromConfiguredApi(params: {
 
   const description = params.description.trim();
   if (!description) return null;
+  const includeCharacterAppearance = params.includeCharacterAppearance ?? params.useReferenceImage === true;
+  const identityId = resolveGenerationUserIdentityId(params.characterId, params.appId);
+  const userIdentity = identityId ? loadUserIdentities().find(identity => identity.id === identityId) : undefined;
+  const userReference = identityId ? settings.userReferences?.[identityId] : undefined;
+  const includeUserReference = params.includeUserReferenceImage ?? descriptionNeedsUserReference(description, userIdentity?.name);
+  const userFeaturePrompt = includeUserReference ? userReference?.featurePrompt?.trim() || "" : "";
 
   // NovelAI 模式
   if (settings.provider === "novelai") {
@@ -831,7 +839,7 @@ export async function generateImageFromConfiguredApi(params: {
 
     const positiveParts: string[] = [];
     if (activePreset.positivePrompt?.trim()) positiveParts.push(activePreset.positivePrompt.trim());
-    const novelAiCharacterReference = params.characterId
+    const novelAiCharacterReference = params.characterId && includeCharacterAppearance
       ? settings.characterReferences?.[params.characterId]
       : undefined;
     const characterFeaturePrompt = novelAiCharacterReference?.novelAiFeaturePromptEnabled !== false
@@ -843,6 +851,7 @@ export async function generateImageFromConfiguredApi(params: {
       .map(anchor => `${anchor.name}: ${anchor.description.trim()}`)
       .join(", ");
     if (anchorPrompt) positiveParts.push(anchorPrompt);
+    if (userFeaturePrompt) positiveParts.push(`用户 ${userIdentity?.name || "user"}: ${userFeaturePrompt}`);
     if (description) positiveParts.push(description);
     const fullPrompt = positiveParts.join(", ");
 
@@ -874,8 +883,8 @@ export async function generateImageFromConfiguredApi(params: {
   const openaiSettings = openaiPreset ? { ...settings, ...openaiPreset } : settings;
   if (!openaiSettings.apiKey.trim() || !openaiSettings.baseUrl.trim() || !openaiSettings.model.trim()) return null;
 
-  const reference = params.characterId ? settings.characterReferences?.[params.characterId] : undefined;
-  // 「非自拍不使用参考图」开关已从生图设置页删除：参考图启用后始终参与生成
+  const reference = params.characterId && includeCharacterAppearance ? settings.characterReferences?.[params.characterId] : undefined;
+  // 人物出镜标记与参考图自身的启用状态均需满足。
   const shouldUseReference = Boolean(
     params.useReferenceImage
     && reference?.assetId
@@ -895,10 +904,6 @@ export async function generateImageFromConfiguredApi(params: {
     const raw = await getChatImageFromIndexedDB(anchor.assetId);
     if (raw) referenceInputs.push({ dataUrl: raw, label: `锚点：${anchor.name || "特征"}` });
   }
-  const identityId = resolveGenerationUserIdentityId(params.characterId, params.appId);
-  const userIdentity = identityId ? loadUserIdentities().find(identity => identity.id === identityId) : undefined;
-  const userReference = identityId ? settings.userReferences?.[identityId] : undefined;
-  const includeUserReference = params.includeUserReferenceImage ?? descriptionNeedsUserReference(description, userIdentity?.name);
   if (includeUserReference && userReference?.assetId && userReference.enabled !== false) {
     const raw = await getChatImageFromIndexedDB(userReference.assetId);
     if (raw) referenceInputs.push({
@@ -923,6 +928,7 @@ export async function generateImageFromConfiguredApi(params: {
       characterPrompt ? `【角色固定外观】${characterPrompt}` : "",
       anchorsPrompt ? `【角色特定锚点】${anchorsPrompt}` : "",
       userPrompt,
+      userFeaturePrompt ? `【用户固定外观：${userIdentity?.name || "用户"}】${userFeaturePrompt}` : "",
       referenceInputs.length > 1 ? `【参考图说明】上传的是分格参考板，共 ${referenceInputs.length} 格；请按每格下方标签分别还原人物或物件，不要把不同格的身份混合。` : "",
     ].filter(Boolean).join("\n\n"),
     openaiSettings.extraPrompt,
@@ -969,4 +975,18 @@ export function hasUserReferenceImage(characterId?: string, appId = "chat"): boo
   if (!identityId) return false;
   const ref = loadImageGenerationSettings().userReferences?.[identityId];
   return Boolean(ref?.assetId && ref.enabled !== false);
+}
+
+/** Retry controls also support text-only appearance settings. */
+export function hasCharacterImageIdentity(characterId?: string): boolean {
+  if (!characterId) return false;
+  const ref = loadImageGenerationSettings().characterReferences?.[characterId];
+  return Boolean(ref?.assetId || ref?.featurePrompt?.trim()
+    || ref?.anchors?.some(anchor => anchor.enabled !== false && (anchor.assetId || anchor.description.trim())));
+}
+
+export function hasUserImageIdentity(characterId?: string, appId = "chat"): boolean {
+  const identityId = resolveGenerationUserIdentityId(characterId, appId);
+  const ref = identityId ? loadImageGenerationSettings().userReferences?.[identityId] : undefined;
+  return Boolean(ref?.featurePrompt?.trim() || (ref?.assetId && ref.enabled !== false));
 }

@@ -1,4 +1,5 @@
 "use client";
+import { applyAcceptedCalendarChanges, hideCalendarChangeStream } from "@/lib/calendar-sync";
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS } from "@/lib/story-tag-settings";
 import { createStoryGenerationRun, isStoryGenerationRunActive, finishStoryGenerationRun, cancelStoryGenerationRun, getGeneratingStorySessionIds, subscribeStoryGeneration, getStoryGenerationPhase, setStoryGenerationPhase } from "@/lib/story-generation-runs";
 import type { StoryGenerationPhase } from "@/lib/story-preparation";
@@ -642,7 +643,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [floatingChatVersion, independentFloatingShell, floatingPhoneOpen],
   );
-  const activeStreamingText = streamingTextBySession[activeSessionId] || "";
+  const activeStreamingText = hideCalendarChangeStream(streamingTextBySession[activeSessionId] || "");
   const activeStoryParticipantKey = (currentSession?.participantIds?.length
     ? currentSession.participantIds
     : activeGroup?.characterIds?.length
@@ -1667,6 +1668,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         regexSignature: result.regexSignature,
         parserVersion: result.parserVersion,
       });
+      void applyAcceptedCalendarChanges(result.pendingCalendarChanges, assistantMessage.id).then(error => { if (error) showVoiceNotice(error); });
       refreshGenerationView(sessionId);
 
       const memoryCharacterIds = currentSession?.participantIds?.length ? currentSession.participantIds : [characterId];
@@ -1745,7 +1747,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
       signal: generationRun.controller.signal,
     }).then((result) => {
       if (!isCurrentGeneration()) return;
-      pushStoryMessage({
+      const assistantMessage = pushStoryMessage({
         sessionId,
         role: "assistant",
         rawContent: result.rawText,
@@ -1754,6 +1756,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         regexSignature: result.regexSignature,
         parserVersion: result.parserVersion,
       });
+      void applyAcceptedCalendarChanges(result.pendingCalendarChanges, assistantMessage.id).then(error => { if (error) showVoiceNotice(error); });
       refreshGenerationView(sessionId);
 
       if (!session.independentStory) {
@@ -2164,6 +2167,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         rawContent: result.rawText, renderedContent: result.renderedText,
         storySummary: result.storySummary, regexSignature: result.regexSignature, parserVersion: result.parserVersion,
       });
+      void applyAcceptedCalendarChanges(result.pendingCalendarChanges, assistantMessage.id).then(error => { if (error) showVoiceNotice(error); });
       refreshGenerationView(sessionId);
     } catch (error) {
       if (!isCurrentGeneration() || isAbortLikeError(error)) return;

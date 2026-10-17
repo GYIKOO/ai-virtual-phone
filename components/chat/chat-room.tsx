@@ -50,6 +50,7 @@ import { loadBindingConfig, loadPresets, loadRegexes, resolveBinding, USER_IDENT
 import { resolveChatAccountUserIdentity } from "@/lib/chat-scope-storage";
 import { generateGroupChatCompletion, generateGroupOfflineChatCompletion, parseGroupChatResponse, buildEditableGroupRoundText } from "@/lib/group-chat-engine";
 import { appendChatOfflineTurn, clearChatOfflineTurns, deleteChatOfflineTurn, deleteChatOfflineTurnsFrom, extractThinkingTag, loadChatOfflineTurns, parseOfflineResponse, preserveChatOfflineSummaries, saveChatOfflineTurns, updateChatOfflineTurn, type ChatOfflineTurn } from "@/lib/chat-offline-storage";
+import { applyAcceptedCalendarChanges, hideCalendarChangeStream } from "@/lib/calendar-sync";
 import { applyDisplayRegex, applyEditRegex } from "@/lib/llm-prompt-assembler";
 import { scheduleFollowUp, cancelFollowUp, cancelBackgroundGeneration, isBackgroundReplyGenerating } from "@/lib/follow-up-service";
 import { useKeyboardDismissAutoSend } from "@/components/chat/use-keyboard-dismiss-auto-send";
@@ -4516,7 +4517,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         offlineStreamFrameRef.current = 0;
                         if (!isCurrentOfflineRun()) return;
                         // 与引擎顺序一致：先按预设 strip_texts 清洗原文，再解析（避免剔除文本影响 XML 结构时预览与最终结果不一致）
-                        const previewRaw = stripLiteralTexts(offlineStreamAccumRef.current, streamPreviewTagConfig.stripTexts);
+                        const previewRaw = stripLiteralTexts(hideCalendarChangeStream(offlineStreamAccumRef.current), streamPreviewTagConfig.stripTexts);
                         const parsed = parseOfflineResponse(previewRaw, streamPreviewTagConfig.summaryTag);
                         // 流式碎片阶段 XML 标签可能未闭合：content 提取不到时，剥掉开标签残片直接显示原文；
                         // 思维链/自定义摘要标签按当前预设整块隐藏，避免生成过程中闪现（与引擎最终清洗同源）
@@ -4548,6 +4549,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     thinkingTag: result.thinkingTag,
                 });
                 setOfflineTurns(prev => [...prev, saved]);
+                void applyAcceptedCalendarChanges(result.pendingCalendarChanges, saved.id).then(error => { if (error) showChatToast(error, 5000); });
             } catch (error: any) {
                 if (!isCurrentOfflineRun() || isAbortLikeError(error)) return;
                 offlineTextInputRef.current?.setText(currentText);
@@ -4666,7 +4668,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     offlineStreamFrameRef.current = 0;
                     if (!isCurrentOfflineRun()) return;
                     // 与引擎顺序一致：先按预设 strip_texts 清洗原文，再解析（避免剔除文本影响 XML 结构时预览与最终结果不一致）
-                    const previewRaw = stripLiteralTexts(offlineStreamAccumRef.current, streamPreviewTagConfig.stripTexts);
+                    const previewRaw = stripLiteralTexts(hideCalendarChangeStream(offlineStreamAccumRef.current), streamPreviewTagConfig.stripTexts);
                     const parsed = parseOfflineResponse(previewRaw, streamPreviewTagConfig.summaryTag);
                     // 流式碎片阶段 XML 标签可能未闭合：content 提取不到时，剥掉开标签残片直接显示原文；
                     // 思维链/自定义摘要标签按当前预设整块隐藏，避免生成过程中闪现（与引擎最终清洗同源）
@@ -4699,6 +4701,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 thinkingTag: result.thinkingTag,
             });
             setOfflineTurns([...baseTurns, saved]);
+            void applyAcceptedCalendarChanges(result.pendingCalendarChanges, saved.id).then(error => { if (error) showChatToast(error, 5000); });
         } catch (error: any) {
             if (!isCurrentOfflineRun() || isAbortLikeError(error)) return;
             offlineTextInputRef.current?.setText(retryInput);

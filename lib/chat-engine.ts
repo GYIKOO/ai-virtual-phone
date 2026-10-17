@@ -96,6 +96,8 @@ import {
     resolveBilingualPrompt,
 } from "./bilingual-prompt-defaults";
 import { parseOfflineResponse, extractThinkingTag, type ParsedOfflineResponse } from "./chat-offline-storage";
+import { createCalendarSync, calendarSyncPrompt, extractCalendarChanges } from "./calendar-sync";
+import type { PendingCalendarChanges } from "./calendar-changes";
 import { throwIfAborted } from "./abort-utils";
 import { armShortcutContinuation, SHORTCUT_VISION_OFF_NOTE, type ShortcutContinuationHandle, type ShortcutContinuationStyle } from "./shortcut-continuation-client";
 
@@ -1996,8 +1998,8 @@ export async function buildChatPromptMessages(
 
     const longTermMemories = memResults ? formatLongTermMemories(memResults, now.getTime()) : "";
     const coreMemories = coreResults ? formatCoreMemories(coreResults, now.getTime()) : "";
-    const scheduleSummary = options?.historicalAt === undefined ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now)) : "";
-    const currentSchedule = options?.historicalAt === undefined ? getCurrentCalendarScheduleForPrompt("character", character.id, now) : "";
+    const scheduleSummary = options?.historicalAt === undefined ? buildCalendarScheduleMarker("character", character.id, getWeekStartIso(now), userIdentity?.id || "") : "";
+    const currentSchedule = options?.historicalAt === undefined ? getCurrentCalendarScheduleForPrompt("character", character.id, now, userIdentity?.id || "") : "";
     const musicOnlineHint = isNeteaseConfigured() ? "- 你可以推荐任何歌曲，系统会在线搜索并播放。不局限于用户本地音乐库。\n" : "\n";
     const pluginPrompt = options?.historicalAt !== undefined ? { hint: "" } : await runChatPluginTransform("prompt.system", {
         sessionId: session.id,
@@ -2147,6 +2149,10 @@ export async function buildChatPromptMessages(
         llmMessages.push({ role: "system", content: ephemeralSystemNote });
     }
 
+    if(isOfflineMode) {
+        const calendarPrompt=calendarSyncPrompt(createCalendarSync([session.contactId],"chat",session.id,Boolean(session.chatAccountId)));
+        if(calendarPrompt) llmMessages.push({role:"system",content:calendarPrompt});
+    }
     const fittedMessages = assembleBudgetedMemory(memoryInput,
         input => [...assemblePromptPayload(input), ...llmMessages], memConfig, [[
             ...(coreResults || []).map(entry => ({id:entry.id,kind:"core" as const,timestamp:String(entry.metadata?.eventEndAt ?? entry.createdAt),text:formatCoreMemories([entry],now.getTime())})),
@@ -2195,6 +2201,7 @@ export type ChatCompletionCallbacks = {
 };
 
 export type OfflineChatCompletionResult = ParsedOfflineResponse & {
+    pendingCalendarChanges?: PendingCalendarChanges;
     model: string;
     presetName: string;
     /** 模型思维链（reasoning）内容，供线下记录展示 */
@@ -2206,6 +2213,7 @@ export async function generateOfflineChatCompletion(
     history: ChatMessage[],
     options?: { signal?: AbortSignal; onStreamDelta?: (delta: string) => void },
 ): Promise<OfflineChatCompletionResult> {
+    const calendarSnapshot=createCalendarSync([session.contactId],"chat",session.id,Boolean(session.chatAccountId));
     const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
         session,
         history,
@@ -2243,7 +2251,8 @@ export async function generateOfflineChatCompletion(
         rawOutput = await sendLLMRequest(config, preset, llmMessages, regexes, meta, requestOptions);
     }
     // 剔除预设配置的文本片段（<思考结束> 等残留标签），不进入记录/提示词
-    rawOutput = stripPresetTexts(rawOutput, preset);
+    const calendarResult=extractCalendarChanges(rawOutput,calendarSnapshot);
+    rawOutput = stripPresetTexts(calendarResult.text, preset);
     let parsed = parseOfflineResponse(rawOutput, summaryTag);
     // 思维链：预设开启「线下标签解析」时从正文提取 <thinking> 标签；关闭时走模型原生 reasoning（官方默认行为）
     if (offlineTagEnabled) {
@@ -2288,6 +2297,7 @@ export async function generateOfflineChatCompletion(
 
     return {
         ...parsed,
+        pendingCalendarChanges:calendarResult.pendingCalendarChanges,
         // 标签解析开启时补 thinking/thinkingTag（供离线记录展示）；关闭时保持 undefined，思维链走 reasoning（模型原生）
         ...(offlineTagEnabled ? {
             thinking: extractThinkingTag(rawOutput, thinkingTag) || undefined,

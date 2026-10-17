@@ -20,7 +20,7 @@ import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { prepareShortTermContext } from "./short-term-assembler";
 import { getCustomStickerExample, getCustomStickerNames } from "./custom-sticker-storage";
 import { previewMessagesForApi, sendLLMRequest, type ChatEngineError } from "./chat-engine";
-import { buildCalendarScheduleMarker, clearGeneratedWeekItems, cloneWeekPlanWithManualEdits, normalizeGeneratedScheduleItems, restoreCalendarWeekItems, loadCalendarWeekPlan } from "./calendar-storage";
+import { buildCalendarScheduleMarker, cloneWeekPlanWithManualEdits, normalizeGeneratedScheduleItems, loadCalendarWeekPlan, loadCalendarStore, refreshCalendarData, formatCalendarCommitments, withCalendarWriteLock, flushCalendarStore } from "./calendar-storage";
 import {
   getWeekDates,
   getWeekStartIso,
@@ -59,12 +59,13 @@ function buildSyntheticUserCharacter(identity: UserIdentity | null): Character {
   };
 }
 
-function buildCalendarTriggerInstruction(ownerName: string, weekDates: string[]): string {
+function buildCalendarTriggerInstruction(ownerName: string, weekDates: string[], commitments = "", now = Date.now()): string {
   return [
     `请为${ownerName}生成 ${weekDates[0]} 到 ${weekDates[6]} 这一周的日程安排。`,
-    "请参考已有日程，生成这一周的完整日程安排。",
+    "请参考保留的安排，为目标周未来的空闲时段补充日程。",
     "每行一条，格式：YYYY-MM-DD|周几|开始时间|结束时间|地点|emoji|事项。emoji 段填一个最贴合该事项的表情符号。",
     "作息时间不受限制（早起、夜跑、通宵都可以安排），但每一天最多 5 条日程，宁缺毋滥。",
+    `本次安排范围：从 ${new Date(now).toLocaleString()} 起至目标周结束，时区 ${Intl.DateTimeFormat().resolvedOptions().timeZone}。已有约定、手动安排及已开始的活动予以保留。\n相关约定：\n${commitments || "无"}`,
   ].join("\n");
 }
 
@@ -141,6 +142,7 @@ async function resolveCalendarAssemblerInput(
   ownerType: CalendarOwnerType,
   ownerId: string,
   weekStart: string,
+  regenerating = false,
 ): Promise<CalendarAssemblerResolved> {
   const bindings = loadBindingConfig();
   const activeSlot = resolveBinding(bindings, ownerType === "character" ? ownerId : undefined, "calendar");
@@ -199,7 +201,11 @@ async function resolveCalendarAssemblerInput(
     longTermMemories = formatLongTermMemories(longResults);
   }
 
-  const scheduleSummary = buildCalendarScheduleMarker(ownerType, ownerId, weekStart);
+  const scheduleSummary = regenerating
+    ? `本周保留安排：\n${(loadCalendarWeekPlan(ownerType,ownerId,weekStart)?.items||[])
+      .filter(item=>item.source==="manual" || Date.parse(`${item.date}T${item.startTime}:00`)<Date.now())
+      .map(item=>`${item.date} ${item.startTime}-${item.endTime} ${item.title}`).join("\n")}\n本周及下周约定：\n${formatCalendarCommitments(ownerId,weekStart,userIdentity?.id)}`
+    : buildCalendarScheduleMarker(ownerType, ownerId, weekStart, userIdentity?.id || "");
   const llmMessages = assemblePromptPayload({
     character,
     history: [],
@@ -241,15 +247,13 @@ export async function generateWeeklyCalendarSchedule(
   const key = `${ownerType}:${ownerId}:${weekStart}`;
   if (generatingWeeks.has(key)) return { success: false, error: "该角色本周日程正在生成，请稍候。" };
   generatingWeeks.add(key);
-  // 先清掉本周旧的 AI 生成条目（保留手动条目），让随后的 marker 组装读不到旧结果——
-  // 否则旧日程会进提示词被模型原样照抄，"重新生成"永远一字不差。失败时恢复。
-  const removedGenerated = options?.automatic ? [] : clearGeneratedWeekItems(ownerType, ownerId, weekStart);
-  const restoreRemoved = () => restoreCalendarWeekItems(ownerType, ownerId, weekStart, removedGenerated);
+  // Keep the persisted plan intact while generating; the prompt omits replaceable
+  // generated slots. A concurrent edit invalidates this result instead of being lost.
+  const revision=loadCalendarStore().revision;
   try {
-    const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart);
+    const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart, !options?.automatic);
     const weekDates = getWeekDates(weekStart);
-    const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates)
-      + (options?.automatic ? `\n本次安排范围：从 ${new Date(options.referenceTime ?? Date.now()).toLocaleString()} 起至本周结束，时区 ${Intl.DateTimeFormat().resolvedOptions().timeZone}。保留已有手动安排，为剩余时间补充计划。` : "");
+    const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates, formatCalendarCommitments(ownerId,weekStart), options?.referenceTime);
 
     const messages: LLMMessage[] = [
       ...resolved.llmMessages,
@@ -271,12 +275,10 @@ export async function generateWeeklyCalendarSchedule(
 
     const items = parseScheduleLines(rawText, weekStart);
     if (items.length === 0) {
-      restoreRemoved();
       return { success: false, error: "日历生成结果为空，或格式无法解析。" };
     }
 
     if (options?.signal?.aborted || options?.canSave?.() === false) {
-      restoreRemoved();
       return { success: false, error: "日程生成已取消。" };
     }
     // A manual generation or another tab may have completed while awaiting the API.
@@ -285,10 +287,20 @@ export async function generateWeeklyCalendarSchedule(
     }
     const accepted = options?.automatic ? items.filter(item =>
       new Date(`${item.date}T${item.startTime}:00`).getTime() >= (options.referenceTime ?? Date.now())) : items;
-    if (accepted.length) cloneWeekPlanWithManualEdits(ownerType, ownerId, weekStart, accepted);
+    const save=async()=>{
+      await refreshCalendarData();
+      if(loadCalendarStore().revision!==revision) return false;
+      if(options?.signal?.aborted || options?.canSave?.()===false) return false;
+      if (accepted.length) {
+        cloneWeekPlanWithManualEdits(ownerType, ownerId, weekStart, accepted);
+        await flushCalendarStore();
+      }
+      return true;
+    };
+    const saved=await withCalendarWriteLock(save);
+    if(!saved) return {success:false,error:"生成期间日历已更新或任务已取消，现有安排已保留，请重新生成。"};
     return { success: true, items: accepted };
   } catch (error) {
-    restoreRemoved();
     const err = error as ChatEngineError | Error;
     return { success: false, error: err?.message || "生成日历失败" };
   } finally {
@@ -304,9 +316,9 @@ export async function previewCalendarPromptPayload(
   if (ownerType !== "character") {
     throw new Error("用户日程不支持 AI 生成预览。");
   }
-  const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart);
+  const resolved = await resolveCalendarAssemblerInput(ownerType, ownerId, weekStart, true);
   const weekDates = getWeekDates(weekStart);
-  const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates);
+  const triggerInstruction = buildCalendarTriggerInstruction(resolved.ownerName, weekDates, formatCalendarCommitments(ownerId,weekStart));
 
   const messages: LLMMessage[] = [
     ...resolved.llmMessages,

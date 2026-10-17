@@ -23,7 +23,7 @@ import remarkBreaks from "remark-breaks";
 import { createPortal } from "react-dom";
 import { Blocks, Maximize2, ReceiptText } from "lucide-react";
 import { retryChatGeneratedImage } from "@/lib/generated-image-retry";
-import { hasCharacterReferenceImage, hasUserReferenceImage } from "@/lib/image-generation-service";
+import { hasCharacterImageIdentity as hasCharacterReferenceImage, hasUserImageIdentity as hasUserReferenceImage } from "@/lib/image-generation-service";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
 import { ScanPayCard } from "@/components/chat/scan-pay-card";
 import { payWithWalletBalance } from "@/lib/wallet-storage";
@@ -1297,10 +1297,10 @@ function GeneratedImagePromptDialog({
                                 disabled={busy}
                             onChange={e => onUseReferenceImageChange(e.target.checked)}
                             />
-                            <span>使用角色参考图（角色出镜）</span>
+                            <span>使用角色外貌与参考图（角色出镜）</span>
                         </label>
                     ) : (
-                        <div className="chat-generated-image-prompt-empty-hint">该角色未配置参考图</div>
+                        <div className="chat-generated-image-prompt-empty-hint">该角色未配置外貌或参考图</div>
                     )}
                     {hasUserReference ? (
                         <label className="chat-generated-image-prompt-check">
@@ -1310,10 +1310,10 @@ function GeneratedImagePromptDialog({
                                 disabled={busy}
                                 onChange={e => onUseUserReferenceImageChange(e.target.checked)}
                             />
-                            <span>允许使用用户参考图（文字模型判断用户是否出镜）</span>
+                            <span>允许使用用户外貌与参考图（按图片描述判断出镜）</span>
                         </label>
                     ) : (
-                        <div className="chat-generated-image-prompt-empty-hint">当前用户身份未配置参考图</div>
+                        <div className="chat-generated-image-prompt-empty-hint">当前用户身份未配置外貌或参考图</div>
                     )}
                     {error && <div className="chat-generated-image-retry-error">{error}</div>}
                 </div>

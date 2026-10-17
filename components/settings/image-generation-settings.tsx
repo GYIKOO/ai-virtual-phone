@@ -47,13 +47,19 @@ const SIZE_RATIO_HINTS: Record<string, string> = {
 
 // Remove any auto-appended ratio hint line(s), preserving the user's own text.
 function stripRatioHint(text: string): string {
-    return text.replace(new RegExp(`\\s*${RATIO_HINT_MARKER}[^\\n]*`, "g"), "").replace(/\s+$/, "");
+    let result = text;
+    for (const hint of Object.values(SIZE_RATIO_HINTS)) {
+        result = result.split(`${RATIO_HINT_MARKER}${hint}`).join("");
+    }
+    return result.trimEnd();
 }
 
 // Return the prompt with the ratio hint for `size` appended (replacing any
 // previous hint). `auto` strips the hint entirely.
 function withRatioHint(extraPrompt: string, size: string): string {
     const base = stripRatioHint(extraPrompt);
+    // A manually edited ratio instruction belongs to the user.
+    if (base.includes(RATIO_HINT_MARKER)) return base;
     const hint = SIZE_RATIO_HINTS[size];
     if (!hint) return base;
     return base ? `${base}\n${RATIO_HINT_MARKER}${hint}` : `${RATIO_HINT_MARKER}${hint}`;
@@ -118,35 +124,7 @@ export function ImageGenerationSettings() {
     const activeOpenAiPreset = openaiPresets.find(p => p.id === activeOpenAiPresetId) || openaiPresets[0];
 
     useEffect(() => {
-        // Sync the ratio hint to the saved size on load, so the hint is present
-        // by default (not only after the user manually switches the size).
-        const loaded = loadImageGenerationSettings();
-        const loadedPresets = loaded.openaiPresets?.length ? loaded.openaiPresets : [{
-            id: "preset_openai_default",
-            name: "默认方案",
-            requestMode: loaded.requestMode,
-            apiKey: loaded.apiKey,
-            baseUrl: loaded.baseUrl,
-            model: loaded.model,
-            size: loaded.size,
-            quality: loaded.quality,
-            extraPrompt: loaded.extraPrompt,
-        } satisfies OpenAiImagePreset];
-        const loadedActiveId = loaded.activeOpenAiPresetId && loadedPresets.some(preset => preset.id === loaded.activeOpenAiPresetId)
-            ? loaded.activeOpenAiPresetId
-            : loadedPresets[0].id;
-        const loadedActivePreset = loadedPresets.find(preset => preset.id === loadedActiveId) || loadedPresets[0];
-        const syncedExtra = withRatioHint(loadedActivePreset.extraPrompt, loadedActivePreset.size);
-        if (syncedExtra !== loadedActivePreset.extraPrompt) {
-            const nextPresets = loadedPresets.map(preset => preset.id === loadedActiveId
-                ? { ...preset, extraPrompt: syncedExtra }
-                : preset);
-            const next = { ...loaded, openaiPresets: nextPresets, activeOpenAiPresetId: loadedActiveId, extraPrompt: syncedExtra };
-            saveImageGenerationSettings(next);
-            setSettings(next);
-        } else {
-            setSettings(loaded);
-        }
+        setSettings(loadImageGenerationSettings());
         const loadedCharacters = loadCharacters();
         setUserIdentities(loadUserIdentities());
         setCharacters(loadedCharacters);
@@ -1014,6 +992,7 @@ export function ImageGenerationSettings() {
                                 rows={4}
                             />
                             <p className="menu-desc ml-1 opacity-70">
+                                修改自动保存。
                                 选择尺寸后会自动在末尾追加一句「{RATIO_HINT_MARKER}…」构图提示，用于纠正部分不认 size 参数的接口（如 gpt-image-2）。可手动修改或删除。
                             </p>
                         </div>
@@ -1222,6 +1201,17 @@ export function ImageGenerationSettings() {
                                         选取面部
                                     </button>
                                 )}
+                                <div className="mt-3 flex flex-col gap-1">
+                                    <label className="menu-desc" htmlFor={`user-image-feature-${identity.id}`}>用户外貌提示词</label>
+                                    <Textarea
+                                        id={`user-image-feature-${identity.id}`}
+                                        value={reference?.featurePrompt || ""}
+                                        onChange={event => updateUserReference(identity.id, { featurePrompt: event.target.value })}
+                                        placeholder="发色、瞳色、体型等固定外观；无需上传参考图。"
+                                        rows={3}
+                                    />
+                                    <p className="menu-desc opacity-70">自动保存；仅在图片描述包含此用户时使用，按当前绑定的用户身份读取。</p>
+                                </div>
                             </div>
                         );
                     })}

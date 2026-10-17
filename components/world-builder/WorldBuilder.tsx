@@ -14,6 +14,7 @@ import SceneSaveLoadModal from "./SceneSaveLoadModal";
 import { hydrateKvDb } from "@/lib/kv-db";
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
+import { isShellEnvironment } from "@/lib/shell-detect";
 
 const SceneViewport = dynamic(() => import("./SceneViewport"), { ssr: false });
 
@@ -67,11 +68,15 @@ export default function WorldBuilder() {
     });
   }, []);
 
-  const handleInitialBootBack = useCallback(() => {
-    if (window.opener && !window.opener.closed) {
-      window.opener.focus();
+  const handleBack = useCallback(() => {
+    if (isShellEnvironment()) {
+      window.location.replace("/");
+      return;
     }
-    window.close();
+    try {
+      if (window.opener && !window.opener.closed) window.opener.focus();
+    } catch { /* An inaccessible opener must not prevent returning home. */ }
+    try { window.close(); } catch { /* Fall back when closing is unavailable. */ }
     window.setTimeout(() => {
       if (!window.closed) window.location.replace("/");
     }, 40);
@@ -198,7 +203,7 @@ export default function WorldBuilder() {
   return (
     <div className={`wb-layout ${isLightTheme(settings.theme) ? "wb-light" : ""} ${showInitialBoot ? "wb-layout--booting" : ""}`}>
       <div className="wb-topbar">
-          <button className="wb-topbar-btn" onClick={() => window.close()}>
+          <button className="wb-topbar-btn" onClick={handleBack}>
             返回
           </button>
           <button className="wb-topbar-btn" onClick={handleUndo} disabled={history.current.length === 0}>
@@ -271,7 +276,7 @@ export default function WorldBuilder() {
               <h1>正在搭建筑境</h1>
               <p>场景出现后会自动进入。</p>
             </div>
-            <button className="wb-initial-back" type="button" onClick={handleInitialBootBack}>
+            <button className="wb-initial-back" type="button" onClick={handleBack}>
               返回小手机
             </button>
           </div>

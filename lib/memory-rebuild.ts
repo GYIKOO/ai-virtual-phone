@@ -9,7 +9,7 @@ import { formatMemoryEntry } from "./memory-time";
 import { blocksMemorySummary, planRebuildBatches, selectRebuildSources, protectedMemory, rebuildPrompt, type RebuildJob, type RebuildBatch, type RebuildSource } from "./memory-rebuild-policy";
 import { readRebuildJob, readRebuildBatches, writeRebuildJob, swapRebuild, discardRebuild, reconcileRebuildProgress } from "./memory-rebuild-store";
 import { withMemoryWriterLock } from "./memory-writer-lock";
-import { groupMemoryRounds } from "./memory-rounds";
+import { groupMemoryRounds, selectMemorySummarySources } from "./memory-rounds";
 
 export const MEMORY_REBUILD_UPDATED = "memory-rebuild-updated";
 const running = new Set<string>();
@@ -23,9 +23,9 @@ function getPinnedApi(identity: RebuildJob["api"]) {
     return api;
 }
 function sourcesFor(characterId: string, allowed: RebuildJob["allowedSources"], cutoff?: string, rounds = false): RebuildSource[] {
-    const timeline=filterTimelineByAllowedSources(loadNativeTimeline(characterId, {
+    const timeline=selectMemorySummarySources(filterTimelineByAllowedSources(loadNativeTimeline(characterId, {
         timeAware: true, promptTimestampOptions: { timeZone: "UTC", includeTimeZone: true },
-    }), allowed);
+    }), allowed));
     return (rounds?groupMemoryRounds(timeline):timeline).map(e => ({
         key: JSON.stringify([e.sourceApp, e.sourceDetail, e.sessionId, e.id]),
         // Native timeline also includes legacy map/custom-app source names, as does the existing summarizer.
@@ -111,6 +111,9 @@ export async function runMemoryRebuild(characterId: string): Promise<void> {
         if (job.embeddingApi) getPinnedApi(job.embeddingApi);
         let batches = await readRebuildBatches(job.id);
         if (batches.length !== job.totalBatches || job.version !== 1) throw new Error("任务数据不完整或格式不兼容，不能继续。");
+        if (await fingerprint(sourcesFor(characterId, job.allowedSources, job.cutoff, job.countingMode === "rounds")) !== job.sourceHash) {
+            throw new Error("可总结的历史记录已变化，请重新建立重建任务。旧记忆和已有重建结果仍保留。");
+        }
         running.add(characterId); paused.delete(characterId);
         const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("float-memory-rebuild") : undefined;
         if (channel) channel.onmessage = event => { if (event.data?.pause === characterId) paused.add(characterId); };

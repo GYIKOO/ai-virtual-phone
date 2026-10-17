@@ -804,6 +804,7 @@ function normalizeImageGenerationSettings(settings: Partial<ImageGenerationSetti
         userReferences[identityId] = {
             assetId: typeof rawRef.assetId === "string" && rawRef.assetId ? rawRef.assetId : undefined,
             updatedAt: typeof rawRef.updatedAt === "number" ? rawRef.updatedAt : Date.now(),
+            featurePrompt: typeof rawRef.featurePrompt === "string" ? rawRef.featurePrompt : "",
             enabled: rawRef.enabled !== false,
             faceCrop: crop && typeof crop.x === "number" && typeof crop.y === "number"
                 ? {

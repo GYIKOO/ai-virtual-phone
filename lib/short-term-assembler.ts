@@ -73,6 +73,8 @@ export type NativeTimelineEntry = {
     responseUnitId?: string;
     startTimestamp?: string;
     sourceEntryIds?: string[];
+    /** Retained for recent context, but not an in-world event for summarization. */
+    excludeFromSummary?: boolean;
     momentsMeta?: NativeMomentMeta;
     customAppId?: string;
     customAppName?: string;
@@ -324,6 +326,7 @@ export function loadNativeTimeline(
                 id: msg.id,
                 sourceApp: "chat",
                 sourceDetail: "group",
+                excludeFromSummary: isSystemInstructionMessage(msg) && !msg.mediaData?.shortTermMemoryEvent,
                 groupSessionId: gs.id,
                 groupName: gs.groupName || "群聊",
                 dialogueSessionId: gs.id,
@@ -357,6 +360,7 @@ export function loadNativeTimeline(
                         // 内部备注/头像等事件明确进入私聊短期记忆；普通手动系统指令
                         // 仍保留 system 分类，避免改变已有记忆行为。
                         sourceDetail: msg.mediaData?.shortTermMemoryEvent ? "direct" : "system",
+                        excludeFromSummary: !msg.mediaData?.shortTermMemoryEvent,
                         timestamp: msg.createdAt,
                         content: `${msgLabel} ${msg.mediaData?.shortTermMemoryEvent ? "[私聊事件]" : "[系统指令]"} ${instructionContent}`,
                     });

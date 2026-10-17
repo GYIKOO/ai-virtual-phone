@@ -22,6 +22,8 @@ export type CalendarScheduleItem = {
   emoji?: string;
   colorKey: CalendarColorKey;
   source: "manual" | "generated";
+  /** Read-only projection of a separately stored commitment. */
+  commitmentId?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -32,5 +34,20 @@ export type CalendarWeekPlan = {
   ownerId: string;
   weekStart: string; // YYYY-MM-DD, Monday
   items: CalendarScheduleItem[];
+  updatedAt: string;
+};
+
+export type CalendarCommitment = {
+  id: string;
+  participantIds: string[];
+  userIdentityId: string;
+  title: string;
+  date: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  location: string;
+  status: "confirmed" | "completed" | "cancelled";
+  source?: { app: string; sessionId?: string; messageId?: string };
+  createdAt: string;
   updatedAt: string;
 };

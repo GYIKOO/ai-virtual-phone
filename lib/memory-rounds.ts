@@ -1,6 +1,11 @@
 import type { NativeTimelineEntry } from "./short-term-assembler";
 import { compareMemoryTime } from "./memory-context-policy";
 
+/** Filter before grouping so out-of-story directions cannot enter a summary batch. */
+export function selectMemorySummarySources(entries: NativeTimelineEntry[]): NativeTimelineEntry[] {
+  return entries.filter(entry => !entry.excludeFromSummary);
+}
+
 /** Count saved exchanges, not generation attempts or individual assistant bubbles. */
 export function groupMemoryRounds(entries: NativeTimelineEntry[]): NativeTimelineEntry[] {
   const ordered = [...entries].sort((a,b)=>compareMemoryTime(a.timestamp,b.timestamp));

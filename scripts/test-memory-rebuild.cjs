@@ -19,8 +19,8 @@ const mocks = {
     formatTimelineForSummarization: rows => ({ eventsText: rows.map(e => e.content).join('\n'), earliest: rows[0].timestamp, latest: rows.at(-1).timestamp }),
   },
   './core-memory-builder': { maybeRunCoreMemoryPipeline: async () => {} },
-  './api-helpers': { simpleLLMCall: async () => { apiCalls++; onCall?.(); return failApi ? { content: null, error: 'fixture failure' } : { content: `summary ${apiCalls}`, wasTruncated: truncated }; } },
-  './memory-embedding': { resolveEmbeddingModel: () => 'fixture', generateEmbedding: async () => { embeddingCalls++; return failEmbedding ? null : [1, 2, 3]; } },
+  './api-helpers': { simpleLLMCall: async (_api,messages) => { assert.ok(!JSON.stringify(messages).includes('SECRET_DIRECTION')); apiCalls++; onCall?.(); return failApi ? { content: null, error: 'fixture failure' } : { content: `summary ${apiCalls}`, wasTruncated: truncated }; } },
+  './memory-embedding': { resolveEmbeddingModel: () => 'fixture', generateEmbedding: async text => { assert.ok(!text.includes('SECRET_DIRECTION')); embeddingCalls++; return failEmbedding ? null : [1, 2, 3]; } },
 };
 const navigator = { locks: { request: async (name, _options, work) => {
   if (heldLocks.has(name)) return work(null);
@@ -256,6 +256,24 @@ async function discard() { const job = await store.readRebuildJob('a'); if (job)
   await service.applyMemoryRebuild('a', job.id);
   assert.equal(storage.getLastSummarizedTimestamp('a'), job.cutoff);
   assert.equal(storage.getEventCounter('a'), legacyCount);
+  await discard();
+  // Exclude out-of-story directions before both legacy-event and round batching.
+  for (const interval of [undefined,2]) {
+    storage.saveMemoryConfig({...storage.loadMemoryConfig(),summarizationRoundInterval:interval,summarizationEventInterval:1,vectorRecallEnabled:true});
+    timeline=[...makeTimeline(),{id:'direction',sourceApp:'chat',timestamp:'2026-01-08T12:00:00.000Z',content:'SECRET_DIRECTION',excludeFromSummary:true}];
+    const preview=await service.previewMemoryRebuild('a',options);
+    assert.equal(preview.sourceCount,7);
+    job=await start();
+    assert.ok(!JSON.stringify(await store.readRebuildBatches(job.id)).includes('SECRET_DIRECTION'));
+    await service.runMemoryRebuild('a');assert.equal((await store.readRebuildJob('a')).status,'ready');
+    await discard();
+  }
+  // A pre-update snapshot containing directions must not continue generating.
+  timeline=makeTimeline();timeline.push({id:'legacy-direction',sourceApp:'chat',timestamp:'2026-01-08T12:00:00.000Z',content:'SECRET_DIRECTION'});
+  job=await start();timeline[timeline.length-1].excludeFromSummary=true;
+  const beforeBlocked=apiCalls;
+  await assert.rejects(()=>service.runMemoryRebuild('a'),/可总结的历史记录已变化/);
+  assert.equal(apiCalls,beforeBlocked);assert.ok(await store.readRebuildJob('a'),'old checkpoint preserved');
   await discard();
   // Restoring an older schema at a higher version still upgrades the new stores.
   storage.saveMemoryConfig({...storage.loadMemoryConfig(),summarizationRoundInterval:2});
