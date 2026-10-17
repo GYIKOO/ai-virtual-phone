@@ -67,6 +67,8 @@ export interface AssemblerInput {
     longTermMemories?: string;
     coreMemories?: string;
     worldBookActivationContext?: string;  // override history-based keyword activation context
+    /** Story references resolved from the selected shared chronology, not just the open page. */
+    historyMacroContext?: Partial<Record<"lastUserMessage" | "lastCharMessage" | "lastMessage", string>>;
     activateAllWorldBooks?: boolean;      // true = skip keyword matching, activate all non-disabled entries
     recentBlocks?: RecentBlock[];          // per-feature recent data blocks; last block wraps history
     unifiedRecentItems?: UnifiedRecentItem[]; // chronological short-term timeline mixing events and surviving history
@@ -676,9 +678,9 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
 
         const engine = new MacroEngine(character.name, resolvedUserName);
         applyTimeContextToMacroEngine(engine, promptTimeContext);
-        engine.lastUserMessage = history.filter(m => m.role === "user").pop()?.content ?? "";
-        engine.lastCharMessage = history.filter(m => m.role === "assistant").pop()?.content ?? "";
-        engine.lastMessage = history.length > 0 ? history[history.length - 1].content : "";
+        engine.lastUserMessage = input.historyMacroContext?.lastUserMessage ?? history.filter(m => m.role === "user").pop()?.content ?? "";
+        engine.lastCharMessage = input.historyMacroContext?.lastCharMessage ?? history.filter(m => m.role === "assistant").pop()?.content ?? "";
+        engine.lastMessage = input.historyMacroContext?.lastMessage ?? (history.length > 0 ? history[history.length - 1].content : "");
         engine.description = character.persona ?? "";
         engine.personality = character.personality ?? "";
         engine.persona = userIdentity?.bio ?? "";
