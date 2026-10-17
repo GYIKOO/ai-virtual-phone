@@ -154,6 +154,7 @@ export type UnifiedRecentItem =
         text: string;
         narrativeText?: string;
         summaryText?: string;
+        dialogueRole?: "user" | "assistant";
     }
     | {
         kind: "history";
@@ -1302,6 +1303,7 @@ export function prepareShortTermContext(
                 text: meta.entry.content,
                 narrativeText: meta.entry.narrativeText,
                 summaryText: meta.entry.summaryText,
+                dialogueRole: meta.entry.dialogueRole,
             });
             continue;
         }
@@ -1545,6 +1547,7 @@ export function prepareGroupShortTermContext(
                 ),
                 text: entry.content,
                 narrativeText: entry.narrativeText,
+                dialogueRole: entry.dialogueRole,
                 summaryText: entry.summaryText,
             });
             continue;

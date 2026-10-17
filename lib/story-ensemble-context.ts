@@ -20,6 +20,9 @@ type Candidate = StoryContextCandidate & {
   history?: ChatMessage[];
   sourceIds?: string[];
   sourceApp?: string;
+  timelineSourceApp?: Extract<UnifiedRecentItem, { kind: "event" }>["sourceApp"];
+  sourceTag?: string;
+  macroRole?: "user" | "assistant";
   background?: "current" | "week";
 };
 
@@ -104,6 +107,9 @@ export async function buildEnsembleStoryPrompt(options: {
           summary: summary ? `[${time(event.timestamp)} 剧情摘要]\n${summary}` : (fullText || event.narrativeText ? event.text : undefined),
           narrative: !!(turn || event.narrativeText),
           sourceIds: turn?.messages.map(message => message.id), sourceApp: event.sourceApp,
+          sourceTag: event.sourceTag,
+          timelineSourceApp: event.sourceApp,
+          macroRole: turn || event.narrativeText ? "assistant" : event.dialogueRole,
         });
       }
     }
@@ -126,10 +132,28 @@ export async function buildEnsembleStoryPrompt(options: {
       .map(item => ensemble ? `【记忆归属：${ownersLabel(item.candidate.owners)}；来源：${item.candidate.sourceApp || "个人记忆"}】\n${item.text}` : item.text).join("\n\n");
     const events: UnifiedRecentItem[] = chosen.filter(item => item.candidate.kind === "recent" && (!item.candidate.history || item.text !== item.candidate.text))
       .map(item => ({ kind: "event", entryId: item.candidate.id, timestamp: item.candidate.timestamp,
-        sourceApp: "story", sourceTag: "recent_events",
+        sourceApp: item.candidate.timelineSourceApp || "story", sourceTag: item.candidate.sourceTag || "recent_events",
         text: ensemble ? `【记录归属：${ownersLabel(item.candidate.owners)}；来源：${item.candidate.sourceApp || "日程与关系"}】\n${item.text}` : item.text }));
     const unified: UnifiedRecentItem[] = [...events, ...history.map((message, historyIndex) => ({ kind: "history" as const, historyIndex, timestamp: message.createdAt }))]
       .sort((a, b) => compareStoryTimes(a.timestamp, b.timestamp));
+    // Macro references use only selected material and retain provenance. A shared
+    // narrative is a scene record, not a private utterance attributed to its lead.
+    const references = [
+      ...history.filter(message => message.role === "user" || message.role === "assistant").map(message => ({
+        timestamp: message.createdAt, role: message.role, current: true,
+        text: `[${time(message.createdAt)} 当前分页·${message.role === "user" ? "用户输入" : "剧情正文"}]\n${message.content}`,
+      })),
+      ...chosen.filter(item => item.candidate.kind === "recent" && !item.candidate.history && item.candidate.macroRole).map(item => ({
+        timestamp: item.candidate.timestamp, role: item.candidate.macroRole, current: false,
+        text: `[${time(item.candidate.timestamp)} ${item.candidate.narrative ? "剧情记录" : "聊天记录"}；相关角色：${ownersLabel(item.candidate.owners)}]\n${item.text}`,
+      })),
+    ].sort((a,b) => compareStoryTimes(a.timestamp,b.timestamp) || Number(a.current)-Number(b.current));
+    const historyMacroContext = recentEnabled ? {
+      // The user's actual current-page input remains the generation request.
+      lastUserMessage: references.filter(row => row.current && row.role === "user").at(-1)?.text || "",
+      lastCharMessage: references.filter(row => row.role === "assistant").at(-1)?.text || "",
+      lastMessage: references.at(-1)?.text || "",
+    } : undefined;
     const schedules = chosen.filter(item => item.candidate.background);
     const scheduleText = (items: typeof chosen) => items.map(item => `角色：${ownersLabel(item.candidate.owners)}\n${item.text}`).join("\n\n");
     let relations = "";
@@ -147,6 +171,7 @@ export async function buildEnsembleStoryPrompt(options: {
     }
     return [...assemblePromptPayload({ ...base, history,
       worldBookActivationContext: query,
+      historyMacroContext,
       recentBlocks: events.length ? [{ tag: "recent_events", content: events.map(item => item.kind === "event" ? item.text : "").join("\n\n") }] : [],
       unifiedRecentItems: unified,
       coreMemories: memoryText("core"), longTermMemories: memoryText("long"),
@@ -157,10 +182,24 @@ export async function buildEnsembleStoryPrompt(options: {
       dwellingContext: options.independent || ensemble ? null : undefined,
     }), ...options.tail];
   };
-  // Retrieval is anchored in the current scene, not separately in each character's unrelated last chat.
-  const scene = currentHistory.slice(-8).map(message => message.content).join("\n");
-  const query = [scene.slice(-12000), options.queryInstruction?.slice(-4000)].filter(Boolean).join("\n")
-    || candidates.filter(c => c.kind === "recent").sort((a, b) => compareStoryTimes(a.timestamp, b.timestamp)).slice(-5).map(c => c.summary || c.text).join("\n").slice(-12000);
+  // A page is a view of the chronology, not the retrieval clock. Reserve recent
+  // narrative anchors as well as recent chat so a burst of online bubbles cannot
+  // erase the scene from the query. This only bounds retrieval text, not history.
+  const queryRows = [...new Map<string, { id: string; timestamp: string; text: string; narrative?: boolean }>([
+    ...candidates.filter(c => c.kind === "recent").map(c => [c.id, c] as const),
+    ...currentHistory.map(message => [`history:${message.id}`, {
+      id: `history:${message.id}`, timestamp: message.createdAt, text: message.content, narrative: true,
+    }] as const),
+  ]).values()].sort((a,b) => compareStoryTimes(a.timestamp,b.timestamp));
+  const localAnchorIds = new Set(currentHistory.slice(-2).map(message => `history:${message.id}`));
+  const queryAnchors = new Set([
+    ...queryRows.slice(-10), ...queryRows.filter(row => row.narrative && !row.id.startsWith("history:")).slice(-3),
+    ...queryRows.filter(row => localAnchorIds.has(row.id)),
+  ]);
+  const query = [
+    ...queryRows.filter(row => queryAnchors.has(row)).map(row => `[${time(row.timestamp)}]\n${row.text.slice(-800)}`),
+    options.queryInstruction?.slice(-4000),
+  ].filter(Boolean).join("\n");
   const inputBudget = storyInputBudget(base.preset, contextCapacity(config));
   // Fail before embedding calls if immutable material alone cannot fit.
   packStoryContext({ candidates: [], inputBudget, limits, render });

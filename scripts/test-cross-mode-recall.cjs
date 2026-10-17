@@ -12,6 +12,11 @@ const Dexie = require('dexie');
 Dexie.dependencies.indexedDB = indexedDB;
 Dexie.dependencies.IDBKeyRange = IDBKeyRange;
 const modules = new Map(), kv = new Map();
+let referenceTime;
+class ClockDate extends Date {
+  constructor(...args) { if (args.length) super(...args); else super(referenceTime ?? Date.now()); }
+  static now() { return referenceTime ?? Date.now(); }
+}
 const at = n => new Date(Date.UTC(2026, 9, 15, n)).toISOString();
 const eventToken = id => `EVENT${id.replace(/-/g,'')}`;
 const characters = ['a','b','c','z'].map(id => ({id, name:id.toUpperCase(), persona:`CARD_${id}`}));
@@ -52,7 +57,7 @@ function load(name) {
   const exports = {}; modules.set(name,exports);
   const filename=`lib/${name.slice(2)}.ts`;
   vm.runInNewContext(ts.transpileModule(sourceOf(filename),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
-    {exports,require:load,window:{},indexedDB,IDBKeyRange,console,Date,structuredClone,setTimeout,clearTimeout,AbortController},{filename});
+    {exports,require:load,window:{},indexedDB,IDBKeyRange,console,Date:ClockDate,structuredClone,setTimeout,clearTimeout,AbortController},{filename});
   return exports;
 }
 const text = messages => messages.map(m=>m.content).join('\n');
@@ -187,4 +192,77 @@ function loadChatBuilders(short, assembler) {
   chatRows.get('direct').push({id:'failed',sessionId:'direct',role:'assistant',status:'failed',createdAt:at(13),content:'FAILED_REPLY'});
   assert.ok(!short.loadNativeTimeline('a').some(row=>row.content.includes('FAILED_REPLY')),'failed generation is not summary material');
   console.log(`PASS: ${edges} directed cross-mode edges reach final prompts once; participant/IF/archive/retry/source-switch isolation, detailed single recall and budget fallback`);
+
+  // Returning to an old single page after newer shared scenes and online/offline
+  // conversations must update retrieval and macros, not merely display order.
+  referenceTime = Date.parse('2026-10-16T20:00:00+08:00');
+  characters[0].timeZone = 'Asia/Shanghai';
+  config = {...config,shortTermTokenBudget:60000,contextTokenLimit:100000,recentContextDetail:'detailed'};
+  const oldTime='2026-10-15T00:03:00+08:00', newTime='2026-10-16T20:00:00+08:00';
+  const old={id:'old-single',sessionId:'single',role:'assistant',rawContent:'OLD_SCENE_UNCUT',storySummary:'OLD_SUMMARY',createdAt:oldTime};
+  const fresh={id:'return-input',sessionId:'single',role:'user',rawContent:'RETURN_NEW_INPUT',createdAt:newTime};
+  story.replaceStoryMessages('single',[old,fresh]);
+  story.replaceStoryMessages('multi',[{id:'new-multi',sessionId:'multi',role:'assistant',rawContent:'NEW_MULTIPERSON_PROGRESS',
+    storySummary:'NEW_MULTI_SUMMARY',createdAt:'2026-10-16T18:00:00+08:00'}]);
+  story.replaceStoryMessages('no-summary',[]);
+  for(const id of ['direct','group']) {
+    kv.set('ai_phone_chat_offline_turns:'+id,JSON.stringify([{id:'recent-offline-'+id,sessionId:id,
+      userContent:'OFFLINE_NEW_USER_'+id,assistantContent:'OFFLINE_NEW_PROGRESS_'+id,summary:'OFFLINE_NEW_SUMMARY_'+id,
+      createdAt:'2026-10-16T19:00:00+08:00'}]));
+    chatRows.set(id,[{id:'new-online-'+id,sessionId:id,role:'assistant',senderName:'A',senderCharacterId:'a',
+      content:'ONLINE_NEW_PROGRESS_'+id,createdAt:'2026-10-16T19:55:00+08:00'}]);
+  }
+  let retrievalQuery='';
+  mocks['./memory-service'].createStoryMemoryRanker = query => { retrievalQuery=query; return async()=>[]; };
+  mocks['./settings-storage'].resolveBinding=()=>({apiConfigId:'api',presetId:'preset',worldBookIds:['continuity']});
+  mocks['./settings-storage'].loadWorldBooks=()=>[{id:'continuity',entries:[
+    {key:'NEW_MULTIPERSON_PROGRESS',content:'ACTIVATED_MULTI_LORE',position:0},
+    {key:'ONLINE_NEW_PROGRESS',content:'ACTIVATED_ONLINE_LORE',position:0},
+  ]}];
+  preset.prompts.push({identifier:'worldInfoBefore',marker:true,enabled:true,role:'system'});
+  preset.prompts.push({identifier:'macro-check',enabled:true,role:'system',content:
+    '<last_char>{{lastCharMessage}}</last_char><last_message>{{lastMessage}}</last_message><last_user>{{lastUserMessage}}</last_user>'});
+  const output=text(await consumers.single());
+  for(const fragment of ['OLD_SCENE_UNCUT','NEW_MULTIPERSON_PROGRESS','OFFLINE_NEW_PROGRESS_direct','OFFLINE_NEW_PROGRESS_group',
+    'ONLINE_NEW_PROGRESS_direct','ONLINE_NEW_PROGRESS_group','RETURN_NEW_INPUT']) assert.ok(output.includes(fragment),fragment);
+  const order=['OLD_SCENE_UNCUT','NEW_MULTIPERSON_PROGRESS','OFFLINE_NEW_PROGRESS_direct','ONLINE_NEW_PROGRESS_direct','RETURN_NEW_INPUT'];
+  for(let i=1;i<order.length;i++) assert.ok(output.indexOf(order[i-1])<output.indexOf(order[i]),'chronology '+order[i]);
+  for(const fragment of order) assert.ok(retrievalQuery.includes(fragment),'retrieval includes '+fragment);
+  assert.ok(output.includes('ACTIVATED_MULTI_LORE') && output.includes('ACTIVATED_ONLINE_LORE'));
+  assert.match(output,/<last_char>[^]*ONLINE_NEW_PROGRESS[^]*<\/last_char>/);
+  assert.ok(!output.match(/<last_char>([^]*?)<\/last_char>/)[1].includes('OLD_SCENE_UNCUT'));
+  assert.ok(output.match(/<last_user>([^]*?)<\/last_user>/)[1].includes('RETURN_NEW_INPUT'));
+  assert.ok(output.match(/<last_message>([^]*?)<\/last_message>/)[1].includes('RETURN_NEW_INPUT'));
+  assert.ok(output.includes('1天19小时57分钟'),'old local page age is 43h57, not last night');
+  assert.ok(output.includes('2026-10-16T12:00:00.000Z'),'generation reference time uses now');
+  assert.equal(story.loadStoryMessages('single')[0].rawContent,'OLD_SCENE_UNCUT','old prose is not rewritten');
+  // A director-only return has no fresh in-story user input; latest experience still wins.
+  story.replaceStoryMessages('single',[old]);
+  const directed=text((await engine.previewStoryPromptPayload('a',[old,{id:'direction',sessionId:'single',role:'user',kind:'director',
+    rawContent:'DIRECTOR_ONLY',createdAt:newTime}],storyOptions('single',['a']))).messages);
+  assert.ok(directed.match(/<last_message>([^]*?)<\/last_message>/)[1].includes('ONLINE_NEW_PROGRESS'));
+  assert.ok(retrievalQuery.includes('DIRECTOR_ONLY') && retrievalQuery.includes('NEW_MULTIPERSON_PROGRESS'));
+  const originalOnline=chatRows.get('direct');
+  chatRows.set('direct',[...originalOnline,...Array.from({length:30},(_,i)=>({id:'burst-'+i,sessionId:'direct',role:'user',
+    content:'RECENT_BUBBLE_'+i,createdAt:new Date(Date.parse('2026-10-16T19:56:00+08:00')+i*1000).toISOString()}))]);
+  const burst=text((await engine.previewStoryPromptPayload('a',[old,fresh],storyOptions('single',['a']))).messages);
+  assert.ok(retrievalQuery.includes('NEW_MULTIPERSON_PROGRESS') && retrievalQuery.includes('OFFLINE_NEW_PROGRESS_direct'),
+    'online burst cannot evict recent cross-page narrative retrieval anchors');
+  assert.ok(burst.match(/<last_char>([^]*?)<\/last_char>/)[1].includes('ONLINE_NEW_PROGRESS'),
+    'a newer user bubble is not misattributed as a character reply');
+  chatRows.set('direct',originalOnline);
+  config={...config,shortTermAllowedSources:{story:false}};
+  const excludedStory=text((await engine.previewStoryPromptPayload('a',[old,fresh],storyOptions('single',['a']))).messages);
+  assert.ok(!excludedStory.includes('NEW_MULTIPERSON_PROGRESS') && !retrievalQuery.includes('NEW_MULTIPERSON_PROGRESS'));
+  config={...config,shortTermAllowedSources:{}};
+  // No automatic expiry, even without real-time awareness; explicit isolation remains authoritative.
+  const noClock=text((await engine.previewStoryPromptPayload('a',[old,fresh],{...storyOptions('single',['a']),globalSettings:{timeAware:false}})).messages);
+  assert.ok(noClock.includes('OLD_SCENE_UNCUT') && noClock.includes('NEW_MULTIPERSON_PROGRESS'));
+  assert.ok(!noClock.includes('2026-10-16') && !noClock.includes('1天19小时57分钟'));
+  retrievalQuery='';
+  const isolatedReturn=text((await engine.previewStoryPromptPayload('a',[old,fresh],{
+    ...storyOptions('single',['a']),storyMemory:{independent:true}})).messages);
+  assert.ok(!isolatedReturn.includes('NEW_MULTIPERSON_PROGRESS') && !isolatedReturn.includes('ONLINE_NEW_PROGRESS'));
+  assert.equal(retrievalQuery,'','independent stories do not retrieve native memories');
+  console.log('PASS: Oct 15 00:03 -> Oct 16 20:00 single-page return; real stores/engine/assembler retain old prose, retrieve new multi/online/offline events, activate new lore and resolve timestamped macros; director/no-clock/IF boundaries');
 })().catch(error=>{console.error(error);process.exitCode=1;});
