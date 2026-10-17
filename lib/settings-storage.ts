@@ -297,6 +297,7 @@ export function createPreset(name: string): PresetConfig {
         createdAt: now,
         updatedAt: now,
         temperature: 1,
+        streaming_mode: "auto",
         top_p: 1,
         top_k: 0,
         frequency_penalty: 0,
@@ -322,6 +323,9 @@ export function parsePresetFromJson(text: string, fallbackName: string = "导入
 
         // Extract basic fields
         if (typeof obj.temperature === "number") preset.temperature = obj.temperature;
+        // Imported presets without this field keep their previous application settings.
+        preset.streaming_mode = obj.streaming_mode === "auto" || obj.streaming_mode === "stream" || obj.streaming_mode === "non-stream"
+            ? obj.streaming_mode : undefined;
         if (typeof obj.top_p === "number") preset.top_p = obj.top_p;
         if (typeof obj.top_k === "number") preset.top_k = obj.top_k;
         if (typeof obj.frequency_penalty === "number") preset.frequency_penalty = obj.frequency_penalty;

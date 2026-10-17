@@ -15,7 +15,7 @@ type Confirm = "start" | "apply" | "discard" | "rollback";
 export function MemoryRebuildPanel({ characterId, characterName, onChanged }: { characterId: string; characterName: string; onChanged: () => void }) {
     const [open, setOpen] = useState(false);
     const [job, setJob] = useState<RebuildJob>();
-    const [batchSize, setBatchSize] = useState(() => loadMemoryConfig().summarizationEventInterval);
+    const [batchSize, setBatchSize] = useState(() => { const config=loadMemoryConfig(); return config.summarizationRoundInterval??config.summarizationEventInterval; });
     const [inputTokens, setInputTokens] = useState(8000);
     const [includeCore, setIncludeCore] = useState(false);
     const [preview, setPreview] = useState<RebuildPreview>();
@@ -89,7 +89,7 @@ export function MemoryRebuildPanel({ characterId, characterName, onChanged }: { 
                         <span className="menu-desc">超长记录会进一步拆分。须为模型输出预留空间；估算不等于模型精确计数。</span>
                     </label>
                     <label className="menu-label flex items-center gap-2"><input type="checkbox" checked={includeCore} onChange={e => { setIncludeCore(e.target.checked); setPreview(undefined); }} />同时基于新长期记忆重建核心记忆</label>
-                    <p className="menu-desc">按当前记忆来源设置读取全部可用历史。剧情、线下沿用已有摘要；已删除记录无法恢复，独立剧情仍遵守原有隔离规则。</p>
+                    <p className="menu-desc">沿用当前总结计数方式和记忆来源设置。剧情、线下优先使用摘要，缺少摘要时使用正文摘录；已删除记录无法恢复，独立剧情仍保持隔离。</p>
                     <button className="ui-btn ui-btn-outline" disabled={busy} onClick={() => void act(async () => { setPreview(await previewMemoryRebuild(characterId, options)); })}>预览重建范围（不调用 API）</button>
                     {preview && <div className="menu-group p-3 flex flex-col gap-2">
                         <p className="menu-label">共 {preview.sourceCount} 条 · 重建 {preview.summarizedCount} 条 → {preview.batchCount} 批长期总结</p>

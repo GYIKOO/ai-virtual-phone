@@ -8,7 +8,8 @@ import { Toggle } from "@/components/ui/form";
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import type { MemoryEntry, MemoryConfig } from "@/lib/memory-types";
-import { DEFAULT_CORE_MEMORY_PROMPT, DEFAULT_SUMMARIZATION_PROMPT } from "@/lib/memory-types";
+import { DEFAULT_CORE_MEMORY_PROMPT, DEFAULT_SUMMARIZATION_PROMPT, DEFAULT_MEMORY_CONFIG,
+    restoreMemorySettingsSection, type MemorySettingsSection } from "@/lib/memory-types";
 import {
     loadMemoryConfig,
     saveMemoryConfig,
@@ -34,6 +35,19 @@ type MemoryView = "list" | "detail" | "settings";
 type MemoryTab = "short" | "shared" | "core" | "long";
 type MemoryBudgetKey = "shortTermTokenBudget" | "coreMemoryTokenBudget" | "longTermTokenBudget";
 
+const MEMORY_SECTION_LABELS: Record<MemorySettingsSection, string> = {
+    context: "上下文容量", budgets: "控制截断量", intervals: "自动总结间隔",
+};
+
+function MemorySectionHeading({ section, onReset }: { section: MemorySettingsSection; onReset: () => void }) {
+    const title = MEMORY_SECTION_LABELS[section];
+    return <div className="flex items-center justify-between gap-2 mx-2">
+        <p className="menu-group-desc">{title}</p>
+        <button type="button" className="menu-label menu-label-danger ts-12 underline shrink-0"
+            aria-label={`恢复${title}默认设置`} onClick={onReset}>恢复默认</button>
+    </div>;
+}
+
 const MEMORY_TOKEN_BUDGET_MAX = 100000;
 const MEMORY_TOKEN_BUDGET_MIN: Record<MemoryBudgetKey, number> = {
     shortTermTokenBudget: 1000,
@@ -41,9 +55,9 @@ const MEMORY_TOKEN_BUDGET_MIN: Record<MemoryBudgetKey, number> = {
     longTermTokenBudget: 200,
 };
 const MEMORY_TOKEN_BUDGET_STEP: Record<MemoryBudgetKey, number> = {
-    shortTermTokenBudget: 5000,
-    coreMemoryTokenBudget: 1000,
-    longTermTokenBudget: 1000,
+    shortTermTokenBudget: 1000,
+    coreMemoryTokenBudget: 100,
+    longTermTokenBudget: 100,
 };
 const MANUAL_MEMORY_CONTENT_LIMIT = 3000;
 // 详情页时间线最多解析渲染的条数：全量历史可能有几万条，
@@ -223,6 +237,8 @@ export function MemoryBankPage({
     const [bulkSelectMode, setBulkSelectMode] = useState(false);
     const [selectedTimelineIds, setSelectedTimelineIds] = useState<Set<string>>(new Set());
     const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+    const [confirmRoundCounting, setConfirmRoundCounting] = useState(false);
+    const [resetSection, setResetSection] = useState<MemorySettingsSection | null>(null);
 
     const disabledSourceCount = MEMORY_SOURCE_OPTIONS
         .filter(source => (config.shortTermAllowedSources ?? {})[source.key] === false).length;
@@ -502,7 +518,9 @@ export function MemoryBankPage({
     const saveInterval = (value: number) => {
         if (!Number.isFinite(value)) return;
         const nextValue = Math.min(200, Math.max(10, Math.round(value)));
-        const next = { ...config, summarizationEventInterval: nextValue };
+        const next = config.summarizationRoundInterval === undefined
+            ? { ...config, summarizationEventInterval: nextValue }
+            : { ...config, summarizationRoundInterval: nextValue };
         setConfig(next);
         saveMemoryConfig(next);
     };
@@ -1003,9 +1021,32 @@ export function MemoryBankPage({
         const isDefault = (config.summarizationPrompt ?? DEFAULT_SUMMARIZATION_PROMPT) === DEFAULT_SUMMARIZATION_PROMPT;
         const isCoreModified = currentCorePrompt !== (config.coreMemoryPrompt ?? DEFAULT_CORE_MEMORY_PROMPT);
         const isCoreDefault = (config.coreMemoryPrompt ?? DEFAULT_CORE_MEMORY_PROMPT) === DEFAULT_CORE_MEMORY_PROMPT;
+        const resetDescriptions: Record<MemorySettingsSection, string> = {
+            context: `总容量恢复为 ${DEFAULT_MEMORY_CONFIG.contextTokenLimit?.toLocaleString()} tokens，近期正文保留恢复为“详细”。`,
+            budgets: `短期记忆＋最近上下文、长期记忆、核心记忆分别恢复为 ${DEFAULT_MEMORY_CONFIG.shortTermTokenBudget.toLocaleString()}、${DEFAULT_MEMORY_CONFIG.longTermTokenBudget.toLocaleString()}、${DEFAULT_MEMORY_CONFIG.coreMemoryTokenBudget.toLocaleString()} tokens。`,
+            intervals: `改为每 ${DEFAULT_MEMORY_CONFIG.summarizationRoundInterval} 轮完整交流总结一次，每 ${DEFAULT_MEMORY_CONFIG.coreSummarizationInterval} 条长期总结提炼一次核心记忆。`,
+        };
 
         return (
             <div className="page-menu memory-settings-menu">
+                {resetSection && <ConfirmDialog
+                    title={`恢复${MEMORY_SECTION_LABELS[resetSection]}默认设置？`}
+                    message={`${resetDescriptions[resetSection]}仅调整本模块设置，不修改提示词、其他设置或已有记录，也不会立即发起总结。`}
+                    confirmLabel="恢复默认"
+                    onCancel={() => setResetSection(null)}
+                    onConfirm={() => {
+                        const next = restoreMemorySettingsSection(config, resetSection);
+                        setConfig(next);
+                        saveMemoryConfig(next);
+                        setResetSection(null);
+                    }}
+                />}
+                {confirmRoundCounting && <ConfirmDialog title="切换为按轮总结" confirmLabel="切换"
+                    message={`改为每${DEFAULT_MEMORY_CONFIG.summarizationRoundInterval}轮完整交流自动总结？旧记忆、原始记录和未总结内容均保留；切换后可调整轮数。`}
+                    onCancel={()=>setConfirmRoundCounting(false)} onConfirm={()=>{
+                        const next={...config,summarizationRoundInterval:DEFAULT_MEMORY_CONFIG.summarizationRoundInterval}; setConfig(next); saveMemoryConfig(next);
+                        setConfirmRoundCounting(false);
+                    }} />}
                 {/* Manual summarize */}
                 {selectedCharId && (
                     <>
@@ -1143,7 +1184,7 @@ export function MemoryBankPage({
                         <MemorySettingsIcon icon={Clock} color={BINDING_ACCENTS.memory} />
                         <div className="menu-label-group">
                             <span className="menu-label">长期记忆自动总结</span>
-                            <span className="menu-desc">每隔一定条数自动将新事件整理为长期记忆</span>
+                            <span className="menu-desc">按设定间隔将新记录整理为长期记忆</span>
                         </div>
                         <div className="menu-right">
                             <Toggle checked={config.autoSummarizeEnabled ?? true} onChange={(v) => {
@@ -1171,7 +1212,7 @@ export function MemoryBankPage({
                         <MemorySettingsIcon icon={Search} color={BINDING_ACCENTS.embedding} />
                         <div className="menu-label-group">
                             <span className="menu-label">向量召回</span>
-                            <span className="menu-desc">长期记忆超出预算时，通过 embedding 按相关性检索</span>
+                            <span className="menu-desc">近期总结连续保留，更早的记忆通过 embedding 按相关性召回</span>
                         </div>
                         <div className="menu-right">
                             <Toggle checked={config.vectorRecallEnabled ?? true} onChange={(v) => {
@@ -1184,25 +1225,43 @@ export function MemoryBankPage({
                 </div>
 
                 {/* Token budget sliders */}
-                <p className="menu-group-desc mx-2">多人剧情总容量</p>
+                <MemorySectionHeading section="context" onReset={() => setResetSection("context")} />
                 <div className="menu-group">
                     <MemorySettingsSliderItem
                         icon={Users}
                         color={BINDING_ACCENTS.memory}
-                        label="多人剧情上下文容量"
-                        desc="全员共用，含设定、记忆与输出预留；设为不高于模型容量，同时受预设容量约束"
-                        value={config.storyContextTokenLimit ?? 100000}
+                        label="上下文总容量"
+                        desc="聊天与剧情的单人、多人共用容量规则；含设定、记忆和输出预留，同时受预设容量约束"
+                        value={config.contextTokenLimit ?? config.storyContextTokenLimit ?? 100000}
                         min={2000}
                         max={1000000}
                         step={1000}
                         onChange={value => {
-                            const next = { ...config, storyContextTokenLimit: value };
+                            const next = { ...config, contextTokenLimit: value };
                             setConfig(next);
                             saveMemoryConfig(next);
                         }}
                     />
                 </div>
-                <p className="menu-group-desc mx-2">控制截断量</p>
+                <div className="menu-group">
+                    <div className="menu-item memory-slider-item">
+                        <div className="memory-slider-header">
+                            <MemorySettingsIcon icon={Archive} color={BINDING_ACCENTS.memory} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">近期正文保留</span>
+                                <span className="menu-desc">在总容量内平衡全文与摘要；线下和剧情的近期细节有独立保留空间</span>
+                            </div>
+                        </div>
+                        <select className="ui-select memory-settings-slider" aria-label="近期正文保留" value={config.recentContextDetail ?? "standard"}
+                            onChange={event=>{
+                                const next={...config,recentContextDetail:event.target.value as NonNullable<MemoryConfig["recentContextDetail"]>};
+                                setConfig(next); saveMemoryConfig(next);
+                            }}>
+                            <option value="compact">精简</option><option value="standard">标准</option><option value="detailed">详细</option>
+                        </select>
+                    </div>
+                </div>
+                <MemorySectionHeading section="budgets" onReset={() => setResetSection("budgets")} />
                 <div className="menu-group">
                     <MemorySettingsSliderItem
                         icon={Users}
@@ -1240,19 +1299,22 @@ export function MemoryBankPage({
                 </div>
 
                 {/* Summarization interval */}
-                <p className="menu-group-desc mx-2">自动总结间隔</p>
+                <MemorySectionHeading section="intervals" onReset={() => setResetSection("intervals")} />
                 <div className="menu-group">
                     <MemorySettingsSliderItem
                         icon={Clock}
                         color={BINDING_ACCENTS.api}
-                        label="总结间隔"
-                        desc="每 N 条事件自动触发总结"
-                        value={config.summarizationEventInterval ?? 50}
+                        label={config.summarizationRoundInterval === undefined ? "总结间隔（旧版事件计数）" : "总结间隔（轮）"}
+                        desc={config.summarizationRoundInterval === undefined ? "保留原有事件计数；可切换为按完整交流轮次整理" : "一次正式回复算一轮，同次生成的气泡合并计数；其他活动按独立事件计"}
+                        value={config.summarizationRoundInterval ?? config.summarizationEventInterval ?? 80}
                         min={10}
                         max={200}
                         step={10}
                         onChange={saveInterval}
                     />
+                    {config.summarizationRoundInterval === undefined && <div className="px-4 pb-4">
+                        <button className="ui-btn ui-btn-outline" onClick={()=>setConfirmRoundCounting(true)}>改用轮数总结</button>
+                    </div>}
                     <MemorySettingsSliderItem
                         icon={Brain}
                         color={BINDING_ACCENTS.embedding}

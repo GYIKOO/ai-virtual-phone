@@ -1,6 +1,7 @@
 import type { LLMMessage } from "./llm-prompt-assembler";
 import type { PresetConfig } from "./settings-types";
 import { estimateTokens } from "./token-counter";
+import { selectRecentContext, compareMemoryTime, type ContextDetail } from "./memory-context-policy";
 
 export type StoryBudgetKind = "recent" | "long" | "core";
 export type StoryContextCandidate = {
@@ -12,12 +13,13 @@ export type StoryContextCandidate = {
   /** Existing summary, never a freshly invented replacement. */
   summary?: string;
   score?: number;
+  narrative?: boolean;
+  unitId?: string;
 };
 export type SelectedStoryContext = { candidate: StoryContextCandidate; text: string };
 
 export function compareStoryTimes(a: string, b: string): number {
-  const left = Date.parse(a), right = Date.parse(b);
-  return Number.isFinite(left) && Number.isFinite(right) ? left - right : a.localeCompare(b);
+  return compareMemoryTime(a, b);
 }
 
 export function storyInputBudget(preset: PresetConfig | null, configuredLimit?: number): number {
@@ -70,6 +72,7 @@ type StoryPackingOptions = {
   inputBudget: number;
   limits: Record<StoryBudgetKind, number>;
   render: (selected: SelectedStoryContext[]) => LLMMessage[];
+  detail?: ContextDetail;
 };
 type PackedStoryContext = { messages: LLMMessage[]; selected: SelectedStoryContext[]; estimatedTokens: number };
 
@@ -77,7 +80,7 @@ function* storyPackingSteps(options: StoryPackingOptions): Generator<void, Packe
   const base = options.render([]);
   const baseTokens = estimateStoryMessages(base);
   if (baseTokens > options.inputBudget) {
-    throw new Error(`多人剧情的角色设定、预设、世界书与本轮输入已超过上下文预算（估算 ${baseTokens} / ${options.inputBudget} tokens）。请缩减必需内容，或将预设上下文容量设为模型实际支持的数值。`);
+    throw new Error(`角色设定、预设、世界书与本轮输入已超过上下文预算（估算 ${baseTokens} / ${options.inputBudget} tokens）。请缩减必需内容，或将预设上下文容量设为模型实际支持的数值。`);
   }
   const available = options.inputBudget - baseTokens;
   yield;
@@ -99,6 +102,18 @@ function* storyPackingSteps(options: StoryPackingOptions): Generator<void, Packe
     return variants.get(text)!;
   };
   const take = function* (kind: StoryBudgetKind, allowance: number): Generator<void> {
+    if (kind === "recent") {
+      const room = Math.min(allowance - used[kind], available - total);
+      if (room <= 0) return;
+      const rows = selectRecentContext(pools.recent.filter(candidate => !chosen.has(candidate)), room, options.detail,
+        (text, candidate) => costOf(candidate, text));
+      for (const row of rows.reverse()) {
+        const cost = costOf(row.candidate, row.text);
+        selected.push(row); chosen.add(row.candidate); used.recent += cost; total += cost;
+      }
+      yield;
+      return;
+    }
     let visited = 0;
     for (const candidate of pools[kind]) {
       if (++visited % 128 === 0) yield;
@@ -121,7 +136,12 @@ function* storyPackingSteps(options: StoryPackingOptions): Generator<void, Packe
   // Count the actual assembled prompt, including wrappers, macros, preset and world books.
   while (estimateStoryMessages(messages) > options.inputBudget && selected.length) {
     yield;
-    selected.pop();
+    const removed = selected.pop()!;
+    if (removed.candidate.unitId) {
+      for (let i = selected.length - 1; i >= 0; i--) {
+        if (selected[i].candidate.kind === removed.candidate.kind && selected[i].candidate.unitId === removed.candidate.unitId) selected.splice(i, 1);
+      }
+    }
     messages = options.render(selected);
   }
   return { messages, selected, estimatedTokens: estimateStoryMessages(messages) };

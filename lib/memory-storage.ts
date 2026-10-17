@@ -82,14 +82,20 @@ function runRequest<T>(req: IDBRequest<T>): Promise<T> {
 // ── Long-term Entry CRUD ──
 
 export async function saveMemoryEntry(entry: MemoryEntry): Promise<void> {
+    await saveMemoryEntries([entry]);
+}
+
+/** A failed summary batch cannot leave a partially replaced set of memories. */
+export async function saveMemoryEntries(entries: MemoryEntry[]): Promise<void> {
     const db = await openDb();
-    if (!db) return;
+    if (!db) throw new Error("记忆数据库不可用，未保存记忆，请检查存储权限和剩余空间。");
     try {
         const tx = db.transaction(STORE_NAME, "readwrite");
-        tx.objectStore(STORE_NAME).put(entry);
+        for (const entry of entries) tx.objectStore(STORE_NAME).put(entry);
         await new Promise<void>((res, rej) => {
             tx.oncomplete = () => res();
             tx.onerror = () => rej(tx.error);
+            tx.onabort = () => rej(tx.error || new Error("记忆写入已中止"));
         });
     } finally {
         db.close();
@@ -207,7 +213,14 @@ export function loadMemoryConfig(): MemoryConfig {
     try {
         const raw = kvGet(CONFIG_KEY);
         if (!raw) return { ...DEFAULT_MEMORY_CONFIG };
-        return { ...DEFAULT_MEMORY_CONFIG, ...JSON.parse(raw) };
+        const saved = JSON.parse(raw);
+        return { ...DEFAULT_MEMORY_CONFIG, ...saved,
+            // Legacy counters keep their meaning until the user explicitly opts into rounds.
+            summarizationRoundInterval: saved.summarizationRoundInterval,
+            contextTokenLimit: saved.contextTokenLimit ?? saved.storyContextTokenLimit ?? DEFAULT_MEMORY_CONFIG.contextTokenLimit,
+            // Previously missing detail meant standard; only new configurations start detailed.
+            recentContextDetail: saved.recentContextDetail ?? "standard",
+        };
     } catch {
         return { ...DEFAULT_MEMORY_CONFIG };
     }

@@ -22,11 +22,14 @@ export type MemoryConfig = {
     vectorRecallEnabled: boolean;           // whether vector embedding recall is used for memory retrieval
     maxLongTermEntries: number;
     summarizationEventInterval: number;     // trigger summarization every N events
+    summarizationRoundInterval?: number;   // absent preserves legacy event counting
     coreSummarizationInterval: number;      // trigger core-memory rebuild every N new long-term memories
     shortTermTokenBudget: number;           // token limit for short-term event log
     coreMemoryTokenBudget: number;          // token limit for injected core memories
     longTermTokenBudget: number;            // token limit for injected long-term memories
     storyContextTokenLimit?: number;       // whole ensemble request window, including output reserve
+    contextTokenLimit?: number;            // shared request window; legacy story limit remains a read fallback
+    recentContextDetail?: "compact" | "standard" | "detailed";
     summarizationPrompt: string;            // user-editable prompt template for memory summarization
     coreMemoryPrompt: string;               // user-editable prompt template for core-memory extraction
     vnSummaryPrompt: string;                // user-editable prompt for VN chapter summarization
@@ -65,11 +68,11 @@ export const DEFAULT_SUMMARIZATION_PROMPT = `你是一个记忆整理助手。�
 {{events}}
 
 要求：
-- 用第三人称描述{{char}}和用户之间的互动
-- 保留关键事实：提到的名字、做出的承诺、情感变化、关系里程碑
-- 保留用户分享的具体信息（生日、偏好、习惯）
-- 保留朋友圈等非聊天事件中的关键信息
-- 100-200字
+- 用第三人称，按事件先后整理{{char}}的经历及与相关人物的互动
+- 保留关键人物、事件经过与因果、约定、目标、关系和情感变化，以及影响后续的未完成事项
+- 保留人物分享的具体信息（生日、偏好、习惯），以及朋友圈等非聊天事件中的关键信息
+- 沿用记录中明确的发生时间或时间范围；区分已经发生的事、未来计划和人物的推测，时间不明时保持未知
+- 合并重复信息，以事实为依据。普通批次约300-600字；内容少时简短概括，信息密集时可适当增加篇幅
 - 不要包含格式标记
 
 总结：`;
@@ -87,19 +90,13 @@ export const DEFAULT_CORE_MEMORY_PROMPT = `你是一个核心记忆整理助手�
 {{events}}
 
 要求：
-- 突出最关键、最稳定、最影响关系判断的事实
-- 确认在一起 / 确认分手 / 复合
-- 订婚 / 结婚 / 离婚
-- 恋爱周年、结婚纪念日、在一起多久
-- 明确的长期关系身份（如恋人、前任、配偶）
-- 共同生活的重要里程碑（如同居、见家长、共同养宠物）
-- 普通日常聊天
-- 一般情绪波动
-- 暂时性的矛盾或暧昧
-- 普通偏好信息
-- 任何不确定、推测性的内容
-- 用第三人称，事实性描述
-- 80-180字
+- 提炼最稳定、最重要、持续影响后续理解与行动的事实
+- 保留人物身份与关系的明确变化、重要经历及其长期影响、长期目标、关键约定和持续有效的个人信息
+- 关系性质和亲疏以记录为准，保留相关人物各自的立场与知情范围
+- 日常交流、情绪和偏好按其持续影响取舍；将已确定的事实与尚未实现的目标或约定分清
+- 保留关键事件已有的发生时间或时间范围；时间不明时保持未知
+- 用第三人称，合并重复信息，作事实性概括
+- 通常80-180字；关键事实较多时可适当增加篇幅
 - 不要使用 JSON、列表符号、标题或格式标记
 
 核心记忆总结：`;
@@ -110,11 +107,14 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
     vectorRecallEnabled: true,
     maxLongTermEntries: 500,
     summarizationEventInterval: 80,
+    summarizationRoundInterval: 30,
     coreSummarizationInterval: 5,
-    shortTermTokenBudget: 100000,
-    coreMemoryTokenBudget: 100000,
-    longTermTokenBudget: 100000,
+    shortTermTokenBudget: 60000,
+    coreMemoryTokenBudget: 6000,
+    longTermTokenBudget: 12000,
     storyContextTokenLimit: 100000,
+    contextTokenLimit: 100000,
+    recentContextDetail: "detailed",
     summarizationPrompt: DEFAULT_SUMMARIZATION_PROMPT,
     coreMemoryPrompt: DEFAULT_CORE_MEMORY_PROMPT,
     vnSummaryPrompt: "",
@@ -134,3 +134,20 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
         custom_app: true,
     },
 };
+
+export type MemorySettingsSection = "context" | "budgets" | "intervals";
+
+/** Restore only the selected settings; histories, prompts and switches are untouched. */
+export function restoreMemorySettingsSection(config: MemoryConfig, section: MemorySettingsSection): MemoryConfig {
+    const defaults = DEFAULT_MEMORY_CONFIG;
+    switch (section) {
+        case "context":
+            return { ...config, contextTokenLimit: defaults.contextTokenLimit, recentContextDetail: defaults.recentContextDetail };
+        case "budgets":
+            return { ...config, shortTermTokenBudget: defaults.shortTermTokenBudget,
+                longTermTokenBudget: defaults.longTermTokenBudget, coreMemoryTokenBudget: defaults.coreMemoryTokenBudget };
+        case "intervals":
+            return { ...config, summarizationRoundInterval: defaults.summarizationRoundInterval,
+                coreSummarizationInterval: defaults.coreSummarizationInterval };
+    }
+}

@@ -28,7 +28,7 @@ const mocks = {
 function load(name) {
   if (mocks[name]) return mocks[name];
   if (modules.has(name)) return modules.get(name);
-  if (!['./story-storage', './story-tag-settings', './short-term-assembler', './story-engine', './story-instructions', './story-constraints', './story-context-budget', './story-ensemble-context', './character-relation-context'].includes(name)) {
+  if (!['./prompt-memory-budget', './narrative-context', './memory-context-policy', './story-storage', './story-tag-settings', './short-term-assembler', './story-engine', './story-instructions', './story-constraints', './story-context-budget', './story-ensemble-context', './character-relation-context', './story-preparation', './story-preset-selection'].includes(name)) {
     return new Proxy({}, { get: () => () => [] }); // All unrelated app stores are empty.
   }
   const exports = {};

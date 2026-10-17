@@ -38,6 +38,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   let disabledMarkers = new Set();
   const participantContexts = [];
   const deps = {
+    './preset-streaming': load('lib/preset-streaming.ts'),
     './story-tag-settings': load('lib/story-tag-settings.ts'),
     './prompt-time': { formatPromptTimestamp: () => '2026-10-15T12:00:00Z' },
     './character-world-storage': { formatCharacterRelationsForPrompt: () => '', formatCharactersRelationsForPrompt: () => '' },
@@ -67,15 +68,18 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
     './macro-engine': { MacroEngine: class {} },
   };
   deps['./token-counter'] = load('lib/token-counter.ts');
+  deps['./narrative-context'] = load('lib/narrative-context.ts');
+  deps['./memory-context-policy'] = load('lib/memory-context-policy.ts', deps);
   deps['./story-preset-selection'] = load('lib/story-preset-selection.ts');
   deps['./story-preparation'] = load('lib/story-preparation.ts');
   deps['./story-context-budget'] = load('lib/story-context-budget.ts', deps);
+  deps['./prompt-memory-budget'] = load('lib/prompt-memory-budget.ts', deps);
   deps['./character-relation-context'] = load('lib/character-relation-context.ts');
   deps['./story-ensemble-context'] = load('lib/story-ensemble-context.ts', deps);
   const engine = load('lib/story-engine.ts', deps);
   const phases = [];
   await engine.generateStoryCompletion('char', [user, director], { retryInstruction: '不要下雨', onPhase: phase => phases.push(phase) });
-  assert.deepEqual(phases, ['preparing', 'requesting']);
+  assert.deepEqual(phases, ['preparing', 'recalling', 'preparing', 'requesting']);
   const previousPayload = captured;
   const stopped = new AbortController(); stopped.abort();
   await assert.rejects(engine.generateStoryCompletion('char', [user], {signal: stopped.signal}), {name:'AbortError'});

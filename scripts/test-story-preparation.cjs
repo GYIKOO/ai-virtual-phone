@@ -13,7 +13,8 @@ function load(file, deps = {}, globals = {}, source = fs.readFileSync(file, 'utf
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 const token = load('lib/token-counter.ts');
-const budget = load('lib/story-context-budget.ts', {'./token-counter':token});
+const policy = load('lib/memory-context-policy.ts', {'./token-counter':token});
+const budget = load('lib/story-context-budget.ts', {'./token-counter':token,'./memory-context-policy':policy});
 const preparation = load('lib/story-preparation.ts');
 
 (async () => {
@@ -52,12 +53,12 @@ const preparation = load('lib/story-preparation.ts');
   await assert.rejects(budget.packStoryContextAsync({candidates:[], inputBudget:1000, limits:{core:100,long:100,recent:100},render:()=>[]}, async () => preparation.throwIfStoryAborted(cancelled.signal)), {name:'AbortError'});
 
   let reads = 0, vectors = 0, vectorOptions;
-  const memories = [{id:'c',type:'core',content:'core',createdAt:'2026-10-01'}, {id:'l',type:'long_term',content:'long',createdAt:'2026-10-01',embedding:[1,0]}];
+  const memories = [{id:'c',type:'core',content:'core',createdAt:'2026-10-01'}, ...[1,2,3,4].map(n=>({id:`l${n}`,type:'long_term',content:'long',createdAt:`2026-10-0${n}`,embedding:[1,0]}))];
   const ranker = load('lib/memory-service.ts', {
     './memory-storage':{loadMemoryEntries: async () => {reads++; await new Promise(resolve => setTimeout(resolve, 5)); return memories;}},
     './settings-storage':{resolveAuxiliaryApiConfig:()=>({})},
     './memory-embedding':{generateEmbedding:async (_query,_api,options)=>{vectors++; vectorOptions=options; return [1,0];},resolveEmbeddingModel:()=> 'embed',cosineSimilarity:()=>1,keywordSearch:(_q,entries)=>entries.map(entry=>({entry,score:1}))},
-    './token-counter':token, './proactive-replay':{}, './memory-time':{memoryEventRange:()=>undefined}, './story-preparation':preparation,
+    './token-counter':token, './proactive-replay':{knownAt:()=>true}, './memory-time':{memoryEventRange:()=>undefined}, './story-preparation':preparation,
   });
   const rank = ranker.createStoryMemoryRanker('scene', {vectorRecallEnabled:true});
   await Promise.all(['a','b','c','d'].flatMap(id=>[rank(id,'core'),rank(id,'long_term')]));

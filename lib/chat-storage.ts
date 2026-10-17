@@ -117,6 +117,8 @@ export type ChatMessage = {
     sessionId: string;
     role: ChatMessageRole;
     content: string;
+    /** Read-time fallback supplied by narrative adapters, not a new stored summary. */
+    contextSummary?: string;
     status: ChatMessageStatus;
     createdAt: string; // ISO date
     order?: number; // Stable per-session display order

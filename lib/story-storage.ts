@@ -1,4 +1,5 @@
 import Dexie from "dexie";
+import { narrativeExcerpt, stripNarrativeTags } from "./narrative-context";
 import { formatChatTimestamp } from "./llm-prompt-assembler";
 import { hydrateKvDb, kvGet, kvSet, registerKvMigration } from "./kv-db";
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS, LEGACY_STORY_FOLD_TAGS, STORY_FOLD_TAGS_VERSION } from "./story-tag-settings";
@@ -1247,21 +1248,24 @@ export function loadStoryProjectionEntries(
   const messages = sessions.flatMap((session) => loadStoryMessages(session.id))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const projections: StoryProjectionEntry[] = [];
+  const sessionsById = new Map(sessions.map(session => [session.id, session]));
 
   for (let i = 0; i < messages.length; i++) {
     const current = messages[i];
-    if (current.role !== "assistant") continue;
+    if (current.role !== "assistant" || current.kind === "director") continue;
     if (options?.afterTimestamp && current.createdAt <= options.afterTimestamp) continue;
 
-    if (!current.storySummary) continue;
-    const summaryText = compactProjectionText(current.storySummary, 500);
-    if (!summaryText) continue;
+    const session = sessionsById.get(current.sessionId)!;
+    const excludedTags = session.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
+    const summaryText = compactProjectionText(stripNarrativeTags(current.storySummary || "", excludedTags), 500);
+    const excerpt = summaryText ? "" : narrativeExcerpt(current.rawContent, excludedTags);
+    if (!summaryText && !excerpt) continue;
 
     const ts = formatChatTimestamp(current.createdAt);
     projections.push({
       id: `story_projection_${current.id}`,
       timestamp: current.createdAt,
-      content: `[事件 ${ts}] ${summaryText}`,
+      content: `[事件 ${ts}] ${summaryText || `正文摘录：${excerpt}`}`,
     });
   }
 
@@ -1286,7 +1290,9 @@ export function loadStoryRecallTurns(characterId: string, afterTimestamp?: strin
       pending = [];
       if (afterTimestamp && message.createdAt <= afterTimestamp) continue;
       result.push({ id: `story_projection_${message.id}`, timestamp: message.createdAt,
-        summary: message.storySummary || "", messages });
+        summary: stripNarrativeTags(message.storySummary || "", session.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS), messages: messages.map(item => ({ ...item,
+          rawContent: stripNarrativeTags(item.rawContent, session.contextExcludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS),
+        })) });
     }
   }
   return result;

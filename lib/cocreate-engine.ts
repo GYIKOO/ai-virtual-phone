@@ -1,4 +1,5 @@
 import { loadCharacters } from "./character-storage";
+import { usePresetStreaming } from "./preset-streaming";
 import { previewMessagesForApi, sendLLMRequest, sendLLMStreamRequest, sendLLMToolRequest, sendLLMToolStreamRequest, ChatEngineError } from "./chat-engine";
 import type { ChatMessage } from "./chat-storage";
 import { assemblePromptPayload } from "./llm-prompt-assembler";
@@ -344,7 +345,7 @@ async function runNativeCoCreateLoop(params: {
   let lastCleanOutput = "";
 
   for (let round = 0; round < MAX_COCREATE_TOOL_ROUNDS; round += 1) {
-    const useToolStreaming = workingSession.settings.streamingEnabled && runtime.apiConfig.provider !== "OpenRouter";
+    const useToolStreaming = usePresetStreaming(runtime.preset, workingSession.settings.streamingEnabled && runtime.apiConfig.provider !== "OpenRouter");
     const result = useToolStreaming
       ? await sendLLMToolStreamRequest(
         runtime.apiConfig,
@@ -554,7 +555,7 @@ export async function generateCoCreateReply(
     let cleanOutput = "";
     let toolCalls: CoCreateToolCall[] = [];
 
-    if (workingSession.settings.streamingEnabled) {
+    if (usePresetStreaming(runtime.preset, workingSession.settings.streamingEnabled)) {
       let streamedRaw = "";
       let processedIndex = 0;
       let streamVisibleText = "";
@@ -656,14 +657,15 @@ export async function generateCoCreateReply(
             },
           },
         );
-        void streamResult;
+        // An automatic protocol fallback returns one complete result, without deltas.
+        if (!streamedRaw) streamedRaw = streamResult.content;
         await processAvailableStream(true);
         raw = streamedRaw.trim();
         cleanOutput = streamVisibleText.trim();
         toolCalls = streamedToolCalls;
       } catch (streamError) {
-        if (options?.signal?.aborted) throw streamError;
-        await callbacks?.onStreamFallback?.(formatErrorMessage(streamError));
+        // Transport fallback is centralized; retrying here could repeat executed tools.
+        throw streamError;
       }
     }
 

@@ -693,7 +693,7 @@ export function StorySettingsPage(props: StorySettingsPageProps) {
           />
           <ToggleRow
             title="通用流式输出"
-            detail="开启后剧情正文会随着模型返回实时显示；不支持流式的接口会在未输出内容时自动回退普通生成"
+            detail="预设选择“沿用应用设置”时生效；开启后剧情正文随生成显示。预设指定输出方式时优先使用预设。"
             checked={props.globalSettings.streamingEnabled}
             onChange={(streamingEnabled) => props.onGlobalSettingsChange({ ...props.globalSettings, streamingEnabled })}
           />

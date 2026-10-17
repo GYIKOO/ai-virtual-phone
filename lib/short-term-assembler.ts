@@ -11,7 +11,8 @@ import { resolveUserIdentity } from "./settings-storage";
 import { loadMemoryConfig } from "./memory-storage";
 import type { MemoryConfig } from "./memory-types";
 import { estimateTokens } from "./token-counter";
-import { loadStoryProjectionEntries } from "./story-storage";
+import { loadStoryProjectionEntries, loadStoryRecallTurns } from "./story-storage";
+import { selectRecentContext, compareMemoryTime, type ContextDetail, type RecentCandidate } from "./memory-context-policy";
 import { buildTwoLevelMomentThreads } from "./moments-comment-threading";
 import { loadVnProjectionEntries } from "./vn-storage";
 import { loadMapProjectionEntries, loadMapSharedProjectionEntries } from "./map-storage";
@@ -65,6 +66,13 @@ export type NativeTimelineEntry = {
     groupName?: string;      // for group chat: display name of the group
     timestamp: string; // ISO date
     content: string;   // formatted content for display / summarization
+    narrativeText?: string; // Optional read-time prose; summaries and rebuilds use content.
+    summaryText?: string;
+    dialogueSessionId?: string;
+    dialogueRole?: "user" | "assistant";
+    responseUnitId?: string;
+    startTimestamp?: string;
+    sourceEntryIds?: string[];
     momentsMeta?: NativeMomentMeta;
     customAppId?: string;
     customAppName?: string;
@@ -144,6 +152,8 @@ export type UnifiedRecentItem =
         sourceApp: NativeTimelineEntry["sourceApp"];
         sourceTag: string;
         text: string;
+        narrativeText?: string;
+        summaryText?: string;
     }
     | {
         kind: "history";
@@ -152,12 +162,13 @@ export type UnifiedRecentItem =
     };
 
 function isPromptHiddenChatMessage(
-    msg: Pick<ChatMessage, "mediaType" | "nativeToolResult" | "nativeToolCalls">,
+    msg: Pick<ChatMessage, "mediaType" | "nativeToolResult" | "nativeToolCalls" | "status">,
     options?: { includeNativeToolHistory?: boolean },
 ): boolean {
     // 文本协议的 tool_call / tool_result 是正常上下文。只有原生工具轮的
     // 结构化残留按 includeNativeToolHistory 开关控制。
-    return (msg.nativeToolCalls?.length && !options?.includeNativeToolHistory)
+    return msg.status === "failed" || msg.status === "sending"
+        || (msg.nativeToolCalls?.length && !options?.includeNativeToolHistory)
         || (msg.mediaType === "tool_result" && !!msg.nativeToolResult && !options?.includeNativeToolHistory)
         || msg.mediaType === "tool_notice"
         || msg.mediaType === "memory_write_request";
@@ -213,6 +224,7 @@ export function loadNativeTimeline(
         excludeOfflineSessionId?: string;
         timeAware?: boolean;
         promptTimestampOptions?: PromptTimestampOptions;
+        includeNarrativeContent?: boolean;
     }
 ): NativeTimelineEntry[] {
     const entries: NativeTimelineEntry[] = [];
@@ -313,6 +325,9 @@ export function loadNativeTimeline(
                 sourceDetail: "group",
                 groupSessionId: gs.id,
                 groupName: gs.groupName || "群聊",
+                dialogueSessionId: gs.id,
+                dialogueRole: msg.role === "user" ? "user" : msg.role === "assistant" ? "assistant" : undefined,
+                responseUnitId: msg.responseRoundId || msg.responseBatchId,
                 timestamp: msg.createdAt,
                 content: `${msgLabel} ${sender}: ${content}`,
             });
@@ -432,6 +447,9 @@ export function loadNativeTimeline(
                 id: msg.id,
                 sourceApp: "chat",
                 sourceDetail: "direct",
+                dialogueSessionId: session.id,
+                dialogueRole: msg.role === "user" ? "user" : msg.role === "assistant" ? "assistant" : undefined,
+                responseUnitId: msg.responseRoundId || msg.responseBatchId,
                 timestamp: msg.createdAt,
                 content: `${msgLabel} ${sender}: ${content}`,
             });
@@ -567,12 +585,18 @@ export function loadNativeTimeline(
         userName,
         charName,
     });
+    const storyTurns = options?.includeNarrativeContent
+        ? new Map(loadStoryRecallTurns(characterId, options?.afterTimestamp).map(turn => [turn.id, turn])) : undefined;
     for (const storyEntry of storyEntries) {
+        const turn = storyTurns?.get(storyEntry.id);
         entries.push({
             id: storyEntry.id,
             sourceApp: "story",
             sourceDetail: "story",
             timestamp: storyEntry.timestamp,
+            ...(turn ? { narrativeText: turn.messages.map(message =>
+                `${formatPromptEventLabel(message.role === "user" ? "用户发言" : "剧情正文", message.createdAt, timeAware, timestampOptions)}\n${message.rawContent}`
+            ).join("\n\n") } : {}),
             content: formatStoredPromptEventContent(storyEntry.content, {
                 label: "事件",
                 timestamp: storyEntry.timestamp,
@@ -586,6 +610,7 @@ export function loadNativeTimeline(
     const offlineEntries = loadChatOfflineProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
         excludeSessionId: options?.excludeOfflineSessionId,
+        includeNarrativeContent: options?.includeNarrativeContent,
     });
     for (const offlineEntry of offlineEntries) {
         entries.push({
@@ -595,6 +620,7 @@ export function loadNativeTimeline(
             sessionId: offlineEntry.sessionId,
             groupSessionId: offlineEntry.groupSessionId,
             timestamp: offlineEntry.timestamp,
+            ...(offlineEntry.narrativeText ? { narrativeText: `${formatPromptEventLabel("线下剧情", offlineEntry.timestamp, timeAware, timestampOptions)}\n${offlineEntry.narrativeText}` } : {}),
             content: formatStoredPromptEventContent(offlineEntry.content, {
                 label: "事件",
                 timestamp: offlineEntry.timestamp,
@@ -842,7 +868,7 @@ export function loadNativeTimeline(
         : entries;
 
     // Sort by timestamp ascending
-    visibleEntries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    visibleEntries.sort((a, b) => compareMemoryTime(a.timestamp, b.timestamp));
     return visibleEntries;
 }
 
@@ -953,7 +979,7 @@ export function filterTimelineByAllowedSources(
     return entries.filter(entry => {
         const source = entry.sourceApp;
         if (source === "chat") {
-            if (entry.sourceDetail === "group") return rules.group_chat !== false;
+            if (entry.sourceDetail === "group" || (entry.sourceDetail === "chat_offline" && entry.groupSessionId)) return rules.group_chat !== false;
             return rules.chat !== false;
         }
         if (source === "story") return rules.story !== false;
@@ -973,6 +999,47 @@ export function filterTimelineByAllowedSources(
  * For history-style appIds, the current feature's block has empty content because
  * the actual content is the history turns (wrapped by the assembler).
  */
+type RecentPoolItem = { kind: "entry"; timestamp: string; tokens: number; entryId: string }
+    | { kind: "history"; timestamp: string; tokens: number; msgIdx: number };
+
+/** Keeps source adapters and the one/group history consumers on the same selection policy. */
+function selectTimelinePool<T extends RecentPoolItem>(pool: T[], history: ChatMessage[], budget: number,
+    getEntry: (id: string) => NativeTimelineEntry | undefined,
+    updateEntry: (id: string, content: string) => void,
+    narrativeHistory = false, detail?: ContextDetail,
+): T[] {
+    const units = new Map<number, string>();
+    let pending: number[] = [];
+    for (let i = 0; i < history.length; i++) {
+        const message = history[i];
+        if (message.role === "user") { pending.push(i); continue; }
+        if (message.role !== "assistant") continue;
+        const unit = `${message.sessionId}:${message.responseRoundId || message.responseBatchId || message.id}`;
+        units.set(i, unit);
+        for (const index of pending) units.set(index, unit);
+        pending = [];
+    }
+    const hasTools = history.some(row=>row.role==="tool" || row.mediaType==="tool_call" || row.mediaType==="tool_result");
+    const rows: (RecentCandidate & { item: T })[] = pool.map(item => {
+        if (item.kind === "entry") {
+            const entry = getEntry(item.entryId)!;
+            return { id: `entry:${item.entryId}`, timestamp: item.timestamp, text: entry.narrativeText || entry.content,
+                summary: entry.narrativeText ? entry.content : undefined, narrative: !!entry.narrativeText, item };
+        }
+        const message = history[item.msgIdx];
+        return { id: `history:${message.id}`, timestamp: item.timestamp, text: message.content,
+            summary: narrativeHistory ? message.contextSummary : undefined,
+            narrative: narrativeHistory, unitId: hasTools ? "native-tool-history" : units.get(item.msgIdx),
+            required: item.msgIdx === history.length-1, item };
+    });
+    const selected = selectRecentContext(rows, budget, detail, text => estimateTokens(text) + 4);
+    return selected.map(({ candidate, text }) => {
+        if (candidate.item.kind === "entry") updateEntry(candidate.item.entryId, text);
+        else if (text !== history[candidate.item.msgIdx].content) history[candidate.item.msgIdx] = { ...history[candidate.item.msgIdx], content: text };
+        return { ...candidate.item, tokens: estimateTokens(text) + 4 };
+    });
+}
+
 export function prepareShortTermContext(
     characterId: string,
     appId: string,
@@ -992,6 +1059,7 @@ export function prepareShortTermContext(
         excludeStoryMessageIds?: string[];
         /** Callers with a shared budget collect candidates before trimming. Zero means untrimmed. */
         tokenBudget?: number;
+        narrativeHistory?: boolean;
     },
 ): {
     recentBlocks: RecentBlock[];
@@ -1007,6 +1075,7 @@ export function prepareShortTermContext(
         afterTimestamp: options?.afterTimestamp,
         timeAware,
         promptTimestampOptions: options?.promptTimestampOptions,
+        includeNarrativeContent: true,
     });
 
     // Cross-app projections can bundle later comments/edits into an earlier event.
@@ -1179,15 +1248,12 @@ export function prepareShortTermContext(
 
     pool.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-    // Truncate from oldest until within budget
-    let total = pool.reduce((sum, p) => sum + p.tokens, 0);
-    let startIdx = 0;
-    if (budget > 0) {
-        while (total > budget && startIdx < pool.length) {
-            total -= pool[startIdx].tokens;
-            startIdx++;
-        }
-    }
+    const selectedPool = selectTimelinePool(pool, history, budget,
+        id => entryMeta.get(id)?.entry,
+        (id, content) => { const meta = entryMeta.get(id)!; meta.entry = { ...meta.entry, summaryText: meta.entry.summaryText ?? meta.entry.content, content }; },
+        options?.narrativeHistory || appId === "story", memConfig.recentContextDetail);
+    pool.splice(0, pool.length, ...selectedPool);
+    const startIdx = 0;
 
     // Determine survivors
     const survivingEntryIds = new Set<string>();
@@ -1211,7 +1277,7 @@ export function prepareShortTermContext(
     // Build recentBlocks from surviving entries
     const recentBlocks: RecentBlock[] = [];
     for (const r of raw) {
-        const surviving = r.entries.filter(e => survivingEntryIds.has(e.id));
+        const surviving = r.entries.filter(e => survivingEntryIds.has(e.id)).map(e => entryMeta.get(e.id)?.entry ?? e);
         if (surviving.length === 0) continue;
         recentBlocks.push({ tag: r.tag, content: surviving.map(e => e.content).join("\n\n") });
     }
@@ -1234,6 +1300,8 @@ export function prepareShortTermContext(
                 sourceApp: meta.entry.sourceApp,
                 sourceTag: meta.sourceTag,
                 text: meta.entry.content,
+                narrativeText: meta.entry.narrativeText,
+                summaryText: meta.entry.summaryText,
             });
             continue;
         }
@@ -1265,13 +1333,14 @@ export function prepareGroupShortTermContext(
         includeNativeToolHistory?: boolean;
         timeAware?: boolean;
         promptTimestampOptions?: PromptTimestampOptions;
+        narrativeHistory?: boolean;
     },
 ): {
     truncatedHistory: ChatMessage[];
     wbActivationContext: string;
     unifiedRecentItems: UnifiedRecentItem[];
 } {
-    if (options?.historicalAt !== undefined) history = history.filter(m => Date.parse(m.createdAt) <= options.historicalAt!);
+    history = history.filter(m => options?.historicalAt === undefined || Date.parse(m.createdAt) <= options.historicalAt);
     const uniqueCharacterIds = [...new Set(characterIds)];
     const timelineByKey = new Map<string, NativeTimelineEntry>();
     const timeAware = resolvePromptTimeAware(options?.timeAware);
@@ -1285,6 +1354,7 @@ export function prepareGroupShortTermContext(
             excludeOfflineSessionId: options?.excludeOfflineSessionId,
             timeAware,
             promptTimestampOptions: options?.promptTimestampOptions,
+            includeNarrativeContent: true,
         });
         if (options?.historicalAt !== undefined) timeline = timeline.filter(e => e.sourceApp === "chat" && Date.parse(e.timestamp) <= options.historicalAt!);
         timeline = filterTimelineByAllowedSources(timeline, allowed);
@@ -1426,14 +1496,11 @@ export function prepareGroupShortTermContext(
 
     pool.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
 
-    let total = pool.reduce((sum, item) => sum + item.tokens, 0);
-    let startIdx = 0;
-    if (budget > 0) {
-        while (total > budget && startIdx < pool.length) {
-            total -= pool[startIdx].tokens;
-            startIdx++;
-        }
-    }
+    const selectedPool = selectTimelinePool(pool, history, budget, id => entryMeta.get(id),
+        (id, content) => { const entry = entryMeta.get(id)!; entryMeta.set(id, { ...entry, summaryText: entry.summaryText ?? entry.content, content }); },
+        options?.narrativeHistory, memConfig.recentContextDetail);
+    pool.splice(0, pool.length, ...selectedPool);
+    const startIdx = 0;
 
     const survivingMsgIndices = new Set<number>();
     for (let i = startIdx; i < pool.length; i++) {
@@ -1459,6 +1526,7 @@ export function prepareGroupShortTermContext(
             if (!entry) continue;
             unifiedRecentItems.push({
                 kind: "event",
+                entryId: entry.id,
                 timestamp: item.timestamp,
                 sourceApp: entry.sourceApp,
                 sourceTag: entry.sourceDetail === "group" ? "recent_group_chat" : (
@@ -1476,6 +1544,8 @@ export function prepareGroupShortTermContext(
                                                                     entry.sourceApp === "chat" ? "recent_chat" : "recent_events"
                 ),
                 text: entry.content,
+                narrativeText: entry.narrativeText,
+                summaryText: entry.summaryText,
             });
             continue;
         }
@@ -1512,7 +1582,7 @@ export function formatTimelineForSummarization(
         .join("\n");
     return {
         eventsText,
-        earliest: entries[0].timestamp,
+        earliest: entries.map(entry=>entry.startTimestamp || entry.timestamp).sort(compareMemoryTime)[0],
         latest: entries[entries.length - 1].timestamp,
         count: entries.length,
     };

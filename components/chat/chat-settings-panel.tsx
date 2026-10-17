@@ -1450,7 +1450,7 @@ export function ChatSettingsPanel({
                             <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.api} />
                             <div className="menu-label-group">
                                 <span className="menu-label">线上流式生成</span>
-                                <span className="menu-desc">仅当前会话：线上 AI 回复边生成边显示；关闭则整段返回</span>
+                                <span className="menu-desc">仅预设选择“沿用应用设置”时生效；预设指定输出方式时，线上仍按完整消息展示</span>
                             </div>
                             <div className="menu-right">
                                 <Toggle
@@ -1466,7 +1466,7 @@ export function ChatSettingsPanel({
                             <ChatInfoIcon icon={Sparkles} color={BINDING_ACCENTS.preset} />
                             <div className="menu-label-group">
                                 <span className="menu-label">线下流式生成</span>
-                                <span className="menu-desc">仅当前会话：线下 AI 回复边生成边显示；关闭则整段返回</span>
+                                <span className="menu-desc">预设选择“沿用应用设置”时控制当前会话；否则跟随预设的输出方式</span>
                             </div>
                             <div className="menu-right">
                                 <Toggle

@@ -14,6 +14,7 @@ import { buildRelationMentionContext } from "./character-relation-context";
 import { formatPromptTimestamp } from "./prompt-time";
 import { packStoryContext, packStoryContextAsync, storyInputBudget, estimateStoryMessages, compareStoryTimes, type StoryContextCandidate, type SelectedStoryContext } from "./story-context-budget";
 import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase } from "./story-preparation";
+import { contextCapacity } from "./prompt-memory-budget";
 
 type Candidate = StoryContextCandidate & {
   history?: ChatMessage[];
@@ -39,6 +40,7 @@ export async function buildEnsembleStoryPrompt(options: {
   onPhase?: (phase: StoryGenerationPhase) => void;
 }): Promise<LLMMessage[]> {
   const { base, characters, config } = options;
+  const ensemble = characters.length > 1;
   const marker = (name: string) => isContextMarkerEnabled(base.preset, name);
   const recentEnabled = marker("shortTermMemory") || marker("chatHistory");
   const now = new Date();
@@ -65,12 +67,14 @@ export async function buildEnsembleStoryPrompt(options: {
   if (recentEnabled) {
     const renderedTurns = new Map<string, { fullText?: string; summary: string }>();
     // Older current-page prose competes once, not once per participant.
-    for (const message of currentHistory.slice(0, -2)) {
+    for (const [index, message] of currentHistory.slice(0, -2).entries()) {
       candidates.push({ id: `history:${message.id}`, kind: "recent", owners: characters.map(c => c.id),
         timestamp: message.createdAt, text: message.content, history: [message], sourceIds: [message.id],
         summary: options.historySummaries?.get(message.id)
           ? `[${time(message.createdAt)} 剧情摘要]\n${options.cleanText(options.historySummaries.get(message.id)!)}` : undefined,
-        sourceApp: "story" });
+        sourceApp: "story", narrative: true,
+        unitId: message.role === "user" && currentHistory[index + 1]?.role === "assistant"
+          ? `history-turn:${currentHistory[index + 1].id}` : `history-turn:${message.id}` });
     }
     for (const character of characters) {
       await yieldStoryPreparation(options.signal);
@@ -96,8 +100,9 @@ export async function buildEnsembleStoryPrompt(options: {
         candidates.push({
           id: event.entryId || `${character.id}:${event.sourceTag}:${event.timestamp}:${event.text}`,
           kind: "recent", owners: [character.id], timestamp: event.timestamp,
-          text: fullText || event.text,
-          summary: summary ? `[${time(event.timestamp)} 剧情摘要]\n${summary}` : undefined,
+          text: fullText || event.narrativeText || event.text,
+          summary: summary ? `[${time(event.timestamp)} 剧情摘要]\n${summary}` : (fullText || event.narrativeText ? event.text : undefined),
+          narrative: !!(turn || event.narrativeText),
           sourceIds: turn?.messages.map(message => message.id), sourceApp: event.sourceApp,
         });
       }
@@ -117,11 +122,12 @@ export async function buildEnsembleStoryPrompt(options: {
     const history = [...mandatoryHistory, ...chosen.flatMap(item => item.text === item.candidate.text ? item.candidate.history || [] : [])]
       .sort((a, b) => compareStoryTimes(a.createdAt, b.createdAt) || a.id.localeCompare(b.id));
     const memoryText = (kind: "long" | "core") => chosen.filter(item => item.candidate.kind === kind && !item.candidate.background)
-      .map(item => `【记忆归属：${ownersLabel(item.candidate.owners)}；来源：${item.candidate.sourceApp || "个人记忆"}】\n${item.text}`).join("\n\n");
+      .sort((a,b)=>compareStoryTimes(a.candidate.timestamp,b.candidate.timestamp))
+      .map(item => ensemble ? `【记忆归属：${ownersLabel(item.candidate.owners)}；来源：${item.candidate.sourceApp || "个人记忆"}】\n${item.text}` : item.text).join("\n\n");
     const events: UnifiedRecentItem[] = chosen.filter(item => item.candidate.kind === "recent" && (!item.candidate.history || item.text !== item.candidate.text))
       .map(item => ({ kind: "event", entryId: item.candidate.id, timestamp: item.candidate.timestamp,
         sourceApp: "story", sourceTag: "recent_events",
-        text: `【记录归属：${ownersLabel(item.candidate.owners)}；来源：${item.candidate.sourceApp || "日程与关系"}】\n${item.text}` }));
+        text: ensemble ? `【记录归属：${ownersLabel(item.candidate.owners)}；来源：${item.candidate.sourceApp || "日程与关系"}】\n${item.text}` : item.text }));
     const unified: UnifiedRecentItem[] = [...events, ...history.map((message, historyIndex) => ({ kind: "history" as const, historyIndex, timestamp: message.createdAt }))]
       .sort((a, b) => compareStoryTimes(a.timestamp, b.timestamp));
     const schedules = chosen.filter(item => item.candidate.background);
@@ -144,17 +150,18 @@ export async function buildEnsembleStoryPrompt(options: {
       recentBlocks: events.length ? [{ tag: "recent_events", content: events.map(item => item.kind === "event" ? item.text : "").join("\n\n") }] : [],
       unifiedRecentItems: unified,
       coreMemories: memoryText("core"), longTermMemories: memoryText("long"),
-      markerContentOverrides: { ...base.markerContentOverrides,
-        charDescription: `# 多人见面剧情\n${roster}\n${knowledgeRule}`, charPersonality: personalities },
+      markerContentOverrides: ensemble ? { ...base.markerContentOverrides,
+        charDescription: `# 多人见面剧情\n${roster}\n${knowledgeRule}`, charPersonality: personalities } : base.markerContentOverrides,
       scheduleSummary: scheduleText(schedules), currentSchedule: scheduleText(schedules.filter(item => item.candidate.background === "current")),
-      characterRelations: relations, dwellingContext: null,
+      characterRelations: options.independent ? null : ensemble ? relations : undefined,
+      dwellingContext: options.independent || ensemble ? null : undefined,
     }), ...options.tail];
   };
   // Retrieval is anchored in the current scene, not separately in each character's unrelated last chat.
   const scene = currentHistory.slice(-8).map(message => message.content).join("\n");
   const query = [scene.slice(-12000), options.queryInstruction?.slice(-4000)].filter(Boolean).join("\n")
     || candidates.filter(c => c.kind === "recent").sort((a, b) => compareStoryTimes(a.timestamp, b.timestamp)).slice(-5).map(c => c.summary || c.text).join("\n").slice(-12000);
-  const inputBudget = storyInputBudget(base.preset, config.storyContextTokenLimit);
+  const inputBudget = storyInputBudget(base.preset, contextCapacity(config));
   // Fail before embedding calls if immutable material alone cannot fit.
   packStoryContext({ candidates: [], inputBudget, limits, render });
   if (!options.independent) {
@@ -200,7 +207,7 @@ export async function buildEnsembleStoryPrompt(options: {
   await yieldStoryPreparation(options.signal);
   throwIfStoryAborted(options.signal);
   let lastYield = Date.now();
-  return (await packStoryContextAsync({ candidates, inputBudget, limits, render }, async () => {
+  return (await packStoryContextAsync({ candidates, inputBudget, limits, render, detail: config.recentContextDetail }, async () => {
     throwIfStoryAborted(options.signal);
     if (Date.now() - lastYield >= 8) {
       await yieldStoryPreparation(options.signal);

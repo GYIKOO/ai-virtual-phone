@@ -1279,6 +1279,17 @@ export function PresetManager({ isActive = true }: { isActive?: boolean } = {}) 
                                             </div>
                                             {paramsOpen && (
                                                 <div className="p-[14px]">
+                                                    <div className="flex flex-col gap-2 mb-4">
+                                                        <label className="menu-label ts-13" htmlFor={`streaming-${preset.id}`}>输出方式</label>
+                                                        <select id={`streaming-${preset.id}`} className="ui-input" value={preset.streaming_mode ?? "legacy"}
+                                                            onChange={(e) => updatePreset(preset.id, { streaming_mode: e.target.value === "legacy" ? undefined : e.target.value as PresetConfig["streaming_mode"] })}>
+                                                            <option value="legacy">沿用应用设置</option>
+                                                            <option value="auto">自动（优先流式）</option>
+                                                            <option value="stream">流式</option>
+                                                            <option value="non-stream">非流式</option>
+                                                        </select>
+                                                        <p className="menu-desc">线下、剧情和共创联动已有的流式展示；线上聊天仍按完整消息展示。自动模式仅在接口明确不支持流式时改用非流式。</p>
+                                                    </div>
                                                     <div className="grid grid-cols-2 gap-3">
                                                         <div className="generation-parameter-control flex flex-col gap-1" data-disabled={enabledGenerationParameters.has("temperature") ? undefined : ""}>
                                                             <div className="flex justify-between">

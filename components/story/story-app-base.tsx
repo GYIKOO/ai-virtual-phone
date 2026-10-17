@@ -1654,7 +1654,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
           inheritRecentMemory: currentSession?.inheritRecentMemory ?? true,
           startedAt: currentSession?.createdAt,
         },
-        onDelta: storyGlobalSettings.streamingEnabled ? (delta) => appendStoryStreamDelta(sessionId, delta) : undefined,
+        onDelta: (delta) => appendStoryStreamDelta(sessionId, delta),
         signal: generationRun.controller.signal,
       });
       if (!isCurrentGeneration()) return;
@@ -1741,7 +1741,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
         inheritRecentMemory: session.inheritRecentMemory ?? true,
         startedAt: session.createdAt,
       },
-      onDelta: storyGlobalSettings.streamingEnabled ? (delta) => appendStoryStreamDelta(sessionId, delta) : undefined,
+      onDelta: (delta) => appendStoryStreamDelta(sessionId, delta),
       signal: generationRun.controller.signal,
     }).then((result) => {
       if (!isCurrentGeneration()) return;
@@ -2154,7 +2154,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
           inheritRecentMemory: currentSession?.inheritRecentMemory ?? true,
           startedAt: currentSession?.createdAt,
         },
-        onDelta: storyGlobalSettings.streamingEnabled ? (delta) => appendStoryStreamDelta(sessionId, delta) : undefined,
+        onDelta: (delta) => appendStoryStreamDelta(sessionId, delta),
         signal: generationRun.controller.signal,
       });
       if (!isCurrentGeneration()) return;

@@ -30,8 +30,9 @@ assert.equal(injector.formatLongTermMemories([entry], now), `- ${entry.content}`
   const recent = { ...entry, id: 'recent', createdAt: '2026-10-06T12:00:00Z', metadata: { timeSpan: '2026-10-05T12:00:00Z ~ 2026-10-06T12:00:00Z' } };
   const service = load('lib/memory-service.ts', {
     './memory-time': t, './proactive-replay': load('lib/proactive-replay.ts'),
-    './memory-storage': { loadMemoryEntriesByType: async () => [entry, recent] },
-    './settings-storage': { resolveAuxiliaryApiConfig: () => null }, './memory-embedding': {},
+    './memory-storage': { loadMemoryEntries: async () => [entry, recent] },
+    './settings-storage': { resolveAuxiliaryApiConfig: () => null }, './memory-embedding': {keywordSearch:()=>[]},
+    './story-preparation':{throwIfStoryAborted(){}},
     './token-counter': { estimateTokens: text => text.length },
   });
   const config = { longTermTokenBudget: t.formatMemoryEntry(recent).length + 8, vectorRecallEnabled: false };

@@ -2,10 +2,11 @@ import type { MemoryEntry } from "./memory-types";
 import type { ApiConfig } from "./settings-types";
 import { estimateTokens } from "./token-counter";
 
-export type RebuildSource = { key: string; timestamp: string; endTimestamp?: string; content: string; sourceApp: MemoryEntry["sourceApp"]; sessionId?: string };
+export type RebuildSource = { key: string; timestamp: string; startTimestamp?: string; endTimestamp?: string; content: string; sourceApp: MemoryEntry["sourceApp"]; sessionId?: string };
 export type RebuildBatch = { id: string; jobId: string; index: number; type: "long_term" | "core"; sources: RebuildSource[]; result?: MemoryEntry; embeddingDone?: boolean };
 export type RebuildJob = {
     characterId: string; characterName: string; id: string; version: 1;
+    countingMode?: "rounds";
     status: "paused" | "running" | "failed" | "ready" | "applied" | "rolled_back";
     createdAt: string; cutoff: string; batchSize: number; inputTokens: number; includeCore: boolean; coreBatchSize: number;
     // Optional for compatibility with tasks created before tail deferral was introduced.
@@ -35,9 +36,9 @@ export function memorySnapshot(entries: MemoryEntry[]): string {
     return JSON.stringify([...entries].sort((a, b) => a.id.localeCompare(b.id)));
 }
 export function rebuildPrompt(template: string, name: string, sources: RebuildSource[]): string {
-    const times = sources.map(s => s.timestamp).sort();
+    const times = sources.map(s => s.startTimestamp ?? s.timestamp).sort();
     const ends = sources.map(s => s.endTimestamp ?? s.timestamp).sort();
-    const events = sources.map(s => `- [来源记录时间 UTC：${s.timestamp}${s.endTimestamp ? ` ～ ${s.endTimestamp}` : ""}] ${s.content}`).join("\n");
+    const events = sources.map(s => `- [来源记录时间 UTC：${s.startTimestamp ?? s.timestamp}${s.endTimestamp || s.startTimestamp ? ` ～ ${s.endTimestamp ?? s.timestamp}` : ""}] ${s.content}`).join("\n");
     const values: Record<string, string> = { char: name, earliest: times[0] ?? "未知", latest: ends.at(-1) ?? "未知", events, longtermmemories: events };
     return template.replace(/\{\{(char|earliest|latest|events|longTermMemories)\}\}/gi, (_match, key: string) => values[key.toLowerCase()]);
 }

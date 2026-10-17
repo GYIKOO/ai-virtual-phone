@@ -19,6 +19,7 @@ const sanitizer = load('lib/prompt-sanitizer.ts', { './state-value-parser': load
 const macro = load('lib/macro-engine.ts', { './character-time': time });
 const character = { id: 'c', name: '测试角色', persona: '测试人设' };
 const shortTerm = load('lib/short-term-assembler.ts', {
+  './memory-context-policy': load('lib/memory-context-policy.ts', {'./token-counter':{estimateTokens:text=>text.length}}),
   './character-storage': { loadCharacters: () => [character] },
   './chat-storage': { loadChatSessions: () => [], loadChatMessages: () => [], isSystemInstructionMessage: () => false, isReadingDiscussMessage: () => false },
   './memory-storage': { loadMemoryConfig: () => ({ shortTermTokenBudget: 10000 }) },

@@ -1,4 +1,6 @@
 import { loadChatSessions } from "./chat-storage";
+import { notifySavedMemoryRound } from "./memory-summary-notify";
+import { narrativeExcerpt, stripNarrativeTags } from "./narrative-context";
 import { formatChatTimestamp } from "./llm-prompt-assembler";
 import { kvGet, kvRemove, kvSet, registerDynamicPrefix } from "./kv-db";
 
@@ -27,6 +29,7 @@ export type ChatOfflineProjectionEntry = {
     groupSessionId?: string;
     timestamp: string;
     content: string;
+    narrativeText?: string;
 };
 
 export type ParsedOfflineResponse = {
@@ -156,6 +159,7 @@ export function appendChatOfflineTurn(input: {
         createdAt: new Date().toISOString(),
     };
     saveChatOfflineTurns(input.sessionId, [...loadChatOfflineTurns(input.sessionId), turn]);
+    notifySavedMemoryRound(input.sessionId);
     return turn;
 }
 
@@ -222,7 +226,7 @@ function compactProjectionText(text: string, maxLen: number): string {
 
 export function loadChatOfflineProjectionEntries(
     characterId: string,
-    options?: { afterTimestamp?: string; excludeSessionId?: string },
+    options?: { afterTimestamp?: string; excludeSessionId?: string; includeNarrativeContent?: boolean },
 ): ChatOfflineProjectionEntry[] {
     const sessions = loadChatSessions().filter((session) => {
         if (session.id === options?.excludeSessionId) return false;
@@ -232,18 +236,26 @@ export function loadChatOfflineProjectionEntries(
 
     const entries: ChatOfflineProjectionEntry[] = [];
     for (const session of sessions) {
-        entries.push(...loadMigratedSummaryEntries(session.id));
+        entries.push(...loadMigratedSummaryEntries(session.id)
+            .filter(entry => !options?.afterTimestamp || Date.parse(entry.timestamp) > Date.parse(options.afterTimestamp))
+            .map(entry => ({ ...entry, sessionId: session.id, groupSessionId: session.isGroup ? session.id : undefined })));
         for (const turn of loadChatOfflineTurns(session.id)) {
             if (options?.afterTimestamp && turn.createdAt <= options.afterTimestamp) continue;
             const summaryText = compactProjectionText(turn.summary, 500);
-            if (!summaryText) continue;
+            const excluded = ["thinking", "think", "thought", turn.thinkingTag, turn.summaryTag, "summary"].filter(Boolean).join(",");
+            const excerpt = summaryText ? "" : narrativeExcerpt(turn.assistantContent, excluded);
+            if (!summaryText && !excerpt) continue;
             const ts = formatChatTimestamp(turn.createdAt);
             entries.push({
                 id: `chat_offline_projection_${turn.id}`,
                 sessionId: session.id,
                 ...(session.isGroup ? { groupSessionId: session.id } : {}),
                 timestamp: turn.createdAt,
-                content: `[事件 ${ts}] ${summaryText}`,
+                content: `[事件 ${ts}] ${summaryText || `正文摘录：${excerpt}`}`,
+                ...(options?.includeNarrativeContent && turn.assistantContent.trim() ? {
+                    narrativeText: [turn.userContent.trim() ? `用户发言：${stripNarrativeTags(turn.userContent, excluded)}` : "",
+                        `剧情正文：${stripNarrativeTags(turn.assistantContent, excluded)}`].filter(Boolean).join("\n\n"),
+                } : {}),
             });
         }
     }

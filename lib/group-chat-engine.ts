@@ -1,5 +1,6 @@
 // lib/group-chat-engine.ts
 // Group chat engine: single API call for all characters.
+import { usePresetStreaming } from "./preset-streaming";
 
 import { ChatSession, ChatMessage, loadChatAppSettings, createResponseBatchId, createResponseRoundId, createToolExecutionId, loadChatSessions, getLatestCharacterStateValues, isSessionStreamingEnabled, resolveVisionImagePromptLimit } from "./chat-storage";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
@@ -69,6 +70,7 @@ import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memo
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
 import { prepareShortTermContext, prepareGroupShortTermContext } from "./short-term-assembler";
+import { assembleBudgetedMemory, type PromptMemoryPart } from "./prompt-memory-budget";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { getCustomStickerExample, loadCustomStickers } from "./custom-sticker-storage";
 import { formatCustomAppChatDirectivesForPrompt } from "./custom-app-chat-directives";
@@ -337,6 +339,7 @@ export async function buildGroupChatPromptMessages(
 
     const now = new Date(options?.historicalAt ?? Date.now());
     const memberTimeContexts: Record<string, ReturnType<typeof buildCharacterTimeContext>> = {};
+    const memoryPartsByCharacter = new Map<string, PromptMemoryPart[]>();
     const memberDataPromises = participantIds.map(async (charId): Promise<GroupMemberData | null> => {
         const character = charMap.get(charId);
         if (!character) return null;
@@ -363,6 +366,10 @@ export async function buildGroupChatPromptMessages(
             ]);
             coreMemories = formatCoreMemories(coreResults, now.getTime());
             longTermMemories = formatLongTermMemories(results, now.getTime());
+            memoryPartsByCharacter.set(charId, [
+                ...coreResults.map(entry=>({id:entry.id,kind:"core" as const,timestamp:String(entry.metadata?.eventEndAt ?? entry.createdAt),text:formatCoreMemories([entry],now.getTime())})),
+                ...results.map(entry=>({id:entry.id,kind:"long" as const,timestamp:String(entry.metadata?.eventEndAt ?? entry.createdAt),text:formatLongTermMemories([entry],now.getTime())})),
+            ]);
         } catch { /* ignore */ }
         return {
             character,
@@ -401,6 +408,7 @@ export async function buildGroupChatPromptMessages(
         excludeGroupSessionId: isOfflineMode ? undefined : session.id,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
         includeNativeToolHistory: usesNativeActions,
+        narrativeHistory: isOfflineMode,
         promptTimestampOptions: groupPromptTimestampOptions,
     });
     const promptHistory = applyVisionImagePromptLimit(
@@ -462,7 +470,7 @@ export async function buildGroupChatPromptMessages(
         userName,
     );
 
-    const llmMessages = assembleGroupPromptPayload({
+    const memoryInput: Parameters<typeof assembleGroupPromptPayload>[0] = {
         members,
         history: promptHistory,
         preset,
@@ -497,7 +505,8 @@ export async function buildGroupChatPromptMessages(
         offlineBilingualInstruction,
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
-    });
+    };
+    const llmMessages: LLMMessage[] = [];
     if (promptProfile?.output === "plain_text") {
         llmMessages.push({
             role: "system",
@@ -511,7 +520,9 @@ export async function buildGroupChatPromptMessages(
     }
     if (!isAutomaticChatGeneration(options)) appendEmptyGenerateGuardMessage(llmMessages, config, history);
 
-    return { llmMessages, config, preset, regexes, nameToId, memberNames, enabledTools, userName, appTags: activeAppTags };
+    const fittedMessages = assembleBudgetedMemory(memoryInput,
+        input => [...assembleGroupPromptPayload(input), ...llmMessages], memConfig, members.map(member=>memoryPartsByCharacter.get(member.character.id)||[]));
+    return { llmMessages: fittedMessages, config, preset, regexes, nameToId, memberNames, enabledTools, userName, appTags: activeAppTags };
 }
 
 function nativeGroupToolCallToTextCall(call: LlmToolCall, bundle: NativeChatToolBundle): ToolCall {
@@ -595,7 +606,7 @@ async function runNativeGroupToolLoop(params: {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
         let result: Awaited<ReturnType<typeof sendLLMToolRequest>>;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (!preset?.streaming_mode && isSessionStreamingEnabled(session, true)) {
                 let streamReasoning = "";
                 result = await sendLLMToolStreamRequest(config, preset, requestMessages, nativeBundle.definitions, regexes, meta, {
                     appId: "group_chat",
@@ -848,7 +859,7 @@ export async function generateGroupChatCompletion(
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         let filteredOutput: string;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (!preset?.streaming_mode && isSessionStreamingEnabled(session, true)) {
                 let streamReasoning = "";
                 const streamResult = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
                     appId: "group_chat",
@@ -1023,7 +1034,7 @@ export async function generateGroupChatCompletion(
 
             if (round === MAX_TOOL_ROUNDS - 1) {
                 try {
-                    if (isSessionStreamingEnabled(session, true)) {
+                    if (!preset?.streaming_mode && isSessionStreamingEnabled(session, true)) {
                         let streamReasoning = "";
                         const streamFinal = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
                             appId: "group_chat",
@@ -1164,7 +1175,7 @@ export async function generateGroupOfflineChatCompletion(
         onReasoning: (t: string) => { reasoning = t; },
     };
     let rawOutput: string;
-    if (isSessionStreamingEnabled(session, false) && options?.onStreamDelta) {
+    if (usePresetStreaming(preset, isSessionStreamingEnabled(session, false)) && options?.onStreamDelta) {
         const streamResult = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
             appId: "group_chat",
             appTags: ["group_chat", "offline"],

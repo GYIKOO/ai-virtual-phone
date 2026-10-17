@@ -9,6 +9,7 @@ import { formatMemoryEntry } from "./memory-time";
 import { blocksMemorySummary, planRebuildBatches, selectRebuildSources, protectedMemory, rebuildPrompt, type RebuildJob, type RebuildBatch, type RebuildSource } from "./memory-rebuild-policy";
 import { readRebuildJob, readRebuildBatches, writeRebuildJob, swapRebuild, discardRebuild, reconcileRebuildProgress } from "./memory-rebuild-store";
 import { withMemoryWriterLock } from "./memory-writer-lock";
+import { groupMemoryRounds } from "./memory-rounds";
 
 export const MEMORY_REBUILD_UPDATED = "memory-rebuild-updated";
 const running = new Set<string>();
@@ -21,13 +22,15 @@ function getPinnedApi(identity: RebuildJob["api"]) {
     if (!api || JSON.stringify(apiIdentity(api)) !== JSON.stringify(identity)) throw new Error("此任务使用的 API 配置或模型已改变。请恢复原配置后继续；密钥可以更新，已保存批次不会丢失。");
     return api;
 }
-function sourcesFor(characterId: string, allowed: RebuildJob["allowedSources"], cutoff?: string): RebuildSource[] {
-    return filterTimelineByAllowedSources(loadNativeTimeline(characterId, {
+function sourcesFor(characterId: string, allowed: RebuildJob["allowedSources"], cutoff?: string, rounds = false): RebuildSource[] {
+    const timeline=filterTimelineByAllowedSources(loadNativeTimeline(characterId, {
         timeAware: true, promptTimestampOptions: { timeZone: "UTC", includeTimeZone: true },
-    }), allowed).map(e => ({
+    }), allowed);
+    return (rounds?groupMemoryRounds(timeline):timeline).map(e => ({
         key: JSON.stringify([e.sourceApp, e.sourceDetail, e.sessionId, e.id]),
         // Native timeline also includes legacy map/custom-app source names, as does the existing summarizer.
-        timestamp: new Date(e.timestamp).toISOString(), content: e.content, sourceApp: e.sourceApp as MemoryEntry["sourceApp"], sessionId: e.sessionId,
+        timestamp: new Date(e.timestamp).toISOString(), content: e.content, sourceApp: e.sourceApp as MemoryEntry["sourceApp"], sessionId: e.sessionId || (rounds ? e.dialogueSessionId : undefined),
+        ...(rounds && e.startTimestamp ? {startTimestamp:new Date(e.startTimestamp).toISOString()} : {}),
     })).filter(e => !cutoff || e.timestamp <= cutoff).sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.key.localeCompare(b.key));
 }
 async function fingerprint(value: unknown): Promise<string> {
@@ -41,11 +44,12 @@ export async function previewMemoryRebuild(characterId: string, options: Rebuild
     const character = loadCharacters().find(c => c.id === characterId);
     if (!character) throw new Error("找不到该角色，未开始重建。");
     const config = loadMemoryConfig();
-    const sources = sourcesFor(characterId, config.shortTermAllowedSources);
+    const sources = sourcesFor(characterId, config.shortTermAllowedSources,undefined,config.summarizationRoundInterval!==undefined);
     if (!sources.length) throw new Error("该角色没有符合当前来源设置的可用历史记录。");
     const api = resolveAuxiliaryApiConfig("memorySummaryApiConfigId");
     if (!api) throw new Error("请先绑定记忆总结 API。");
-    const { selected, deferred } = selectRebuildSources(sources, options.batchSize, config.summarizationEventInterval);
+    const autoInterval=config.summarizationRoundInterval??config.summarizationEventInterval;
+    const { selected, deferred } = selectRebuildSources(sources, options.batchSize, autoInterval);
     const plan = planRebuildBatches(selected, options.batchSize, options.inputTokens, config.summarizationPrompt?.trim() || DEFAULT_SUMMARIZATION_PROMPT, character.name);
     const existing = await loadMemoryEntries(characterId);
     const baseline = existing.filter(e => e.type === "long_term" || options.includeCore);
@@ -54,11 +58,11 @@ export async function previewMemoryRebuild(characterId: string, options: Rebuild
     const minimumCoreCount = options.includeCore ? Math.ceil(plan.length / config.coreSummarizationInterval) : 0;
     if (plan.length + retainedCount + minimumCoreCount > config.maxLongTermEntries) throw new Error(`预计至少生成 ${plan.length} 条长期记忆，加上保留记忆及核心记忆后超过现有数量上限。请增大每批记录数或调整记忆上限。`);
     const sourceHash = await fingerprint(sources);
-    const hash = await fingerprint({ sourceHash, options, autoSummaryInterval: config.summarizationEventInterval, api: apiIdentity(api), prompt: config.summarizationPrompt,
+    const hash = await fingerprint({ sourceHash, options, autoSummaryInterval: autoInterval, countingMode:config.summarizationRoundInterval!==undefined, api: apiIdentity(api), prompt: config.summarizationPrompt,
         corePrompt: config.coreMemoryPrompt, coreInterval: config.coreSummarizationInterval, vector: config.vectorRecallEnabled,
         embedding: config.vectorRecallEnabled ? resolveAuxiliaryApiConfig("embeddingApiConfigId")?.id : null, name: character.name });
     return { characterName: character.name, sourceCount: sources.length, batchCount: plan.length, first: sources[0].timestamp,
-        summarizedCount: selected.length, deferredCount: deferred.length, autoSummaryInterval: config.summarizationEventInterval, summarizedThrough: selected.at(-1)?.timestamp,
+        summarizedCount: selected.length, deferredCount: deferred.length, autoSummaryInterval: autoInterval, summarizedThrough: selected.at(-1)?.timestamp,
         last: sources.at(-1)!.timestamp, protectedCount: baseline.filter(protectedMemory).length, model: api.defaultModel,
         sources: [...new Set(sources.map(s => s.sourceApp))], hash, sourceHash };
 }
@@ -70,15 +74,16 @@ export async function createMemoryRebuild(characterId: string, options: RebuildO
         if (preview.hash !== confirmedHash) throw new Error("预览后历史记录、模型或总结设置已改变，请重新预览并确认。");
         if (!preview.summarizedCount) throw new Error("现有记录均留待继续累积，本次没有需要重建的完整批次；未修改旧记忆。");
         const config = loadMemoryConfig();
-        const sources = sourcesFor(characterId, config.shortTermAllowedSources);
+        const sources = sourcesFor(characterId, config.shortTermAllowedSources,undefined,config.summarizationRoundInterval!==undefined);
         if (await fingerprint(sources) !== preview.sourceHash) throw new Error("历史记录正在变化，请稍后重新确认。");
         const api = resolveAuxiliaryApiConfig("memorySummaryApiConfigId")!;
         const embedding = config.vectorRecallEnabled ? resolveAuxiliaryApiConfig("embeddingApiConfigId") : null;
         const id = crypto.randomUUID();
         const prompt = config.summarizationPrompt?.trim() || DEFAULT_SUMMARIZATION_PROMPT;
-        const { selected } = selectRebuildSources(sources, options.batchSize, config.summarizationEventInterval);
+        const { selected } = selectRebuildSources(sources, options.batchSize, config.summarizationRoundInterval??config.summarizationEventInterval);
         const chunks = planRebuildBatches(selected, options.batchSize, options.inputTokens, prompt, preview.characterName);
         const job: RebuildJob = { version: 1, id, characterId, characterName: preview.characterName, status: "paused",
+            ...(config.summarizationRoundInterval!==undefined?{countingMode:"rounds" as const}:{}),
             createdAt: new Date().toISOString(), cutoff: preview.last, ...options, coreBatchSize: config.coreSummarizationInterval,
             sourceCount: sources.length, sourceHash: preview.sourceHash, allowedSources: config.shortTermAllowedSources,
             summarizedThrough: preview.summarizedThrough, deferredCount: preview.deferredCount, autoSummaryInterval: preview.autoSummaryInterval,
@@ -137,8 +142,8 @@ export async function runMemoryRebuild(characterId: string): Promise<void> {
                             { temperature: .3, signal: controller.signal, label: `记忆重建·${job.characterName}·${batch.index + 1}` });
                     } finally { clearTimeout(timeout); }
                     if (!response.content?.trim() || response.wasTruncated) throw new Error(response.wasTruncated ? "本批总结被截断，未推进进度。请检查模型输出设置后重试。" : response.error || "本批未返回有效总结，请重试。");
-                    const times = batch.sources.map(s => s.timestamp).sort();
-                    let start = times[0], end = times.at(-1)!;
+                    const times = batch.sources.map(s => s.startTimestamp ?? s.timestamp).sort();
+                    let start = times[0], end = batch.sources.map(s => s.endTimestamp ?? s.timestamp).sort().at(-1)!;
                     if (batch.type === "core") {
                         const origins = batch.sources.map(s => batches.find(b => b.result?.id === s.key)?.result).filter((e): e is MemoryEntry => !!e);
                         start = origins.map(e => String(e.metadata!.eventStartAt)).sort()[0];
@@ -183,11 +188,11 @@ export async function applyMemoryRebuild(characterId: string, expectedJobId: str
         const job = await readRebuildJob(characterId);
         if (!job || job.id !== expectedJobId || job.status !== "ready") throw new Error("任务已变化，请刷新。");
         if (!loadCharacters().some(c => c.id === characterId)) throw new Error("角色已不存在，未启用记忆。");
-        if (await fingerprint(sourcesFor(characterId, job.allowedSources, job.cutoff)) !== job.sourceHash) throw new Error("任务范围内的历史记录已被编辑、删除或补入，已停止启用。旧记忆和重建结果仍保留，请核对后重新建立任务。");
+        if (await fingerprint(sourcesFor(characterId, job.allowedSources, job.cutoff,job.countingMode==="rounds")) !== job.sourceHash) throw new Error("任务范围内的历史记录已被编辑、删除或补入，已停止启用。旧记忆和重建结果仍保留，请核对后重新建立任务。");
         // Rebase the daily counter onto all still-unsummarized records, including
         // messages received while rebuilding. A delta preserves later arrivals;
         // its durable receipt prevents reapplying it after an interrupted swap.
-        const counterDelta = job.summarizedThrough === undefined ? undefined
+        const counterDelta = job.summarizedThrough === undefined || job.countingMode==="rounds" ? undefined
             : sourcesFor(characterId, job.allowedSources).filter(s => s.timestamp > job.summarizedThrough!).length - getEventCounter(characterId);
         await swapRebuild(expectedJobId, characterId, false, loadMemoryConfig().maxLongTermEntries, counterDelta);
     }, true);

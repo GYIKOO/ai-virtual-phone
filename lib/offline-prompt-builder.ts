@@ -6,6 +6,7 @@
 
 import type { ChatSession, ChatMessage } from "./chat-storage";
 import type { ChatOfflineTurn } from "./chat-offline-storage";
+import { narrativeExcerpt } from "./narrative-context";
 
 export function formatOfflineTurnXml(turn: ChatOfflineTurn): string {
     if (!turn.assistantContent.trim() && !turn.rawText?.trim()) return "";
@@ -53,6 +54,7 @@ export function buildOfflinePromptHistory(
             sessionId: session.id,
             role: "assistant",
             content: formatOfflineTurnXml(turn),
+            contextSummary: turn.summary.trim() || narrativeExcerpt(turn.assistantContent, [turn.thinkingTag, turn.summaryTag].filter(Boolean).join(",")),
             status: "sent",
             createdAt: assistantAt,
             ...(session.isGroup ? { senderName: session.groupName || "群聊线下" } : {}),

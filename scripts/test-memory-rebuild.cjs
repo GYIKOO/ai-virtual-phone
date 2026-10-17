@@ -64,7 +64,7 @@ async function discard() { const job = await store.readRebuildJob('a'); if (job)
   assert.equal(policy.planRebuildBatches(sources.map(e => ({ ...e, timestamp: sources[0].timestamp })), 3, 1024, '{{events}}', 'A').flat().length, 7);
   assert.ok(policy.rebuildPrompt('{{char}} {{events}}', '$&', sources).startsWith('$&'));
   assert.equal(policy.protectedMemory({ ...auto, id: 'mem_lt_manual_legacy' }), true, 'legacy manual IDs remain protected without metadata');
-  storage.saveMemoryConfig({ ...load('./memory-types').DEFAULT_MEMORY_CONFIG, vectorRecallEnabled: false, summarizationEventInterval: 1, coreSummarizationInterval: 2 });
+  storage.saveMemoryConfig({ ...load('./memory-types').DEFAULT_MEMORY_CONFIG, summarizationRoundInterval:undefined, vectorRecallEnabled: false, summarizationEventInterval: 1, coreSummarizationInterval: 2 });
   for (const row of [auto, manual, core, other]) await storage.saveMemoryEntry(row);
   storage.setLastSummarizedTimestamp('a', '2026-01-02T00:00:00Z');
   storage.setLastCoreSummarizedTimestamp('a', '2026-01-01T00:00:00Z');
@@ -258,6 +258,22 @@ async function discard() { const job = await store.readRebuildJob('a'); if (job)
   assert.equal(storage.getEventCounter('a'), legacyCount);
   await discard();
   // Restoring an older schema at a higher version still upgrades the new stores.
+  storage.saveMemoryConfig({...storage.loadMemoryConfig(),summarizationRoundInterval:2});
+  timeline=Array.from({length:5},(_,i)=>({id:`round${i}`,sourceApp:'chat',sourceDetail:'direct',dialogueSessionId:'s',
+    dialogueRole:i%2?'assistant':'user',responseUnitId:i%2?`reply${i}`:undefined,
+    timestamp:new Date(Date.UTC(2026,2,1,0,i)).toISOString(),content:`round body ${i}`}));
+  const roundPreview=await service.previewMemoryRebuild('a',{batchSize:2,inputTokens:4000,includeCore:false});
+  assert.equal(roundPreview.sourceCount,2,'pending user input is not a completed round');
+  await service.createMemoryRebuild('a',{batchSize:2,inputTokens:4000,includeCore:false},roundPreview.hash);
+  job=await store.readRebuildJob('a');assert.equal(job.countingMode,'rounds');
+  await service.runMemoryRebuild('a');
+  const rebuiltRounds=await store.readRebuildBatches(job.id);
+  assert.equal(rebuiltRounds[0].result.metadata.eventStartAt,timeline[0].timestamp);
+  assert.equal(rebuiltRounds[0].result.metadata.eventEndAt,timeline[3].timestamp);
+  storage.saveMemoryConfig({...storage.loadMemoryConfig(),summarizationRoundInterval:undefined});
+  await service.applyMemoryRebuild('a',job.id);
+  assert.equal(storage.getLastSummarizedTimestamp('a'),timeline[3].timestamp,'saved task retains round scope after mode changes');
+  await discard();
   await new Promise((resolve, reject) => { const req = indexedDB.deleteDatabase('ai_phone_memory_db_v1'); req.onsuccess = resolve; req.onerror = reject; });
   await new Promise((resolve, reject) => {
     const req = indexedDB.open('ai_phone_memory_db_v1', 20);

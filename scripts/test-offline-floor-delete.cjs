@@ -5,16 +5,17 @@ const ts = require('typescript');
 const cache = new Map();
 function load(file, deps = {}) {
   const exports = {};
-  const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
+  const code = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInNewContext(code, { exports, require: name => deps[name] || {} });
   return exports;
 }
 const storage = load('lib/chat-offline-storage.ts', {
+  './narrative-context': load('lib/narrative-context.ts'),
   './kv-db': { kvGet: key => cache.get(key), kvSet: (key, value) => cache.set(key, value), registerDynamicPrefix() {} },
   './chat-storage': { loadChatSessions: () => [{ id: 's', contactId: 'c' }] },
   './llm-prompt-assembler': { formatChatTimestamp: text => text },
 });
-const prompt = load('lib/offline-prompt-builder.ts');
+const prompt = load('lib/offline-prompt-builder.ts', {'./narrative-context':load('lib/narrative-context.ts')});
 const make = id => ({ id, sessionId: 's', userContent: 'user ' + id, assistantContent: 'reply ' + id, rawText: '<content>reply</content>', summary: 'event', summaryTag: 'summary', reasoningText: 'reason', thinkingText: 'think', createdAt: `2026-10-04T00:00:0${id}Z` });
 function reset() { storage.saveChatOfflineTurns('s', ['1', '2', '3'].map(make)); storage.saveChatOfflineTurns('other', [{ ...make('1'), sessionId: 'other' }]); }
 reset();

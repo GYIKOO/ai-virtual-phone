@@ -69,6 +69,8 @@ export type PresetConfig = SettingItemMeta & {
     builtIn?: boolean;
     builtInVersion?: number;
     temperature: number;
+    /** Undefined preserves the application's existing transport/display setting. */
+    streaming_mode?: "auto" | "stream" | "non-stream";
     top_p: number;
     top_k: number;
     frequency_penalty: number;

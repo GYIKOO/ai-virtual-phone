@@ -37,7 +37,7 @@ function load(name) {
   const exports = {};
   cache.set(name,exports);
   const filename = `lib/${name.slice(2)}.ts`;
-  const real = new Set(['./token-counter','./story-context-budget','./story-ensemble-context','./memory-service','./memory-time','./memory-embedding','./llm-prompt-assembler','./story-default-prompt','./llm-provider-adapter','./api-helpers','./generation-parameters','./character-relation-context','./story-preparation']);
+  const real = new Set(['./prompt-memory-budget','./proactive-replay','./memory-context-policy','./token-counter','./story-context-budget','./story-ensemble-context','./memory-service','./memory-time','./memory-embedding','./llm-prompt-assembler','./story-default-prompt','./llm-provider-adapter','./api-helpers','./generation-parameters','./character-relation-context','./story-preparation']);
   if (!real.has(name)) return {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename,'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,
     {exports,require:load,console}, {filename});
@@ -134,7 +134,7 @@ function options(ids, extra={}) {
   output = text(await builder.buildEnsembleStoryPrompt(input));
   assert.match(output,/记忆归属：A；来源：chat[\s\S]*?私人约定A/);
   assert.match(output,/记忆归属：B；来源：story[\s\S]*?私人约定B/);
-  assert.ok(!output.includes('火山岩'), 'small archives also select relevant long-term memories');
+  assert.ok(output.includes('火山岩'), 'recent summaries bridge continuity even without keyword overlap');
   assert.ok(output.includes('角色之间的信息传递以剧情中实际发生的交流和经历为依据'));
   const disabled = {...input,base:{...input.base,preset:{...preset,prompts:preset.prompts.map(p => ['memoryCore','memoryLongTerm','shortTermMemory'].includes(p.identifier)?{...p,enabled:false}:p)}}};
   output = text(await builder.buildEnsembleStoryPrompt(disabled));
@@ -147,13 +147,14 @@ function options(ids, extra={}) {
     {id:`${id}-vector`,type:'long_term',content:'语义相关记忆',createdAt:at(1),embedding:[1,0]},
     {id:`${id}-old`,type:'long_term',content:'车站旧记录',createdAt:at(2)},
     {id:`${id}-dimension`,type:'long_term',content:'车站不同维度记录',createdAt:at(3),embedding:[1,0,0]},
+    ...[4,5,6].map(n=>({id:`${id}-recent-${n}`,type:'long_term',content:`近期总结${n}`,createdAt:at(n)})),
   ]]));
   const rank = ranker.createStoryMemoryRanker('车站',config);
-  for (const id of ['a','b']) assert.equal((await rank(id,'long_term')).length,3);
+  for (const id of ['a','b']) assert.equal((await rank(id,'long_term')).length,6);
   assert.equal(vectorCalls,1);
   assert.deepEqual(embeddingQueries, ['车站']);
   vectorFailure = true;
-  assert.equal((await ranker.createStoryMemoryRanker('车站',config)('a','long_term')).length,2);
+  assert.equal((await ranker.createStoryMemoryRanker('车站',config)('a','long_term')).length,5);
   vectorFailure = false; vectors = false;
   console.log('PASS: one scene embedding, keyword recall for legacy/dimension mismatch, API failure fallback');
 

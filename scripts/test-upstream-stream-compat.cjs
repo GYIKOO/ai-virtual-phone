@@ -81,8 +81,11 @@ async function main() {
       sendLLMStreamRequest: async (_c, _p, _m, _r, _meta, opts, callbacks) => {
         assert.equal(opts.signal, controller.signal);
         assert.equal(opts.includeReasoning, true);
-        if (scenario === 'partial') callbacks.onDelta('partial');
+        if (scenario === 'partial') callbacks.onDelta?.('partial');
         if (scenario === 'reasoning' || scenario === 'success') callbacks.onReasoningDelta('test-reasoning');
+        // Protocol fallback now belongs to sendLLMStreamRequest, tested separately
+        // against real transport helpers in test-preset-streaming.cjs.
+        if (scenario === 'unsupported') { fallback++; return {content:'fallback'}; }
         if (scenario !== 'success') throw new Error('synthetic error');
         return { content: 'complete' };
       },

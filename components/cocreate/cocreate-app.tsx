@@ -2902,7 +2902,7 @@ export function CoCreateApp({ onClose, onNotice }: CoCreateAppProps) {
               >
                 <span>
                   <strong>流式输出</strong>
-                  <small>部分 API 支持；不支持时自动使用普通生成。</small>
+                  <small>预设选择“沿用应用设置”时生效；否则跟随预设的输出方式。</small>
                 </span>
                 <em>{sharedSettings.streamingEnabled ? "ON" : "OFF"}</em>
               </button>

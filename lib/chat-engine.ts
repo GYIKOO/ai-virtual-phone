@@ -1,6 +1,7 @@
 // lib/chat-engine.ts
 
 import { createSseJsonParser } from "./sse-json";
+import { requestWithPresetStreaming, usePresetStreaming } from "./preset-streaming";
 import { maybeAppendShortcutCapability, maybeAppendPerceptionStatus } from "./offline-shortcut-capability";
 import { maybeBuildStatusInjection } from "./perception/describe";
 import { loadCharacters } from "./character-storage";
@@ -66,6 +67,7 @@ import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memo
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
 import { prepareShortTermContext } from "./short-term-assembler";
+import { assembleBudgetedMemory } from "./prompt-memory-budget";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./tool-storage";
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
@@ -803,7 +805,21 @@ async function readSseStream(
     return { content, rawResponse };
 }
 
-export async function sendLLMStreamRequest(
+export async function sendLLMStreamRequest(...args: Parameters<typeof sendStreamingRequest>): Promise<ChatCompletionStreamResult> {
+    const [config, preset, messages, regexes, meta, options, callbacks] = args;
+    return requestWithPresetStreaming(preset, true,
+        () => sendStreamingRequest(...args),
+        async () => {
+            let reasoning = "";
+            const result = await sendNonStreamingRequest(config, preset, messages, regexes, meta, {
+                ...options, onReasoning: text => { reasoning = text; },
+            });
+            if (reasoning) await callbacks?.onReasoningDelta?.(reasoning);
+            return result;
+        }, options?.signal);
+}
+
+async function sendStreamingRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
     messages: LLMMessage[],
@@ -913,8 +929,7 @@ export async function sendLLMStreamRequest(
  * 和 sendLLMRequest 同签名、同返回（一次拿到全文），但传输优先走流式。
  * iOS Safari 对迟迟收不到任何响应数据的请求约 60 秒就判超时，非流式的长生成（剧情等）在 iPhone 上会必挂；
  * 流式一开始就陆续有数据，不会被判空闲。界面不变，仍是收齐后整段显示。
- * 什么都没收到就失败（接口或中转不支持 SSE 等）时退回 sendLLMRequest 重试一次；
- * 已经收到正文或思考内容后再断开，或调用方主动中止，按原样抛出（避免同一次长生成计费两次）。
+ * 仅接口明确拒绝流式协议时回退；超时、空输出和断流不会再次发起生成。
  */
 export async function sendLLMRequestPreferStream(
     config: ApiConfig,
@@ -924,37 +939,36 @@ export async function sendLLMRequestPreferStream(
     meta?: { characterName?: string; userName?: string },
     options?: Parameters<typeof sendLLMRequest>[5],
 ): Promise<string> {
-    let received = false;
     let reasoning = "";
-    try {
-        const result = await sendLLMStreamRequest(config, preset, messages, regexes, meta, {
-            skipOutputRegex: options?.skipOutputRegex,
-            includeReasoning: options?.includeReasoning,
-            appId: options?.appId,
-            appTags: options?.appTags,
-            followUpCount: options?.followUpCount,
-            debugSessionId: options?.debugSessionId,
-            signal: options?.signal,
-        }, {
-            onDelta: () => { received = true; },
-            onReasoningDelta: (text: string) => { received = true; reasoning += text; },
-        });
-        if (reasoning) {
-            try { options?.onReasoning?.(reasoning); } catch { /* 捕获回调异常，不影响主流程 */ }
-        }
-        return result.content;
-    } catch (error) {
-        if (received || options?.signal?.aborted) throw error;
-        console.warn("[ChatEngine] 流式请求没有收到内容，退回非流式重试：", error);
-        return sendLLMRequest(config, preset, messages, regexes, meta, options);
+    const result = await sendLLMStreamRequest(config, preset, messages, regexes, meta, {
+        ...options,
+    }, {
+        onReasoningDelta: (text: string) => { reasoning += text; },
+    });
+    if (reasoning) {
+        try { options?.onReasoning?.(reasoning); } catch { /* 捕获回调异常，不影响主流程 */ }
     }
+    return result.content;
 }
 
 /**
  * Shared LLM HTTP request: provider normalization → consecutive same-role merge → API call → log → output regex.
  * Used by both generateChatCompletion (1:1 chat) and generateGroupChatCompletion (group chat).
  */
-export async function sendLLMRequest(
+export async function sendLLMRequest(...args: Parameters<typeof sendNonStreamingRequest>): Promise<string> {
+    const [config, preset, messages, regexes, meta, options] = args;
+    let reasoning = "";
+    const result = await requestWithPresetStreaming(preset, false,
+        () => sendStreamingRequest(config, preset, messages, regexes, meta, options, {
+            onReasoningDelta: text => { reasoning += text; },
+        }), () => sendNonStreamingRequest(...args), options?.signal);
+    if (reasoning) {
+        try { options?.onReasoning?.(reasoning); } catch { /* optional observer */ }
+    }
+    return result.content;
+}
+
+async function sendNonStreamingRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
     messages: LLMMessage[],
@@ -962,6 +976,7 @@ export async function sendLLMRequest(
     meta?: { characterName?: string; userName?: string },
     options?: {
         skipOutputRegex?: boolean;
+        skipTimestampStrip?: boolean;
         includeReasoning?: boolean;
         /** 供调用方捕获模型思维链（reasoning）内容，不影响返回文本 */
         onReasoning?: (text: string) => void;
@@ -971,7 +986,7 @@ export async function sendLLMRequest(
         debugSessionId?: string;
         signal?: AbortSignal;
     },
-): Promise<string> {
+): Promise<ChatCompletionStreamResult> {
     const pluginPurpose = options?.appId ?? "chat";
     const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
     const effectivePreset = afterPlugins.preset;
@@ -1062,19 +1077,19 @@ export async function sendLLMRequest(
             reasoning: parsed.reasoning || undefined,
         });
 
-        if (options?.skipOutputRegex) {
-            return rawOutput;
-        }
+        const result = { content: rawOutput, rawResponse: JSON.stringify(data), providerKind: request.providerKind };
+        if (options?.skipOutputRegex) return result;
         // Apply Output Regex Filters
         const macroEngine = new MacroEngine(meta?.characterName ?? "", meta?.userName ?? "用户");
         const activeTags = getActiveAppTags(options?.appId ?? "chat", {
             appTags: options?.appTags,
             followUpCount: options?.followUpCount,
         });
-        return applyWithProtectedAvatarDecisionMarkers(
+        result.content = applyWithProtectedAvatarDecisionMarkers(
             rawOutput,
             protectedText => applyOutputRegex(protectedText, regexes, { macroEngine, activeTags }),
         );
+        return result;
     } catch (error: unknown) {
         if (error instanceof DOMException && (error as DOMException).name === "AbortError") {
             throw new ChatEngineError("AI 回复超时（500秒），请重试。");
@@ -1152,7 +1167,17 @@ function finalizeStreamToolCalls(drafts: Map<number, StreamToolCallDraft>): { ca
     return { calls, truncatedNames };
 }
 
-export async function sendLLMToolStreamRequest(
+export async function sendLLMToolStreamRequest(...args: Parameters<typeof sendStreamingToolRequest>): Promise<LLMToolRequestResult> {
+    const [config, preset, messages, tools, regexes, meta, options, callbacks] = args;
+    return requestWithPresetStreaming(preset, true,
+        () => sendStreamingToolRequest(...args), async () => {
+            const result = await sendNonStreamingToolRequest(config, preset, messages, tools, regexes, meta, options);
+            if (result.reasoning) await callbacks?.onReasoningDelta?.(result.reasoning);
+            return result;
+        }, options?.signal);
+}
+
+async function sendStreamingToolRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
     messages: LlmRequestMessage[],
@@ -1308,7 +1333,25 @@ export async function sendLLMToolStreamRequest(
     }
 }
 
-export async function sendLLMToolRequest(
+export async function sendLLMToolRequest(...args: Parameters<typeof sendNonStreamingToolRequest>): Promise<LLMToolRequestResult> {
+    const [config, preset, messages, tools, regexes, meta, options] = args;
+    return requestWithPresetStreaming(preset, false,
+        async () => {
+            const result = await sendStreamingToolRequest(config, preset, messages, tools, regexes, meta, options);
+            let content = result.content;
+            if (options?.includeReasoning && result.reasoning) content = `<think>\n${result.reasoning}\n</think>\n\n${content}`;
+            if (!options?.skipOutputRegex && content) {
+                const macroEngine = new MacroEngine(meta?.characterName ?? "", meta?.userName ?? "用户");
+                const activeTags = getActiveAppTags(options?.appId ?? "chat", { appTags: options?.appTags, followUpCount: options?.followUpCount });
+                content = applyWithProtectedAvatarDecisionMarkers(content,
+                    text => applyOutputRegex(text, regexes, { macroEngine, activeTags }));
+            }
+            return { ...result, content };
+        },
+        () => sendNonStreamingToolRequest(...args), options?.signal);
+}
+
+async function sendNonStreamingToolRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
     messages: LlmRequestMessage[],
@@ -1318,6 +1361,7 @@ export async function sendLLMToolRequest(
     options?: {
         skipOutputRegex?: boolean;
         includeReasoning?: boolean;
+        maxTokens?: number;
         appId?: string;
         appTags?: string[];
         followUpCount?: number;
@@ -1328,7 +1372,7 @@ export async function sendLLMToolRequest(
     const pluginPurpose = options?.appId ?? "chat";
     const afterPlugins = await applyChatPluginLlmRequest(preset, messages, pluginPurpose, options?.debugSessionId);
     const effectivePreset = afterPlugins.preset;
-    const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools });
+    const request = buildProviderRequest(config, effectivePreset, afterPlugins.messages, { tools, maxTokens: options?.maxTokens });
     publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "native-tools", tools });
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -1927,6 +1971,7 @@ export async function buildChatPromptMessages(
         historicalAt: options?.historicalAt,
         history: historyForPrompt,
         includeDirectChatEntries: isOfflineMode,
+        narrativeHistory: isOfflineMode,
         includeNativeToolHistory: usesNativeActions,
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
         promptTimestampOptions,
@@ -1976,7 +2021,7 @@ export async function buildChatPromptMessages(
         )
         : "";
 
-    const llmMessages = assemblePromptPayload({
+    const memoryInput: Parameters<typeof assemblePromptPayload>[0] = {
         character,
         history: promptHistory,
         preset,
@@ -2018,7 +2063,8 @@ export async function buildChatPromptMessages(
         offlineBilingualInstruction,
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
-    });
+    };
+    const llmMessages: LLMMessage[] = [];
     const avatarChangeIntent = !session.isGroup && options?.historicalAt === undefined && !isAutomaticChatGeneration(options)
         ? findUserAvatarChangeIntent(historyForPrompt, session.id, character.id, { allowAnsweredTurn: false })
         : null;
@@ -2101,7 +2147,12 @@ export async function buildChatPromptMessages(
         llmMessages.push({ role: "system", content: ephemeralSystemNote });
     }
 
-    return { llmMessages, character, config, preset, regexes, userIdentity, toolsEnabled };
+    const fittedMessages = assembleBudgetedMemory(memoryInput,
+        input => [...assemblePromptPayload(input), ...llmMessages], memConfig, [[
+            ...(coreResults || []).map(entry => ({id:entry.id,kind:"core" as const,timestamp:String(entry.metadata?.eventEndAt ?? entry.createdAt),text:formatCoreMemories([entry],now.getTime())})),
+            ...(memResults || []).map(entry => ({id:entry.id,kind:"long" as const,timestamp:String(entry.metadata?.eventEndAt ?? entry.createdAt),text:formatLongTermMemories([entry],now.getTime())})),
+        ]]);
+    return { llmMessages: fittedMessages, character, config, preset, regexes, userIdentity, toolsEnabled };
 }
 
 export type ChatCompletionCallbacks = {
@@ -2175,7 +2226,7 @@ export async function generateOfflineChatCompletion(
         onReasoning: (t: string) => { reasoning = t; },
     };
     let rawOutput: string;
-    if (isSessionStreamingEnabled(session, false) && options?.onStreamDelta) {
+    if (usePresetStreaming(preset, isSessionStreamingEnabled(session, false)) && options?.onStreamDelta) {
         // 线下流式：正文边生成边通过 onStreamDelta 交给 UI 做实时预览；
         // 摘要补提仍走整段请求（输出短，无需流式）。
         const streamResult = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
@@ -2287,7 +2338,7 @@ async function generateNativeChatCompletion(
     for (let round = 0; round < maxToolRounds; round += 1) {
         let result: LLMToolRequestResult;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (!preset?.streaming_mode && isSessionStreamingEnabled(session, true)) {
                 let streamReasoning = "";
                 result = await sendLLMToolStreamRequest(
                     config,
@@ -2746,7 +2797,7 @@ async function generateChatCompletionCore(
     for (let round = 0; round < maxToolRounds; round++) {
         let filteredOutput: string;
         try {
-            if (isSessionStreamingEnabled(session, true)) {
+            if (!preset?.streaming_mode && isSessionStreamingEnabled(session, true)) {
                 // 流式分支：与 sendLLMRequest 走同一套请求构造/日志/正则，仅把「整段等待」换成
                 // SSE 增量，并通过 onStreamDelta 把原文增量实时交给 UI 层做预览显示。
                 let streamReasoning = "";
@@ -2975,7 +3026,7 @@ async function generateChatCompletionCore(
             if (round === maxToolRounds - 1) {
                 try {
                     let finalOutput: string;
-                    if (isSessionStreamingEnabled(session, true)) {
+                    if (!preset?.streaming_mode && isSessionStreamingEnabled(session, true)) {
                         let streamReasoning = "";
                         const streamFinal = await sendLLMStreamRequest(config, preset, llmMessages, regexes, meta, {
                             appId: options?.appId ?? "chat",

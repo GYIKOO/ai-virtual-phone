@@ -9,14 +9,10 @@ import {
   resolveUserIdentity,
 } from "./settings-storage";
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
-import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
-import { previewMessagesForApi, sendLLMRequestPreferStream, sendLLMRequest, sendLLMStreamRequest, ChatEngineError } from "./chat-engine";
+import type { LLMMessage } from "./llm-prompt-assembler";
+import { previewMessagesForApi, sendLLMRequestPreferStream, sendLLMStreamRequest, ChatEngineError } from "./chat-engine";
+import { usePresetStreaming } from "./preset-streaming";
 import { loadMemoryConfig } from "./memory-storage";
-import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
-import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { prepareShortTermContext } from "./short-term-assembler";
-import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
-import { getWeekStartIso } from "./calendar-utils";
 import { parseStoryResponse } from "./story-parser";
 import { STORY_PARSER_VERSION } from "./story-parser";
 import { loadStoryMessages, replaceStoryMessages, resolveActiveStorySchemes, type StoryCharacterSettings, type StoryGlobalSettings, type StoryMessage } from "./story-storage";
@@ -29,6 +25,8 @@ import { buildEnsembleStoryPrompt } from "./story-ensemble-context";
 import { estimateStoryMessages, storyInputBudget } from "./story-context-budget";
 import { selectStoryPresetPrompts } from "./story-preset-selection";
 import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase } from "./story-preparation";
+import { stripNarrativeTags } from "./narrative-context";
+import { contextCapacity } from "./prompt-memory-budget";
 
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS, storyFoldSignature } from "./story-tag-settings";
 
@@ -104,17 +102,8 @@ export type StoryPreviewResult = {
   presetName: string;
 };
 
-function escapeTagName(tag: string): string {
-  return tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function stripContextExcludedTags(text: string, excludedTags?: string): string {
-  const tags = Array.from(new Set((excludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS).split(",").map(t => t.trim()).filter(Boolean)));
-  if (tags.length === 0) return text;
-
-  const tagAlternation = tags.map(escapeTagName).join("|");
-  const rx = new RegExp(`<(${tagAlternation})>[\\s\\S]*?<\\/\\1>`, "gi");
-  return text.replace(rx, "").replace(/\n{3,}/g, "\n\n").trim();
+  return stripNarrativeTags(text, excludedTags ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS);
 }
 
 function toHistoryMessage(message: StoryMessage, contextExcludedTags?: string): ChatMessage {
@@ -210,10 +199,8 @@ export function getStoryRenderSignature(characterId: string, foldTags?: string):
 }
 
 function checkEnsembleRequestBudget(characterId: string, participantIds: string[] | undefined, api: ApiConfig, preset: PresetConfig | null, messages: LLMMessage[]): void {
-  const ids = new Set([characterId, ...(participantIds || [])]);
-  if (loadCharacters().filter(character => ids.has(character.id)).length < 2) return;
-  if (estimateStoryMessages(previewMessagesForApi(api, preset, messages)) > storyInputBudget(preset, loadMemoryConfig().storyContextTokenLimit)) {
-    throw new ChatEngineError("多人剧情在请求转换后超过上下文预算，请缩减预设、世界书或本轮输入后重试。");
+  if (estimateStoryMessages(previewMessagesForApi(api, preset, messages)) > storyInputBudget(preset, contextCapacity(loadMemoryConfig()))) {
+    throw new ChatEngineError("请求转换后超过上下文预算，请缩减预设、世界书或本轮输入后重试。");
   }
 }
 
@@ -259,27 +246,13 @@ export async function generateStoryCompletion(
   const macroEngine = new MacroEngine(character.name, userIdentity?.name ?? "用户");
 
   let rawOutput: string;
-  if (options?.globalSettings?.streamingEnabled) {
-    let receivedDelta = false;
-    try {
-      const streamed = await sendLLMStreamRequest(apiConfig, preset, llmMessages, regexes, {
-        characterName: character.name,
-      }, { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal }, {
-        onDelta: (text) => {
-          receivedDelta = true;
-          options.onDelta?.(text);
-        },
-        onReasoningDelta: () => { receivedDelta = true; },
-      });
-      rawOutput = streamed.content;
-    } catch (error) {
-      // 某些中转只是不支持 SSE：在尚未吐出任何正文时安全回退普通生成；
-      // 已经吐过增量则不重试，避免一次操作生成两份互相不同的正文。
-      if (receivedDelta || options.signal?.aborted) throw error;
-      rawOutput = await sendLLMRequest(apiConfig, preset, llmMessages, regexes, {
-        characterName: character.name,
-      }, { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal });
-    }
+  if (usePresetStreaming(preset, options?.globalSettings?.streamingEnabled === true)) {
+    const streamed = await sendLLMStreamRequest(apiConfig, preset, llmMessages, regexes, {
+      characterName: character.name,
+    }, { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal }, {
+      onDelta: (text) => options?.onDelta?.(text),
+    });
+    rawOutput = streamed.content;
   } else {
     rawOutput = await sendLLMRequestPreferStream(apiConfig, preset, llmMessages, regexes, {
       characterName: character.name,
@@ -331,7 +304,6 @@ async function buildStoryPromptMessages(
     .map((id) => allCharacters.find((item) => item.id === id))
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
   const effectiveWorldBooks = mergeParticipantWorldBooks(worldBooks, participantCharacters.map((item) => item.id));
-  const isEnsemble = participantCharacters.length > 1;
   const instructionHistory = prepareStoryInstructionHistory(history);
   const historyMessages = instructionHistory.history.map((message) => toHistoryMessage(message, contextExcludedTags));
   const historyIds = new Set(history.map(message => message.id));
@@ -358,66 +330,17 @@ async function buildStoryPromptMessages(
     if (retryInstruction?.trim()) messages.push({ role: "user", content: wrapStoryRetryInstruction(retryInstruction), _debugMeta: { marker: "临时重试要求" } });
     return messages;
   };
-  if (isEnsemble) {
-    return buildEnsembleStoryPrompt({
-      signal: preparation?.signal, onPhase: preparation?.onPhase,
-      base: { character, history: historyMessages, preset, worldBooks: effectiveWorldBooks, regexes, userIdentity, appId: "story", timeAware },
-      characters: participantCharacters, config: memConfig, independent,
-      excludedMessageIds: [...new Set([...storedMessages.map(message => message.id), ...historyIds])],
-      afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
-      tail: finish([]), queryInstruction: [instructionHistory.directorInstruction, retryInstruction].filter(Boolean).join("\n"),
-      formatStoryMessage: message => toHistoryMessage(message, contextExcludedTags),
-      cleanText: text => stripContextExcludedTags(text, contextExcludedTags),
-      historySummaries: new Map(instructionHistory.history.filter(message => message.storySummary).map(message => [message.id, message.storySummary!])),
-    });
-  }
-  const context = independent
-    ? {
-      recentBlocks: [],
-      truncatedHistory: historyMessages,
-      wbActivationContext: historyMessages.slice(-10).map((message) => message.content).join("\n"),
-      unifiedRecentItems: [],
-    }
-    : prepareShortTermContext(characterId, "story", {
-      userName: userIdentity?.name ?? "用户",
-      history: historyMessages,
-      // Current-page prose is already in history. Exclude its projections too,
-      // including discarded retry suffixes, while retaining other pages' events.
-      excludeStoryMessageIds: [...new Set([...storedMessages.map(message => message.id), ...historyIds])],
-      afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
-      timeAware,
-    });
-  const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = context;
-
-  let memories: Awaited<ReturnType<typeof retrieveMemoriesForPrompt>> | null = null;
-  let coreMemories: Awaited<ReturnType<typeof retrieveCoreMemoriesForPrompt>> | null = null;
-  if (!independent) {
-    [memories, coreMemories] = await Promise.all([
-      retrieveMemoriesForPrompt(characterId, wbActivationContext, memConfig).catch(() => null),
-      retrieveCoreMemoriesForPrompt(characterId, memConfig).catch(() => null),
-    ]);
-  }
-
-  const messages = assemblePromptPayload({
-    character,
-    history: truncatedHistory,
-    preset,
-    worldBooks: effectiveWorldBooks,
-    regexes,
-    userIdentity,
-    appId: "story",
-    scheduleSummary: independent || isEnsemble ? undefined : buildCalendarScheduleMarker("character", characterId, getWeekStartIso(now)),
-    currentSchedule: independent || isEnsemble ? undefined : getCurrentCalendarScheduleForPrompt("character", characterId, now),
-    coreMemories: !isEnsemble && coreMemories ? formatCoreMemories(coreMemories) : "",
-    longTermMemories: !isEnsemble && memories ? formatLongTermMemories(memories) : "",
-    worldBookActivationContext: wbActivationContext,
-    recentBlocks: isEnsemble ? [] : recentBlocks,
-    unifiedRecentItems: isEnsemble ? [] : unifiedRecentItems,
-    timeAware,
-    characterRelations: independent || isEnsemble ? null : undefined,
-    dwellingContext: independent || isEnsemble ? null : undefined,
+  return buildEnsembleStoryPrompt({
+    signal: preparation?.signal, onPhase: preparation?.onPhase,
+    base: { character, history: historyMessages, preset, worldBooks: effectiveWorldBooks, regexes, userIdentity, appId: "story", timeAware },
+    characters: participantCharacters, config: memConfig, independent,
+    excludedMessageIds: [...new Set([...storedMessages.map(message => message.id), ...historyIds])],
+    afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
+    tail: finish([]), queryInstruction: [instructionHistory.directorInstruction, retryInstruction].filter(Boolean).join("\n"),
+    formatStoryMessage: message => toHistoryMessage(message, contextExcludedTags),
+    cleanText: text => stripContextExcludedTags(text, contextExcludedTags),
+    historySummaries: new Map(instructionHistory.history.filter(message => message.storySummary).map(message => [message.id, message.storySummary!])),
   });
-  return finish(messages);
 }
 
 export async function previewStoryPromptPayload(
