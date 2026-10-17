@@ -1,4 +1,5 @@
-import type { CalendarColorKey, CalendarOwnerType, CalendarScheduleItem, CalendarWeekPlan } from "./calendar-types";
+import type { CalendarColorKey, CalendarOwnerType, CalendarScheduleItem, CalendarWeekPlan, CalendarCommitment } from "./calendar-types";
+import { resolveUserIdentity } from "./settings-storage";
 import {
   formatIsoDate,
   getOwnerStorageKey,
@@ -13,7 +14,7 @@ import {
   sortScheduleItems,
   timeToMinutes,
 } from "./calendar-utils";
-import { kvGet, kvSet, kvRefresh, registerKvMigration } from "./kv-db";
+import { kvGet, kvSet, kvSetAsync, kvRefresh, registerKvMigration } from "./kv-db";
 import { getSystemTimeZone } from "./character-time";
 
 const STORAGE_KEY = "ai_phone_calendar_plans_v1";
@@ -21,8 +22,11 @@ const CALENDAR_CONFIG_KEY = "ai_phone_calendar_config_v1";
 registerKvMigration(STORAGE_KEY);
 registerKvMigration(CALENDAR_CONFIG_KEY);
 
-type PersistedCalendarStore = {
+export type PersistedCalendarStore = {
   plans: CalendarWeekPlan[];
+  commitments: CalendarCommitment[];
+  appliedBatches: string[];
+  revision: number;
 };
 
 export type CalendarConfig = {
@@ -66,21 +70,73 @@ export function normalizeCalendarTheme(theme: unknown): string {
   return (CALENDAR_THEME_IDS as readonly string[]).includes(mapped) ? mapped : DEFAULT_CALENDAR_CONFIG.theme;
 }
 
-function loadStore(): PersistedCalendarStore {
-  if (typeof window === "undefined") return { plans: [] };
+export function loadCalendarStore(): PersistedCalendarStore {
+  const empty = (): PersistedCalendarStore => ({ plans: [], commitments: [], appliedBatches: [], revision: 0 });
+  if (typeof window === "undefined") return empty();
   try {
     const raw = kvGet(STORAGE_KEY);
-    if (!raw) return { plans: [] };
+    if (!raw) return empty();
     const parsed = JSON.parse(raw) as Partial<PersistedCalendarStore>;
-    return { plans: Array.isArray(parsed.plans) ? parsed.plans : [] };
+    return { plans: Array.isArray(parsed.plans) ? parsed.plans : [],
+      commitments: Array.isArray(parsed.commitments) ? parsed.commitments : [],
+      appliedBatches: Array.isArray(parsed.appliedBatches) ? parsed.appliedBatches : [],
+      revision: Number.isSafeInteger(parsed.revision) ? parsed.revision! : 0 };
   } catch {
-    return { plans: [] };
+    return empty();
   }
 }
 
-function saveStore(store: PersistedCalendarStore): void {
+const loadStore = loadCalendarStore;
+export function saveCalendarStore(store: PersistedCalendarStore): void {
   if (typeof window === "undefined") return;
-  kvSet(STORAGE_KEY, JSON.stringify(store));
+  kvSet(STORAGE_KEY, JSON.stringify({ ...store, revision: loadStore().revision + 1 }));
+  if (typeof Event !== "undefined") window.dispatchEvent?.(new Event("calendar-updated"));
+}
+const saveStore = saveCalendarStore;
+let calendarWriteQueue: Promise<unknown> = Promise.resolve();
+export async function withCalendarWriteLock<T>(action: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== "undefined" && navigator.locks) return await navigator.locks.request("float-calendar-write",action);
+  const next = calendarWriteQueue.then(action,action);
+  calendarWriteQueue = next.catch(() => undefined);
+  return next;
+}
+
+export async function flushCalendarStore(): Promise<void> {
+  const value = kvGet(STORAGE_KEY);
+  if (value !== null && value !== undefined) await kvSetAsync(STORAGE_KEY,value);
+}
+
+/** Await persistence before releasing the shared mutation lock. */
+export async function saveCalendarStoreAsync(store: PersistedCalendarStore): Promise<void> {
+  if (typeof window === "undefined") throw new Error("日历存储尚未就绪");
+  await kvSetAsync(STORAGE_KEY,JSON.stringify({...store,revision:loadStore().revision+1}));
+  if (typeof Event !== "undefined") window.dispatchEvent?.(new Event("calendar-updated"));
+}
+
+export function calendarIdentity(ownerId?: string): string {
+  return resolveUserIdentity?.(ownerId, "calendar")?.id || "";
+}
+
+export function loadCalendarCommitments(ownerId?: string, identityId = calendarIdentity(ownerId)): CalendarCommitment[] {
+  return loadStore().commitments.filter(row => row.userIdentityId === identityId && (!ownerId || row.participantIds.includes(ownerId)));
+}
+
+function commitmentItems(ownerType: CalendarOwnerType, ownerId: string, weekStart: string, identityId?: string): CalendarScheduleItem[] {
+  const dates = new Set(getWeekDates(weekStart));
+  return loadCalendarCommitments(ownerType === "character" ? ownerId : undefined, identityId)
+    .filter(row => row.status !== "cancelled" && row.date && dates.has(row.date) && row.startTime && row.endTime)
+    .map(row => ({ id: `commitment:${row.id}`, commitmentId: row.id, date: row.date!, weekday: getWeekdayLabel(row.date!),
+      startTime: row.startTime!, endTime: row.endTime!, location: row.location, title: `约定：${row.title}`, emoji: "📌",
+      source: "manual", colorKey: "violet", createdAt: row.createdAt, updatedAt: row.updatedAt }));
+}
+
+export function formatCalendarCommitments(ownerId: string | undefined, weekStart?: string, identityId?: string): string {
+  const end = weekStart ? getWeekDates(weekStart).at(-1)! : undefined;
+  const nextEnd = end ? new Date(`${end}T12:00:00`) : undefined;
+  nextEnd?.setDate(nextEnd.getDate() + 7);
+  const rows = loadCalendarCommitments(ownerId, identityId).filter(row => row.status === "confirmed"
+    && (!weekStart || !row.date || (row.date >= weekStart && row.date <= formatIsoDate(nextEnd!))));
+  return rows.map(row => `${row.id} | ${row.date || "日期待定"} ${row.startTime || "时间待定"}${row.endTime ? `-${row.endTime}` : ""} | ${row.title} | ${row.location || "地点待定"} | 参与角色：${row.participantIds.join("、")}`).join("\n");
 }
 
 export function loadCalendarConfig(): CalendarConfig {
@@ -114,15 +170,19 @@ export function loadCalendarWeekPlan(
   ownerType: CalendarOwnerType,
   ownerId: string,
   weekStart: string,
+  identityId?: string,
 ): CalendarWeekPlan | null {
   const store = loadStore();
   const plan = store.plans.find(
     entry => entry.ownerType === ownerType && entry.ownerId === ownerId && entry.weekStart === weekStart,
   );
-  if (!plan) return null;
+  const protectedItems = commitmentItems(ownerType, ownerId, weekStart, identityId);
+  if (!plan && !protectedItems.length) return null;
   return {
+    id: `calendar_week_${ownerType}_${ownerId}_${weekStart}`, ownerType, ownerId, weekStart, updatedAt: "",
     ...plan,
-    items: sortScheduleItems((plan.items || [])
+    items: sortScheduleItems([...(plan?.items || []).filter(item => !item.commitmentId
+      && (item.source === "manual" || !protectedItems.some(commitment => commitment.date === item.date && commitment.startTime < item.endTime && commitment.endTime > item.startTime))), ...protectedItems]
       .filter(item => isCalendarTimeRangeAllowed(item.startTime, item.endTime))
       .map(item => ({
         ...item,
@@ -135,14 +195,14 @@ export function loadCalendarWeekPlan(
 export function loadOwnerCalendarPlans(
   ownerType: CalendarOwnerType,
   ownerId: string,
+  identityId?: string,
 ): CalendarWeekPlan[] {
   const store = loadStore();
-  return store.plans
+  const weeks = new Set([...store.plans
     .filter(entry => entry.ownerType === ownerType && entry.ownerId === ownerId)
-    .map(entry => ({
-      ...entry,
-      items: sortScheduleItems((entry.items || []).filter(item => isCalendarTimeRangeAllowed(item.startTime, item.endTime))),
-    }))
+    .map(entry => entry.weekStart), ...loadCalendarCommitments(ownerType === "character" ? ownerId : undefined, identityId)
+      .filter(row => row.date).map(row => getWeekStartIso(new Date(`${row.date}T12:00:00`)))]);
+  return [...weeks].map(week => loadCalendarWeekPlan(ownerType, ownerId, week, identityId)!).filter(Boolean)
     .sort((a, b) => a.weekStart.localeCompare(b.weekStart));
 }
 
@@ -151,7 +211,7 @@ export function saveCalendarWeekPlan(plan: CalendarWeekPlan): CalendarWeekPlan {
   const normalized: CalendarWeekPlan = {
     ...plan,
     updatedAt: new Date().toISOString(),
-    items: sortScheduleItems(plan.items.map(item => ({
+    items: sortScheduleItems(plan.items.filter(item => !item.commitmentId && !item.id.startsWith("commitment:")).map(item => ({
       ...item,
       weekday: item.weekday || getWeekdayLabel(item.date),
       colorKey: item.colorKey || pickScheduleColorKey(item.startTime),
@@ -161,7 +221,7 @@ export function saveCalendarWeekPlan(plan: CalendarWeekPlan): CalendarWeekPlan {
     entry => !(entry.ownerType === plan.ownerType && entry.ownerId === plan.ownerId && entry.weekStart === plan.weekStart),
   );
   nextPlans.push(normalized);
-  saveStore({ plans: nextPlans });
+  saveStore({ ...store, plans: nextPlans });
   return normalized;
 }
 
@@ -189,7 +249,7 @@ export function upsertCalendarScheduleItem(
   weekStart: string,
   item: Omit<CalendarScheduleItem, "id" | "weekday" | "colorKey" | "createdAt" | "updatedAt"> & Partial<Pick<CalendarScheduleItem, "id" | "weekday" | "colorKey" | "createdAt" | "updatedAt">>,
 ): CalendarWeekPlan {
-  const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
+  const plan = loadStore().plans.find(row => row.ownerType === ownerType && row.ownerId === ownerId && row.weekStart === weekStart);
   const existingItems = plan?.items ?? [];
   const now = new Date().toISOString();
   const normalized: CalendarScheduleItem = {
@@ -217,7 +277,7 @@ export function deleteCalendarScheduleItem(
   weekStart: string,
   itemId: string,
 ): CalendarWeekPlan {
-  const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
+  const plan = loadStore().plans.find(row => row.ownerType === ownerType && row.ownerId === ownerId && row.weekStart === weekStart);
   return replaceCalendarWeekItems(ownerType, ownerId, weekStart, (plan?.items ?? []).filter(item => item.id !== itemId));
 }
 
@@ -225,8 +285,9 @@ export function formatCalendarScheduleForPrompt(
   ownerType: CalendarOwnerType,
   ownerId: string,
   weekStart: string,
+  identityId = "",
 ): string {
-  const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
+  const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart, identityId);
   if (!plan || plan.items.length === 0) {
     return "本周暂无明确日程安排。";
   }
@@ -260,11 +321,12 @@ export function getCurrentCalendarScheduleForPrompt(
   ownerType: CalendarOwnerType,
   ownerId: string,
   now = new Date(),
+  identityId = "",
 ): string {
   const date = formatIsoDate(now);
   const weekStart = getWeekStartIso(now);
   const currentMinute = now.getHours() * 60 + now.getMinutes();
-  const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
+  const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart, identityId);
   if (!plan) return "无";
 
   const activeItems = sortScheduleItems(plan.items).filter(item => {
@@ -282,9 +344,10 @@ export function getCurrentCalendarScheduleForPrompt(
 /** Nearby plans, including adjacent weeks. Calendar dates currently use the device timezone. */
 export function buildNearbyCalendarScheduleForPrompt(
   ownerType: CalendarOwnerType, ownerId: string, now = new Date(),
+  identityId = "",
 ): string {
   const at = now.getTime();
-  const rows = loadOwnerCalendarPlans(ownerType, ownerId).flatMap(plan => plan.items)
+  const rows = loadOwnerCalendarPlans(ownerType, ownerId, identityId).flatMap(plan => plan.items)
     .map(item => ({ item, start: Date.parse(`${item.date}T${item.startTime}:00`), end: Date.parse(`${item.date}T${item.endTime}:00`) }))
     .filter(row => Number.isFinite(row.start) && Number.isFinite(row.end) && row.end > row.start
       && row.end >= at - 24 * 3600000 && row.start <= at + 12 * 3600000);
@@ -336,12 +399,14 @@ export function buildCalendarScheduleMarker(
   ownerType: CalendarOwnerType,
   ownerId: string,
   weekStart: string,
+  identityId = "",
 ): string {
   const ownerLabel = ownerType === "user" ? "用户" : "角色";
   return [
     `当前查看周起始日期：${weekStart}`,
     `${ownerLabel}本周日程：`,
-    formatCalendarScheduleForPrompt(ownerType, ownerId, weekStart),
+    formatCalendarScheduleForPrompt(ownerType, ownerId, weekStart, identityId),
+    `本周及下周的有效约定（与日程分开保存）：\n${formatCalendarCommitments(ownerType === "character" ? ownerId : undefined, weekStart, identityId) || "无"}`,
   ].join("\n");
 }
 
@@ -383,9 +448,15 @@ export function cloneWeekPlanWithManualEdits(
   weekStart: string,
   generatedItems: CalendarScheduleItem[],
 ): CalendarWeekPlan {
-  const existing = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
-  const manualItems = (existing?.items ?? []).filter(item => item.source === "manual");
-  const nextItems = [...generatedItems.filter(item => item.source !== "manual")];
+  const existing = loadStore().plans.find(row => row.ownerType === ownerType && row.ownerId === ownerId && row.weekStart === weekStart);
+  const now=Date.now();
+  const manualItems = (existing?.items ?? []).filter(item => item.source === "manual" || Date.parse(`${item.date}T${item.startTime}:00`) < now);
+  const commitments=loadCalendarCommitments(ownerType === "character" ? ownerId : undefined)
+    .filter(row=>row.status==="confirmed" && row.date && row.startTime && row.endTime);
+  const overlaps=(item:CalendarScheduleItem,other:{date:string;startTime:string;endTime:string})=>item.date===other.date && item.startTime<other.endTime && item.endTime>other.startTime;
+  const nextItems = generatedItems.filter(item => item.source !== "manual" && Date.parse(`${item.date}T${item.startTime}:00`) >= now
+    && !manualItems.some(other=>overlaps(item,other))
+    && !commitments.some(row=>overlaps(item,{date:row.date!,startTime:row.startTime!,endTime:row.endTime!})));
   for (const item of manualItems) {
     const collides = nextItems.find(
       entry =>

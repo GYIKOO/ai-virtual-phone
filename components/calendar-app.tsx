@@ -47,6 +47,7 @@ import {
 import { CalendarMonthPage } from "./calendar/month-page";
 import { CalendarDetailPage } from "./calendar/detail-page";
 import { CalendarEventEditModal, type CalendarEventDraft } from "./calendar/event-edit-modal";
+import { CalendarCommitmentsPanel } from "./calendar/commitments-panel";
 
 type OwnerOption = {
   key: string;
@@ -172,6 +173,7 @@ export function PhoneCalendarApp({
   const [calendarCustomCss, setCalendarCustomCss] = useState(() =>
     typeof window !== "undefined" ? kvGet("calendar-custom-css") || "" : ""
   );
+  const [commitmentsPanel, setCommitmentsPanel] = useState<{id?: string} | null>(null);
   const [appliedCalendarCss, setAppliedCalendarCss] = useState(() =>
     typeof window !== "undefined" ? kvGet("calendar-custom-css") || "" : ""
   );
@@ -277,6 +279,7 @@ export function PhoneCalendarApp({
   };
 
   const openEditItem = (item: CalendarScheduleItem) => {
+    if (item.commitmentId) {setCommitmentsPanel({id:item.commitmentId}); return;}
     setEditingItem({
       id: item.id,
       date: item.date,
@@ -480,6 +483,9 @@ export function PhoneCalendarApp({
 
   const ownerStrip = (
     <section className="calendar-owner-strip hide-scrollbar">
+      <button type="button" className="calendar-owner-chip" onClick={() => setCommitmentsPanel({})}>
+        <span aria-hidden="true" className="text-2xl">📌</span><span>约定</span>
+      </button>
       {owners.map(owner => (
         <button
           key={owner.key}
@@ -507,6 +513,8 @@ export function PhoneCalendarApp({
 
   return (
     <div className="calendar-app-shell" data-calendar-theme={config.theme}>
+      {commitmentsPanel && <CalendarCommitmentsPanel ownerId={selectedOwner?.ownerType === "character" ? selectedOwner.ownerId : undefined}
+        initialId={commitmentsPanel.id} onClose={() => setCommitmentsPanel(null)}/>}
       {appliedCalendarCss && <SessionCustomCSS css={appliedCalendarCss} scope=".calendar-app-shell" />}
       <div className="calendar-app">
         {view === "month" ? (

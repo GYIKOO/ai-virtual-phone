@@ -88,7 +88,7 @@ async function scheduler() {
   timeout.calls[0].finish(); timeout.service.stopCalendarAutoService();
 
   const migration = fixture();
-  const storage = load('lib/calendar-storage.ts', { './kv-db': migration.kv, './calendar-utils': utils, './character-time': { getSystemTimeZone: () => 'UTC' } }, { window: migration.window });
+  const storage = load('lib/calendar-storage.ts', { './settings-storage': {resolveUserIdentity:()=>null}, './kv-db': migration.kv, './calendar-utils': utils, './character-time': { getSystemTimeZone: () => 'UTC' } }, { window: migration.window });
   migration.store.set('ai_phone_calendar_config_v1', JSON.stringify({ autoGenerateEnabled: true }));
   assert.equal(storage.loadCalendarConfig().autoGenerateCharacterIds.length, 0, 'legacy global switch never opts in every character');
   migration.store.set('ai_phone_calendar_config_v1', JSON.stringify({ autoGenerateCharacterIds: ['a', 'a', null, 7, ''] }));
@@ -104,12 +104,14 @@ async function generation() {
   const node = ast.statements.find(n => n.name?.text === 'generateWeeklyCalendarSchedule');
   const fragment = 'const generatingWeeks = new Set();\n' + node.getText(ast);
   const at = new Date('2026-10-14T12:00:00').getTime();
-  let saved, removed = 0, allowed = true, captured, pendingResolve;
+  let saved, removed = 0, allowed = true, captured, pendingResolve, revision = 0;
   const items = [{ date: '2026-10-13', startTime: '18:00', source: 'generated' }, { date: '2026-10-14', startTime: '17:00', source: 'generated' }];
   const engine = load('fragment.ts', {}, {
+    loadCalendarStore:()=>({revision}),refreshCalendarData:async()=>{},formatCalendarCommitments:()=>'',
+    withCalendarWriteLock:async run=>run(),flushCalendarStore:async()=>{},
     clearGeneratedWeekItems: () => { removed++; return []; }, restoreCalendarWeekItems() {},
     resolveCalendarAssemblerInput: async () => ({ llmMessages: [], ownerName: 'test' }),
-    getWeekDates: utils.getWeekDates, buildCalendarTriggerInstruction: () => 'plan',
+    getWeekDates: utils.getWeekDates, buildCalendarTriggerInstruction: () => 'plan 本次安排范围',
     sendLLMRequest: (...args) => { captured = args; return new Promise(resolve => { pendingResolve = resolve; }); },
     parseScheduleLines: () => items, loadCalendarWeekPlan: () => null,
     cloneWeekPlanWithManualEdits: (_, id, week, result) => { saved = result; },
@@ -123,6 +125,12 @@ async function generation() {
   assert.equal(saved.length, 1); assert.equal(saved[0].date, '2026-10-14', 'new past plans excluded');
   saved = undefined; const cancelled = engine.generateWeeklyCalendarSchedule('character', 'a', '2026-10-12', options);
   await flush(); allowed = false; pendingResolve('valid'); assert.equal((await cancelled).success, false); assert.equal(saved, undefined);
+  allowed = true;
+  const stale = engine.generateWeeklyCalendarSchedule('character','a','2026-10-12');
+  await flush(); revision++; pendingResolve('valid');
+  assert.equal((await stale).success,false,'concurrent manual edit rejects generated replacement');
+  assert.equal(saved,undefined);
+  assert.equal(removed,0,'manual regeneration never clears existing plan before success');
 }
 (async () => {
   await scheduler(); await generation();

@@ -19,11 +19,12 @@ const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve()
 async function run(mode, invalidate) {
   let rows = mode === 'retry' ? [{ id: 'u', sessionId: 's', role: 'user', rawContent: 'original user' }, { id: 'a', sessionId: 's', role: 'assistant', rawContent: 'old answer' }] : [];
   const session = { id: 's', characterId: 'c', participantIds: ['c'], autoStartPrompt: mode === 'auto' ? 'begin' : undefined };
-  let sessions = [session], complete, signal, counters = 0, savedWhileUnmounted = 0, viewed = 0, mounted = true;
+  let sessions = [session], complete, signal, counters = 0, savedWhileUnmounted = 0, viewed = 0, mounted = true, calendarApplications = 0;
   const registry = {};
   const storage = { loadStoryMessages: id => rows.filter(r => r.sessionId === id), loadStorySessions: () => sessions };
   evaluate(fs.readFileSync('lib/story-generation-runs.ts', 'utf8'), { exports: registry, require: () => storage, AbortController });
   const context = { ...registry, ...storage, exports: {}, console, Date,
+    applyAcceptedCalendarChanges:async(batch,id)=>{ assert.ok(rows.some(row=>row.id===id),'calendar only after accepted message'); calendarApplications++; return null; },
     activeSessionId: 's', activeCharacterId: 'c', isGenerating: false, isReadOnly: false, ready: true,
     currentSession: session, mergingPageRef: { current: false }, mountedRef: { current: true },
     storyGlobalSettings: { streamingEnabled: false }, clearStoryStream() {}, appendStoryStreamDelta() {},
@@ -53,6 +54,7 @@ async function run(mode, invalidate) {
   if (mode === 'retry') assert.ok(rows.some(r => r.rawContent === 'old answer'), 'old reply retained until successful replacement');
   complete({ rawText: 'new answer', renderedText: 'new answer', storySummary: 'new facts' });
   await promise; await flush();
+  assert.equal(calendarApplications,invalidate ? 0 : 1,'send/director/retry/auto applies calendar only for accepted output, including unmounted views');
   if (invalidate) assert.ok(!rows.some(r => r.rawContent === 'new answer'), `${mode}/${invalidate}: stale output discarded`);
   else {
     assert.equal(rows.filter(r => r.rawContent === 'new answer').length, 1);

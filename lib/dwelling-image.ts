@@ -105,6 +105,9 @@ export async function generateDwellingRoomImage(
                 description: buildRoomImagePrompt(room),
                 characterId,
                 appId: "dwelling",
+                includeCharacterAppearance: false,
+                includeUserReferenceImage: false,
+                useReferenceImage: false,
                 signal: controller.signal,
             });
             if (!result) return { assetId: null, error: "生图未配置或已关闭" };

@@ -27,6 +27,8 @@ import { selectStoryPresetPrompts } from "./story-preset-selection";
 import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase } from "./story-preparation";
 import { stripNarrativeTags } from "./narrative-context";
 import { contextCapacity } from "./prompt-memory-budget";
+import { createCalendarSync, calendarSyncPrompt, extractCalendarChanges } from "./calendar-sync";
+import type { PendingCalendarChanges } from "./calendar-changes";
 
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS, storyFoldSignature } from "./story-tag-settings";
 
@@ -85,6 +87,7 @@ function buildStorySettingsPrompt(
 }
 
 export type StoryGenerationResult = {
+  pendingCalendarChanges?: PendingCalendarChanges;
   rawText: string;
   renderedText: string;
   storySummary: string;
@@ -209,6 +212,7 @@ export async function generateStoryCompletion(
   history: StoryMessage[],
   options?: StoryGenerationOptions,
 ): Promise<StoryGenerationResult> {
+  const calendarSnapshot=createCalendarSync([characterId,...(options?.participantIds||[])],"story",options?.sessionId||history[0]?.sessionId,Boolean(options?.storyMemory?.independent));
   options?.onPhase?.("preparing");
   await yieldStoryPreparation(options?.signal);
   const character = loadCharacters().find((item) => item.id === characterId);
@@ -259,7 +263,8 @@ export async function generateStoryCompletion(
     }, { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal });
   }
 
-  const parsed = parseStoryResponse(rawOutput, regexes, {
+  const calendarResult=extractCalendarChanges(rawOutput,calendarSnapshot);
+  const parsed = parseStoryResponse(calendarResult.text, regexes, {
     summaryTag,
     foldTags: effectiveFoldTags,
     macroEngine,
@@ -267,6 +272,7 @@ export async function generateStoryCompletion(
   });
   return {
     rawText: parsed.rawText,
+    pendingCalendarChanges: calendarResult.pendingCalendarChanges,
     renderedText: parsed.renderedText,
     storySummary: parsed.summaryText,
     regexSignature: storyFoldSignature(regexSignature, effectiveFoldTags),
@@ -314,6 +320,8 @@ async function buildStoryPromptMessages(
   const timeAware = globalSettings?.timeAware !== false;
   const now = new Date();
   const finish = (messages: LLMMessage[]) => {
+    const calendarPrompt=calendarSyncPrompt(createCalendarSync(participantCharacters.map(c=>c.id),"story",historySessionId,independent));
+    if(calendarPrompt) messages.push({role:"system",content:calendarPrompt});
     const settingsPrompt = buildStorySettingsPrompt(settings, userIdentity?.name ?? "用户", globalSettings, now);
     if (independent) messages.push({ role: "system", content: "# 独立剧情隔离规则\n本分线只使用角色基础设定、已绑定世界书和本分线内已经发生的内容。不得读取或推断角色短期记忆、核心记忆、长期记忆、日程、关系网、住宅状态、线上私聊/群聊、悬浮小手机内容或其他剧情分线。世界书属于世界设定，仍然有效。" });
     if (settingsPrompt) messages.push({ role: "system", content: settingsPrompt });

@@ -52,11 +52,13 @@ import { createShortcutCommand, deliverShortcutCommand, waitForShortcutCommand }
 import { loadMemoryEntriesByType, saveMemoryEntry } from "./memory-storage";
 import type { MemoryEntry } from "./memory-types";
 import { loadCharacters } from "./character-storage";
+import { loadChatSessions } from "./chat-storage";
+import { createCalendarSync, applyAcceptedCalendarChanges } from "./calendar-sync";
+import type { CalendarChange } from "./calendar-changes";
 import {
-    deleteCalendarScheduleItem,
+    formatCalendarCommitments,
     loadCalendarWeekPlan,
     loadOwnerCalendarPlans,
-    upsertCalendarScheduleItem,
 } from "./calendar-storage";
 import type { CalendarOwnerType, CalendarScheduleItem } from "./calendar-types";
 import {
@@ -1455,7 +1457,8 @@ function isCalendarToolName(name: string): boolean {
     return name === "查看日程"
         || name === "添加日程"
         || name === "修改日程"
-        || name === "取消日程";
+        || name === "取消日程"
+        || name === "更新日历安排";
 }
 
 function isLocalDataToolName(name: string): boolean {
@@ -2347,16 +2350,35 @@ async function executeCalendarTool(call: ToolCall, context?: ToolExecutionContex
     }
 
     try {
-        switch (call.name) {
-            case "查看日程":
-                return executeCalendarListTool(call.args, context.characterId);
-            case "添加日程":
-                return executeCalendarAddTool(call.args, context.characterId);
-            case "修改日程":
-                return executeCalendarUpdateTool(call.args, context.characterId);
-            case "取消日程":
-                return executeCalendarDeleteTool(call.args, context.characterId);
+        const session = loadChatSessions().find(row => row.id === context.sessionId);
+        if (session?.chatAccountId) throw new Error("聊天小号暂不支持修改共用日历");
+        const participants = session?.isGroup ? session.participantIds || [] : [context.characterId];
+        const batch = createCalendarSync(participants, context.appId === "group_chat" ? "group_chat" : "chat", context.sessionId);
+        if (!batch || !batch.context.characterIds.includes(context.characterId)) throw new Error("当前身份或参与角色不可用");
+        if (context.signal?.aborted) throw new Error("已取消日历操作");
+        if (call.name === "查看日程") return executeCalendarListTool(call.args, context.characterId, batch.context.userIdentityId, batch.context.characterIds);
+        if (call.name === "更新日历安排") {
+            if (!Array.isArray(call.args.changes)) throw new Error("changes 必须是日历操作数组");
+            batch.changes = call.args.changes as CalendarChange[];
+            if (batch.changes.some(change => change?.op?.startsWith("schedule.") && change.characterId !== context.characterId))
+                throw new Error("普通日程请由对应角色调整；共同约定可列出参与者");
+        } else {
+            let id: string | undefined;
+            if (call.name !== "添加日程") {
+                const found = findCalendarItemByArgs(call.args,"character",context.characterId);
+                if (!found) throw new Error("未找到唯一日程，请先查看日程并使用 itemId");
+                id = found.item.id;
+            }
+            if (call.name === "取消日程") batch.changes = [{op:"schedule.cancel",characterId:context.characterId,id}];
+            else {
+                const parsed = parseCalendarDraft(call.args);
+                if (!parsed.ok) throw new Error(parsed.error);
+                batch.changes = [{...parsed.item,op:"schedule.save",characterId:context.characterId,id}];
+            }
         }
+        const error = await applyAcceptedCalendarChanges(batch, batch.id);
+        if (error) throw new Error(error);
+        return {name:call.name,success:true,data:"日历安排已保存",continueConversation:false,persistToHistory:false,userNotice:"日历安排已保存"};
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return {
@@ -2379,11 +2401,11 @@ async function executeCalendarTool(call: ToolCall, context?: ToolExecutionContex
     };
 }
 
-function executeCalendarListTool(args: Record<string, unknown>, characterId: string): ToolResult {
+function executeCalendarListTool(args: Record<string, unknown>, characterId: string, identityId: string, participants: string[]): ToolResult {
     const date = normalizeCalendarDate(args.date ?? args.weekDate ?? args.week_date, { fallbackToToday: true });
     if (!date) return calendarToolFailure("查看日程", "日期格式无效，请使用 YYYY-MM-DD", "日期格式无效");
     const weekStart = getWeekStartIso(parseIsoDate(date));
-    const plan = loadCalendarWeekPlan("character", characterId, weekStart);
+    const plan = loadCalendarWeekPlan("character", characterId, weekStart, identityId);
     return {
         name: "查看日程",
         success: true,
@@ -2391,6 +2413,10 @@ function executeCalendarListTool(args: Record<string, unknown>, characterId: str
             ownerType: "character",
             ownerId: characterId,
             weekStart,
+            systemNow: new Date().toLocaleString(),
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            participants: participants.map(id => ({id,name:loadCharacters().find(row => row.id === id)?.name})),
+            commitments: [...new Set(participants.flatMap(id => formatCalendarCommitments(id,undefined,identityId).split("\n")).filter(Boolean))],
             dates: getWeekDates(weekStart),
             items: sortScheduleItems(plan?.items ?? []).map(formatCalendarItemForTool),
         })),
@@ -2400,66 +2426,6 @@ function executeCalendarListTool(args: Record<string, unknown>, characterId: str
     };
 }
 
-function executeCalendarAddTool(args: Record<string, unknown>, characterId: string): ToolResult {
-    const parsed = parseCalendarDraft(args);
-    if (!parsed.ok) return calendarToolFailure("添加日程", parsed.error, parsed.notice);
-
-    const weekStart = getWeekStartIso(parseIsoDate(parsed.item.date));
-    const plan = upsertCalendarScheduleItem("character", characterId, weekStart, parsed.item);
-    const saved = plan.items.find(item => item.title === parsed.item.title && item.date === parsed.item.date && item.startTime === parsed.item.startTime);
-    dispatchCalendarUpdated();
-    return {
-        name: "添加日程",
-        success: true,
-        data: `日程添加成功：${formatCalendarItemSummary(saved ?? parsed.item)}`,
-        continueConversation: false,
-        persistToHistory: false,
-        userNotice: "已添加日程",
-    };
-}
-
-function executeCalendarUpdateTool(args: Record<string, unknown>, characterId: string): ToolResult {
-    const found = findCalendarItemByArgs(args, "character", characterId);
-    if (!found) return calendarToolFailure("修改日程", "未找到匹配的日程", "未找到要修改的日程");
-
-    const parsed = parseCalendarDraft(args);
-    if (!parsed.ok) return calendarToolFailure("修改日程", parsed.error, parsed.notice);
-
-    const nextWeekStart = getWeekStartIso(parseIsoDate(parsed.item.date));
-    if (found.weekStart !== nextWeekStart) {
-        deleteCalendarScheduleItem("character", characterId, found.weekStart, found.item.id);
-    }
-    upsertCalendarScheduleItem("character", characterId, nextWeekStart, {
-        ...parsed.item,
-        id: found.item.id,
-        createdAt: found.item.createdAt,
-    });
-    dispatchCalendarUpdated();
-    return {
-        name: "修改日程",
-        success: true,
-        data: `日程修改成功：${formatCalendarItemSummary(parsed.item)}`,
-        continueConversation: false,
-        persistToHistory: false,
-        userNotice: "已修改日程",
-    };
-}
-
-function executeCalendarDeleteTool(args: Record<string, unknown>, characterId: string): ToolResult {
-    const found = findCalendarItemByArgs(args, "character", characterId);
-    if (!found) return calendarToolFailure("取消日程", "未找到匹配的日程", "未找到要取消的日程");
-
-    deleteCalendarScheduleItem("character", characterId, found.weekStart, found.item.id);
-    dispatchCalendarUpdated();
-    return {
-        name: "取消日程",
-        success: true,
-        data: `日程已取消：${formatCalendarItemSummary(found.item)}`,
-        continueConversation: false,
-        persistToHistory: false,
-        userNotice: "已取消日程",
-    };
-}
 
 type CalendarDraftParseResult =
     | { ok: true; item: Omit<CalendarScheduleItem, "id" | "weekday" | "colorKey" | "createdAt" | "updatedAt"> }
@@ -2518,16 +2484,17 @@ function findCalendarItemByArgs(
             const found = plan.items.find(item => item.id === itemId);
             if (found) return { weekStart: plan.weekStart, item: found };
         }
+        return null;
     }
 
     if (!keyword) return null;
+    const matches: {weekStart: string; item: CalendarScheduleItem}[] = [];
     for (const weekStart of getCalendarSearchWeekStarts(date)) {
         const plan = loadCalendarWeekPlan(ownerType, ownerId, weekStart);
         if (!plan) continue;
-        const found = plan.items.find(item => calendarKeywordMatch(keyword, item.title, item.location));
-        if (found) return { weekStart, item: found };
+        for (const item of plan.items.filter(item => calendarKeywordMatch(keyword,item.title,item.location))) matches.push({weekStart,item});
     }
-    return null;
+    return matches.length === 1 ? matches[0] : null;
 }
 
 function getCalendarSearchWeekStarts(dateHint: string | null): string[] {
@@ -2571,10 +2538,6 @@ function formatCalendarItemForTool(item: CalendarScheduleItem): Record<string, u
     };
 }
 
-function formatCalendarItemSummary(item: Pick<CalendarScheduleItem, "date" | "startTime" | "endTime" | "location" | "title">): string {
-    return `${item.date} ${item.startTime}-${item.endTime} @${item.location || "无"} ${item.title}`;
-}
-
 function calendarToolFailure(name: string, error: string, userNotice: string): ToolResult {
     return {
         name,
@@ -2584,12 +2547,6 @@ function calendarToolFailure(name: string, error: string, userNotice: string): T
         persistToHistory: false,
         userNotice,
     };
-}
-
-function dispatchCalendarUpdated(): void {
-    if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("calendar-updated"));
-    }
 }
 
 // ── 角色电脑（角色自己的云端小电脑）───────────────

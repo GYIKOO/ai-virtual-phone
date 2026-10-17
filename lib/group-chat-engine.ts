@@ -80,6 +80,8 @@ import { parseToolCalls, parseToolFetches, executeToolCalls, formatToolResults, 
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { buildGroupRosterMacro } from "./group-admin";
 import { parseOfflineResponse, extractThinkingTag, type ParsedOfflineResponse } from "./chat-offline-storage";
+import { createCalendarSync, calendarSyncPrompt, extractCalendarChanges } from "./calendar-sync";
+import type { PendingCalendarChanges } from "./calendar-changes";
 import { buildProviderRequest, nativeToolProtocolForConfig, toLlmRequestMessages, type LlmRequestMessage, type LlmToolCall } from "./llm-provider-adapter";
 import type { DebugPromptSnapshot } from "./debug-store";
 import { throwIfAborted } from "./abort-utils";
@@ -345,8 +347,8 @@ export async function buildGroupChatPromptMessages(
         if (!character) return null;
         const memberTimeContext = buildCharacterTimeContext(character.timeZone, now);
         memberTimeContexts[charId] = memberTimeContext;
-        const scheduleSummary = options?.historicalAt === undefined ? buildCalendarScheduleMarker("character", charId, getWeekStartIso(now)) : "";
-        const currentSchedule = options?.historicalAt === undefined ? getCurrentCalendarScheduleForPrompt("character", charId, now) : "";
+        const scheduleSummary = options?.historicalAt === undefined ? buildCalendarScheduleMarker("character", charId, getWeekStartIso(now), userIdentity?.id || "") : "";
+        const currentSchedule = options?.historicalAt === undefined ? getCurrentCalendarScheduleForPrompt("character", charId, now, userIdentity?.id || "") : "";
         const charSlot = resolveBinding(bindings, charId, "group_chat");
         const worldBooks = promptProfile?.enableWorldBooks === false
             ? []
@@ -520,6 +522,10 @@ export async function buildGroupChatPromptMessages(
     }
     if (!isAutomaticChatGeneration(options)) appendEmptyGenerateGuardMessage(llmMessages, config, history);
 
+    if(isOfflineMode) {
+        const calendarPrompt=calendarSyncPrompt(createCalendarSync(session.participantIds||[],"group_chat",session.id,Boolean(session.chatAccountId)));
+        if(calendarPrompt) llmMessages.push({role:"system",content:calendarPrompt});
+    }
     const fittedMessages = assembleBudgetedMemory(memoryInput,
         input => [...assembleGroupPromptPayload(input), ...llmMessages], memConfig, members.map(member=>memoryPartsByCharacter.get(member.character.id)||[]));
     return { llmMessages: fittedMessages, config, preset, regexes, nameToId, memberNames, enabledTools, userName, appTags: activeAppTags };
@@ -1142,6 +1148,7 @@ export async function generateGroupRawCompletion(
 }
 
 export type GroupOfflineChatCompletionResult = ParsedOfflineResponse & {
+    pendingCalendarChanges?: PendingCalendarChanges;
     /** 模型思维链（reasoning）内容，供线下记录展示 */
     reasoning?: string;
     model: string;
@@ -1153,6 +1160,7 @@ export async function generateGroupOfflineChatCompletion(
     history: ChatMessage[],
     options?: { signal?: AbortSignal; onStreamDelta?: (delta: string) => void },
 ): Promise<GroupOfflineChatCompletionResult> {
+    const calendarSnapshot=createCalendarSync(session.participantIds||[],"group_chat",session.id,Boolean(session.chatAccountId));
     const { llmMessages, config, preset, regexes } = await buildGroupChatPromptMessages(
         session,
         history,
@@ -1190,7 +1198,8 @@ export async function generateGroupOfflineChatCompletion(
         rawOutput = await sendLLMRequest(config, preset, llmMessages, regexes, meta, requestOptions);
     }
     // 剔除预设配置的文本片段（<思考结束> 等残留标签），不进入记录/提示词
-    rawOutput = stripPresetTexts(rawOutput, preset);
+    const calendarResult=extractCalendarChanges(rawOutput,calendarSnapshot);
+    rawOutput = stripPresetTexts(calendarResult.text, preset);
     let parsed = parseOfflineResponse(rawOutput, summaryTag);
     // 思维链：预设开启「线下标签解析」时从正文提取 <thinking> 标签；关闭时走模型原生 reasoning（官方默认行为）
     if (offlineTagEnabled) {
@@ -1235,6 +1244,7 @@ export async function generateGroupOfflineChatCompletion(
 
     return {
         ...parsed,
+        pendingCalendarChanges:calendarResult.pendingCalendarChanges,
         // 标签解析开启时补 thinking/thinkingTag（供离线记录展示）；关闭时保持 undefined，思维链走 reasoning（模型原生）
         ...(offlineTagEnabled ? {
             thinking: extractThinkingTag(rawOutput, thinkingTag) || undefined,

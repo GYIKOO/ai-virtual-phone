@@ -38,6 +38,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   let disabledMarkers = new Set();
   const participantContexts = [];
   const deps = {
+    './calendar-sync': { createCalendarSync: () => undefined, calendarSyncPrompt: () => '', extractCalendarChanges: text => ({text}) },
     './preset-streaming': load('lib/preset-streaming.ts'),
     './story-tag-settings': load('lib/story-tag-settings.ts'),
     './prompt-time': { formatPromptTimestamp: () => '2026-10-15T12:00:00Z' },

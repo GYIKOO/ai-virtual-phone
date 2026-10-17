@@ -3,6 +3,7 @@
 import { Component, memo, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ErrorInfo, type ReactNode } from "react";
 
 import { updateStatusBarTone } from "@/lib/bg-tone";
+import { isShellEnvironment } from "@/lib/shell-detect";
 import { startDiaryEntryTimerService, stopDiaryEntryTimerService } from "@/lib/diary-entry-timer-service";
 import { startFollowUpService, stopFollowUpService } from "@/lib/follow-up-service";
 import { startMomentsService, stopMomentsService } from "@/lib/moments-engine";
@@ -2317,6 +2318,10 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
 
   function openWorldBuilder(path: string): void {
     const targetUrl = new URL(path, window.location.origin).toString();
+    if (isShellEnvironment()) {
+      window.location.href = targetUrl;
+      return;
+    }
     const escapedTargetUrl = JSON.stringify(targetUrl);
     const bootHtml = `<!doctype html>
 <html lang="zh-CN">
@@ -2350,10 +2355,18 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
       <h1>正在搭建筑境</h1>
       <p>场景出现后会自动进入。</p>
     </div>
-    <button class="wb-initial-back" type="button" onclick="if(window.opener&&!window.opener.closed){window.opener.focus();window.close();}else{window.location.replace('/')}">返回小手机</button>
+    <button class="wb-initial-back" type="button" onclick="returnToPhone()">返回小手机</button>
   </div>
 </main>
-<script>setTimeout(function(){window.location.replace(${escapedTargetUrl});},80);</script>
+<script>
+var worldBuilderBootTimer=setTimeout(function(){window.location.replace(${escapedTargetUrl});},80);
+function returnToPhone(){
+  clearTimeout(worldBuilderBootTimer);
+  try{if(window.opener&&!window.opener.closed)window.opener.focus();}catch(e){}
+  try{window.close();}catch(e){}
+  setTimeout(function(){if(!window.closed)window.location.replace('/');},40);
+}
+</script>
 </body>
 </html>`;
     const popup = window.open("", "_blank");

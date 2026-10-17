@@ -247,7 +247,7 @@ export type ImageGenerationSettings = {
     characterReferences: Record<string, {
         assetId?: string;
         updatedAt: number;
-        /** 角色固定外观特征，会追加到该角色的每次生图提示词。 */
+        /** 角色出镜时使用的固定外观特征。 */
         featurePrompt?: string;
         /** NovelAI 是否追加人物专属提示词；默认开启。 */
         novelAiFeaturePromptEnabled?: boolean;
@@ -272,10 +272,12 @@ export type ImageGenerationSettings = {
             updatedAt: number;
         }>;
     }>;
-    /** 用户身份专属参考图；按角色当前绑定的用户身份自动选择。 */
+    /** 用户身份专属外貌及参考图；按角色当前绑定的用户身份自动选择。 */
     userReferences?: Record<string, {
         assetId?: string;
         updatedAt: number;
+        /** 仅用户出镜时使用的固定外观，与参考图可独立配置。 */
+        featurePrompt?: string;
         enabled?: boolean;
         faceCrop?: {
             x: number;

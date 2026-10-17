@@ -267,7 +267,7 @@ async function resolveAssemblerInput(
     const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "moments");
 
     // Calendar schedule (NPC doesn't get character's schedule)
-    const scheduleSummary = isNPC ? undefined : buildNearbyCalendarScheduleForPrompt("character", characterId);
+    const scheduleSummary = isNPC ? undefined : buildNearbyCalendarScheduleForPrompt("character", characterId, new Date(), userIdentity?.id || "");
 
     const input: AssemblerInput = {
         character,
@@ -281,7 +281,7 @@ async function resolveAssemblerInput(
         coreMemories,
         longTermMemories,
         scheduleSummary,
-        currentSchedule: isNPC ? undefined : getCurrentCalendarScheduleForPrompt("character", characterId),
+        currentSchedule: isNPC ? undefined : getCurrentCalendarScheduleForPrompt("character", characterId, new Date(), userIdentity?.id || ""),
         worldBookActivationContext: wbActivationContext,
         activateAllWorldBooks: false,
         chatBilingualInstruction,

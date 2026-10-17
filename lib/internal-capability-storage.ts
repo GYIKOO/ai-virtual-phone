@@ -278,7 +278,7 @@ const MUSIC_CONTROL_USAGE_GUIDE = [
 const CALENDAR_MANAGEMENT_USAGE_GUIDE = [
     "以下是你获取指令的返回结果：",
     "服务：日历管理",
-    "用途：查看、添加、修改、取消你本周或指定日期所在周的日程。",
+    "用途：查看日程，调整系统本地日期对应的今天、明天尚未结束的普通日程，并保存或修改约定。",
     "",
     "执行时必须使用下面的具体动作名，不要输出“日历管理”本身。",
     "",
@@ -293,7 +293,7 @@ const CALENDAR_MANAGEMENT_USAGE_GUIDE = [
     "描述：添加一条日程。",
     "参数：",
     "  - date (string): 日期，YYYY-MM-DD",
-    "  - startTime (string): 开始时间，HH:MM，范围 08:00-23:00",
+    "  - startTime (string): 开始时间，24 小时制 HH:MM",
     "  - endTime (string): 结束时间，HH:MM，必须晚于开始时间",
     "  - location (string): 地点；不确定写“无”",
     "  - title (string): 事项",
@@ -323,7 +323,13 @@ const CALENDAR_MANAGEMENT_USAGE_GUIDE = [
     "",
     "注意：",
     "- 日期必须使用 YYYY-MM-DD，时间必须使用 24 小时制 HH:MM。",
-    "- 日程时间只能在 08:00-23:00 之间。",
+    "- 日历日期以设备现实时间和本地时区为准。普通日程调整范围为今天、明天尚未结束的安排。",
+    "动作：更新日历安排",
+    "参数 changes：操作数组。每项 op 为 schedule.save、schedule.cancel、commitment.save、commitment.cancel 或 commitment.complete。",
+    "schedule.save 使用 characterId、title、date、startTime、endTime、location，修改时附带 id；schedule.cancel 使用 characterId、id。",
+    "commitment.save 使用 title、participantIds（角色ID数组）、date、startTime、endTime、location，修改时附带 id。commitment.cancel / commitment.complete 使用 id。",
+    "约定保存已确认的未来安排，可超出明天。日期未定时 date 为 null；时段未定时 startTime/endTime 均为 null。共同约定只保存一次，participantIds 列出当前对话实际参与角色。",
+    "先查看日程获取参与角色ID和已有约定ID。已有约定修改时沿用原ID；重生成周计划会保留约定。",
     "- 修改和取消前，如果不确定 itemId 或关键词是否足够明确，先执行“查看日程”。",
     "- 添加、修改、取消会直接执行。执行时只输出执行动作指令，不要附加闲聊内容。",
 ].join("\n");
@@ -492,7 +498,7 @@ const CALENDAR_ADD_PARAMETER_SCHEMA = JSON.stringify({
     type: "object",
     properties: {
         date: { type: "string", description: "日期，YYYY-MM-DD" },
-        startTime: { type: "string", description: "开始时间，HH:MM，范围 08:00-23:00" },
+        startTime: { type: "string", description: "开始时间，24 小时制 HH:MM" },
         endTime: { type: "string", description: "结束时间，HH:MM，必须晚于开始时间" },
         location: { type: "string", description: "地点；不确定写“无”" },
         title: { type: "string", description: "事项" },
@@ -584,6 +590,24 @@ const MUSIC_CONTROL_SUBTOOLS: InternalToolDefinition[] = [
 ];
 
 const CALENDAR_MANAGEMENT_SUBTOOLS: InternalToolDefinition[] = [
+    {
+        name: "更新日历安排",
+        description: "调整今日、明日普通日程，或保存、修改、取消、完成已确认的约定。",
+        parameterSchema: JSON.stringify({
+            type: "object",
+            properties: {changes: {type: "array", maxItems: 20, items: {
+                type: "object",
+                properties: {
+                    op: {type:"string",enum:["schedule.save","schedule.cancel","commitment.save","commitment.cancel","commitment.complete"]},
+                    id: {type:"string"}, characterId: {type:"string"},
+                    title: {type:"string"}, participantIds: {type:"array",items:{type:"string"}},
+                    date: {type:["string","null"],description:"YYYY-MM-DD，约定日期待定可用 null"},
+                    startTime: {type:["string","null"],description:"HH:MM"}, endTime: {type:["string","null"],description:"HH:MM"},
+                    location: {type:"string"},
+                }, required:["op"],
+            }}}, required:["changes"],
+        }),
+    },
     {
         name: "查看日程",
         description: "查看当前角色指定周的日程。",
@@ -1334,7 +1358,7 @@ const BUILTIN_INTERNAL_CAPABILITIES: InternalCapabilityConfig[] = [
     {
         id: CALENDAR_MANAGEMENT_CAPABILITY_ID,
         name: "日历管理",
-        description: "查看、添加、修改和取消当前角色的日程安排。",
+        description: "查看日程、调整今日与明日安排，并保存或修改已确认的约定。",
         enabled: false,
         mode: "auto",
         createdAt: 0,

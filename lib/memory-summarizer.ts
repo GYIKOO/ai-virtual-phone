@@ -21,7 +21,7 @@ import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
 import { assertNoMemoryRebuild, withMemoryWriterLock } from "./memory-writer-lock";
-import { groupMemoryRounds } from "./memory-rounds";
+import { groupMemoryRounds, selectMemorySummarySources } from "./memory-rounds";
 import { protectedMemory, planRebuildBatches, rebuildPrompt, selectRebuildSources } from "./memory-rebuild-policy";
 
 /** Per-character lock to prevent concurrent summarization. */
@@ -41,8 +41,8 @@ export async function maybeRunSummarization(
 
     const last = getLastSummarizedTimestamp(characterId);
     const rounds = config.summarizationRoundInterval;
-    const counter = rounds === undefined ? getEventCounter(characterId) : groupMemoryRounds(filterTimelineByAllowedSources(
-        loadNativeTimeline(characterId),config.shortTermAllowedSources)).filter(entry=>!last||Date.parse(entry.timestamp)>Date.parse(last)).length;
+    const counter = rounds === undefined ? getEventCounter(characterId) : groupMemoryRounds(selectMemorySummarySources(filterTimelineByAllowedSources(
+        loadNativeTimeline(characterId),config.shortTermAllowedSources))).filter(entry=>!last||Date.parse(entry.timestamp)>Date.parse(last)).length;
     if (counter < (rounds ?? config.summarizationEventInterval)) return;
 
     if (summarizingSet.has(characterId)) return;
@@ -96,10 +96,10 @@ async function runSummarizationUnlocked(characterId: string, characterName: stri
     // 记忆来源开关同样作用于长期总结：被关掉的来源不进总结素材。
     // 进度水位线取「过滤后」最后一条的时间，因此关掉的来源不会把水位线推过头，
     // 但已被水位线越过的内容重新打开后也不会回补——这一点在设置里已注明。
-    const readSources = () => filterTimelineByAllowedSources(
+    const readSources = () => selectMemorySummarySources(filterTimelineByAllowedSources(
         loadNativeTimeline(characterId, config.summarizationRoundInterval === undefined && afterTimestamp ? { afterTimestamp } : undefined),
         config.shortTermAllowedSources,
-    );
+    ));
     const native = readSources();
     let allEntries = config.summarizationRoundInterval === undefined ? native
         : groupMemoryRounds(native).filter(entry=>!afterTimestamp||Date.parse(entry.timestamp)>Date.parse(afterTimestamp));
