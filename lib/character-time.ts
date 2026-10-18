@@ -26,6 +26,26 @@ type DateParts = {
   second: string;
 };
 
+// Cache only formatters with an explicit timezone, never dates or the system's
+// current timezone. DST changes and device timezone switches stay live.
+const timeFormatters = new Map<string, Intl.DateTimeFormat>();
+function timeFormatter(kind: "parts" | "weekday" | "validate", timeZone: string): Intl.DateTimeFormat {
+  const key = `${kind}:${timeZone}`;
+  let formatter = timeFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(kind === "weekday" ? "zh-CN" : "en-US", {
+      timeZone,
+      ...(kind === "parts" ? {
+        year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit",
+        minute: "2-digit", second: "2-digit", hourCycle: "h23",
+      } as const : kind === "weekday" ? { weekday: "long" } as const : {}),
+    });
+    if (timeFormatters.size >= 64) timeFormatters.delete(timeFormatters.keys().next().value!);
+    timeFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 function readTimeZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -43,7 +63,7 @@ export function normalizeTimeZone(value: unknown): string | undefined {
   const timeZone = value.trim();
   if (!timeZone) return undefined;
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(0));
+    timeFormatter("validate", timeZone).format(new Date(0));
     return timeZone;
   } catch {
     return undefined;
@@ -51,16 +71,7 @@ export function normalizeTimeZone(value: unknown): string | undefined {
 }
 
 function getDateParts(date: Date, timeZone: string): DateParts {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hourCycle: "h23",
-  });
+  const formatter = timeFormatter("parts", timeZone);
   const values: Partial<DateParts> = {};
   for (const part of formatter.formatToParts(date)) {
     if (
@@ -96,7 +107,7 @@ export function formatZonedChineseDateTime(date: Date, timeZone: string): string
 
 export function getZonedWeekday(date: Date, timeZone: string): string {
   try {
-    const label = new Intl.DateTimeFormat("zh-CN", { timeZone, weekday: "long" }).format(date);
+    const label = timeFormatter("weekday", timeZone).format(date);
     return label || WEEKDAYS[0];
   } catch {
     return WEEKDAYS[date.getDay()];

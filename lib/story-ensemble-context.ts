@@ -12,7 +12,8 @@ import { getWeekStartIso } from "./calendar-utils";
 import { formatCharactersRelationsForPrompt } from "./character-world-storage";
 import { buildRelationMentionContext } from "./character-relation-context";
 import { formatPromptTimestamp } from "./prompt-time";
-import { packStoryContext, packStoryContextAsync, storyInputBudget, estimateStoryMessages, compareStoryTimes, type StoryContextCandidate, type SelectedStoryContext } from "./story-context-budget";
+import { packStoryContext, packStoryContextAsync, storyInputBudget, estimateStoryMessages, type StoryContextCandidate, type SelectedStoryContext } from "./story-context-budget";
+import { createMemoryTimeComparator } from "./memory-context-policy";
 import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase } from "./story-preparation";
 import { contextCapacity } from "./prompt-memory-budget";
 
@@ -43,6 +44,7 @@ export async function buildEnsembleStoryPrompt(options: {
   onPhase?: (phase: StoryGenerationPhase) => void;
 }): Promise<LLMMessage[]> {
   const { base, characters, config } = options;
+  const compareStoryTimes = createMemoryTimeComparator();
   const ensemble = characters.length > 1;
   const marker = (name: string) => isContextMarkerEnabled(base.preset, name);
   const recentEnabled = marker("shortTermMemory") || marker("chatHistory");

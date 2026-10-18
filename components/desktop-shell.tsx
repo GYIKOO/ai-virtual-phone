@@ -93,11 +93,11 @@ import {
 import { CustomAppGlyph, IconGlyph } from "@/components/icon-glyph";
 import { DesktopCustomizer } from "@/components/desktop-customizer";
 import {
-  collectThemeAssetIds,
-  getThemeAssetMap,
   readThemeProfile,
   writeThemeProfile
 } from "@/lib/theme-storage";
+import { useDesktopThemeAssets } from "@/components/use-desktop-theme-assets";
+import { installDesktopFont } from "@/lib/desktop-theme-preload";
 import { THEME_PACKAGE_INSTALLED_EVENT } from "@/lib/theme-package";
 import {
   DEFAULT_THEME_PROFILE,
@@ -1254,7 +1254,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     };
   }, []);
 
-  const [themeAssets, setThemeAssets] = useState<Record<string, string>>(() => initialThemeAssets ?? {});
+  const themeAssets = useDesktopThemeAssets(draftTheme, initialThemeAssets);
   const [slotIconWidth, setSlotIconWidth] = useState<number | null>(null);
   const [slotIconHeight, setSlotIconHeight] = useState<number | null>(null);
   const [slotRowStep, setSlotRowStep] = useState<number | null>(null);
@@ -1448,7 +1448,6 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   foldersRef.current = folders;
 
   const activeIconSkins = useMemo(() => resolveActiveIconSkins(draftTheme), [draftTheme]);
-  const themeAssetKey = useMemo(() => collectThemeAssetIds(draftTheme).sort().join("|"), [draftTheme]);
   const wallpaperDataUrl = draftTheme.wallpaperAssetId ? themeAssets[draftTheme.wallpaperAssetId] ?? null : null;
   const fontDataUrl = draftTheme.fontAssetId ? themeAssets[draftTheme.fontAssetId] ?? null : null;
   const dockSkinUrl = draftTheme.dockSkinAssetId ? themeAssets[draftTheme.dockSkinAssetId] ?? null : null;
@@ -2087,41 +2086,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   }, [desktopReady]);
 
   useEffect(() => {
-    const ids = collectThemeAssetIds(draftTheme);
-    if (ids.length === 0) {
-      return;
-    }
-
-    let disposed = false;
-    void getThemeAssetMap(ids).then((map) => {
-      if (disposed) {
-        return;
-      }
-      setThemeAssets((previous) => ({ ...previous, ...map }));
-    });
-
-    return () => {
-      disposed = true;
-    };
-  }, [draftTheme, themeAssetKey]);
-
-
-  useEffect(() => {
-    const styleId = "ai-phone-theme-font-face";
-    let node = document.getElementById(styleId) as HTMLStyleElement | null;
-
-    if (!node) {
-      node = document.createElement("style");
-      node.id = styleId;
-      document.head.append(node);
-    }
-
-    if (!fontDataUrl) {
-      node.textContent = "";
-      return;
-    }
-
-    node.textContent = `@font-face{font-family:"AIVirtualPhoneUserFont";src:url("${fontDataUrl}");font-display:swap;}`;
+    installDesktopFont(fontDataUrl);
   }, [fontDataUrl]);
 
   // Inject theme color overrides as <style> tag (BEFORE globalCustomCSS so it can be overridden)

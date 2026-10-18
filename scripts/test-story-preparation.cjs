@@ -25,6 +25,18 @@ const preparation = load('lib/story-preparation.ts');
   });
   await interactive.yieldStoryPreparation();
   assert.ok(painted);
+  let frameCount=0, clock=0;
+  const throttled = load('lib/story-preparation.ts', {}, {
+    window:{}, performance:{now:()=>clock},
+    requestAnimationFrame:fn=>setTimeout(()=>{frameCount++;fn();},0),cancelAnimationFrame:clearTimeout,
+  });
+  const checkpointAbort=new AbortController();
+  const checkpoint=throttled.createPromptPreparationCheckpoint(checkpointAbort.signal);
+  await checkpoint();
+  for(let i=0;i<20;i++) await checkpoint();
+  assert.equal(frameCount,1,'small member preparations do not wait a frame each');
+  clock=9;await checkpoint();assert.equal(frameCount,2,'CPU budget yields a fresh paint opportunity');
+  checkpointAbort.abort();await assert.rejects(checkpoint(),{name:'AbortError'});
   const background = load('lib/story-preparation.ts', {}, {window:{}, requestAnimationFrame: () => 1, cancelAnimationFrame() {}});
   await background.yieldStoryPreparation();
   const cancelled = new AbortController();

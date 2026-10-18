@@ -31,3 +31,15 @@ export async function yieldStoryPreparation(signal?: AbortSignal): Promise<void>
   });
   throwIfStoryAborted(signal);
 }
+
+/** Shared by multi-member preparation; small jobs need not wait a frame per member. */
+export function createPromptPreparationCheckpoint(signal?: AbortSignal): () => Promise<void> {
+  const clock = () => typeof performance === "undefined" ? Date.now() : performance.now();
+  let lastYield = -Infinity;
+  return async () => {
+    throwIfStoryAborted(signal);
+    if (clock() - lastYield < 8) return;
+    await yieldStoryPreparation(signal);
+    lastYield = clock();
+  };
+}

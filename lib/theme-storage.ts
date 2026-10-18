@@ -1,9 +1,54 @@
-import { DEFAULT_THEME_PROFILE, normalizeThemeProfile, type ThemeAssetType, type ThemeProfile } from "@/lib/theme-types";
+import { DEFAULT_THEME_PROFILE, normalizeThemeProfile, resolveActiveIconSkins, type ThemeAssetType, type ThemeProfile } from "@/lib/theme-types";
 import { kvGet, kvSet, kvRemove, registerKvMigration } from "./kv-db";
 import { openIndexedDbAtLeast } from "./idb-open";
 import { themePresetUsesAsset } from "./theme-preset-storage";
 
 export const THEME_PROFILE_STORAGE_KEY = "ai_phone_theme_profile_v1";
+export const THEME_ASSETS_UPDATED_EVENT = "ai-phone-theme-assets-updated";
+let assetChangesChannel: BroadcastChannel | null | undefined;
+
+function getAssetChangesChannel(): BroadcastChannel | null {
+  if (typeof window === "undefined") return null;
+  if (assetChangesChannel === undefined) {
+    try {
+      assetChangesChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(THEME_ASSETS_UPDATED_EVENT);
+    } catch {
+      assetChangesChannel = null;
+    }
+  }
+  return assetChangesChannel;
+}
+
+export function subscribeThemeAssetChanges(listener: (ids: string[]) => void): () => void {
+  const notify = (detail: unknown) => {
+    const ids = (detail as { ids?: unknown } | null)?.ids;
+    if (Array.isArray(ids) && ids.every(id => typeof id === "string")) listener(ids);
+  };
+  const local = (event: Event) => notify((event as CustomEvent).detail);
+  const remote = (event: MessageEvent) => notify(event.data);
+  const channel = getAssetChangesChannel();
+  window.addEventListener(THEME_ASSETS_UPDATED_EVENT, local);
+  channel?.addEventListener("message", remote);
+  return () => {
+    window.removeEventListener(THEME_ASSETS_UPDATED_EVENT, local);
+    channel?.removeEventListener("message", remote);
+  };
+}
+
+function notifyAssetChanges(ids: string[]): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(THEME_ASSETS_UPDATED_EVENT, { detail: { ids } }));
+    try { getAssetChangesChannel()?.postMessage({ ids }); } catch { /* Focus revalidation remains available. */ }
+  }
+}
+
+/** Resources used by the desktop, not the appearance editor's asset libraries. */
+export function collectDesktopThemeAssetIds(profile: ThemeProfile): string[] {
+  return Array.from(new Set([
+    profile.wallpaperAssetId, profile.fontAssetId, profile.dockSkinAssetId,
+    ...Object.values(resolveActiveIconSkins(profile)),
+  ].filter((id): id is string => Boolean(id))));
+}
 registerKvMigration(THEME_PROFILE_STORAGE_KEY);
 
 const THEME_DB_NAME = "ai_phone_theme_db_v1";
@@ -215,29 +260,18 @@ async function saveAssetRecord(record: ThemeAssetRecord): Promise<void> {
 
   try {
     const transaction = database.transaction(THEME_ASSET_STORE, "readwrite");
+    const done = runTransactionDone(transaction);
     const store = transaction.objectStore(THEME_ASSET_STORE);
     store.put(record);
-    await runTransactionDone(transaction);
+    await done;
+    notifyAssetChanges([record.id]);
   } finally {
     database.close();
   }
 }
 
 async function readAssetRecord(id: string): Promise<ThemeAssetRecord | null> {
-  const database = await openThemeDb();
-  if (!database) {
-    return null;
-  }
-
-  try {
-    const transaction = database.transaction(THEME_ASSET_STORE, "readonly");
-    const store = transaction.objectStore(THEME_ASSET_STORE);
-    const result = await runRequest(store.get(id));
-    await runTransactionDone(transaction);
-    return (result as ThemeAssetRecord | undefined) ?? null;
-  } finally {
-    database.close();
-  }
+  return (await readThemeAssetRecords([id]))[0] ?? null;
 }
 
 export async function getThemeAssetDataUrl(id: string): Promise<string | null> {
@@ -245,14 +279,14 @@ export async function getThemeAssetDataUrl(id: string): Promise<string | null> {
   return record?.dataUrl ?? null;
 }
 
-export async function getThemeAssetMap(ids: string[]): Promise<Record<string, string>> {
+export async function getThemeAssetMap(ids: string[], options: { requireDatabase?: boolean } = {}): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
   const storedIds = uniqueIds.filter((id) => !/^(?:https?:|data:|blob:)/i.test(id));
   uniqueIds.forEach((id) => {
     if (/^(?:https?:|data:|blob:)/i.test(id)) map[id] = id;
   });
-  const rows = await Promise.all(storedIds.map((id) => readAssetRecord(id)));
+  const rows = await readThemeAssetRecords(storedIds, options);
   rows.forEach((row) => {
     if (!row) {
       return;
@@ -262,10 +296,27 @@ export async function getThemeAssetMap(ids: string[]): Promise<Record<string, st
   return map;
 }
 
-export async function readThemeAssetRecords(ids: string[]): Promise<ThemeAssetRecord[]> {
+export async function readThemeAssetRecords(ids: string[], options: { requireDatabase?: boolean } = {}): Promise<ThemeAssetRecord[]> {
   const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
-  const rows = await Promise.all(uniqueIds.map((id) => readAssetRecord(id)));
-  return rows.filter((row): row is ThemeAssetRecord => Boolean(row));
+  if (!uniqueIds.length) return [];
+  const database = await openThemeDb();
+  if (!database) {
+    if (options.requireDatabase) throw new Error("Theme asset database unavailable");
+    return [];
+  }
+  try {
+    const transaction = database.transaction(THEME_ASSET_STORE, "readonly");
+    const done = runTransactionDone(transaction);
+    const store = transaction.objectStore(THEME_ASSET_STORE);
+    // Queue every request synchronously while the transaction is active.
+    const [rows] = await Promise.all([
+      Promise.all(uniqueIds.map(id => runRequest(store.get(id)) as Promise<ThemeAssetRecord | undefined>)),
+      done,
+    ]);
+    return rows.filter((row): row is ThemeAssetRecord => Boolean(row));
+  } finally {
+    database.close();
+  }
 }
 
 export async function writeThemeAssetRecords(records: ThemeAssetRecord[]): Promise<void> {
@@ -295,8 +346,10 @@ export async function deleteThemeAsset(id: string): Promise<void> {
   }
   try {
     const transaction = database.transaction(THEME_ASSET_STORE, "readwrite");
+    const done = runTransactionDone(transaction);
     transaction.objectStore(THEME_ASSET_STORE).delete(id);
-    await runTransactionDone(transaction);
+    await done;
+    notifyAssetChanges([id]);
   } finally {
     database.close();
   }

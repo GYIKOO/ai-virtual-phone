@@ -1,6 +1,7 @@
 // lib/group-chat-engine.ts
 // Group chat engine: single API call for all characters.
 import { usePresetStreaming } from "./preset-streaming";
+import { createPromptPreparationCheckpoint } from "./story-preparation";
 
 import { ChatSession, ChatMessage, loadChatAppSettings, createResponseBatchId, createResponseRoundId, createToolExecutionId, loadChatSessions, getLatestCharacterStateValues, isSessionStreamingEnabled, resolveVisionImagePromptLimit } from "./chat-storage";
 import { extractTextToolDirectiveText } from "./text-tool-protocol";
@@ -69,7 +70,7 @@ import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
-import { prepareShortTermContext, prepareGroupShortTermContext } from "./short-term-assembler";
+import { prepareShortTermContext, prepareGroupShortTermContextAsync } from "./short-term-assembler";
 import { assembleBudgetedMemory, type PromptMemoryPart } from "./prompt-memory-budget";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { getCustomStickerExample, loadCustomStickers } from "./custom-sticker-storage";
@@ -286,6 +287,7 @@ function scheduleGroupMemorySummarization(
  * Shared prompt builder for group chat — used by both generate and preview.
  */
 export type GroupChatPromptBuildOptions = {
+    signal?: AbortSignal;
     automatic?: boolean;
     historicalAt?: number;
     appTags?: string[];
@@ -300,6 +302,8 @@ export async function buildGroupChatPromptMessages(
     history: ChatMessage[],
     options?: GroupChatPromptBuildOptions,
 ): Promise<{ llmMessages: LLMMessage[]; config: ApiConfig; preset: PresetConfig | null; regexes: RegexConfig[]; nameToId: Map<string, string>; memberNames: string[]; enabledTools: import("./tool-storage").EnabledTool[]; userName: string; appTags: string[] }> {
+    const checkpoint = createPromptPreparationCheckpoint(options?.signal);
+    await checkpoint();
     const chars = loadCharacters();
     const charMap = new Map(chars.map(c => [c.id, c]));
     const participantIds = session.participantIds || [];
@@ -342,7 +346,7 @@ export async function buildGroupChatPromptMessages(
     const now = new Date(options?.historicalAt ?? Date.now());
     const memberTimeContexts: Record<string, ReturnType<typeof buildCharacterTimeContext>> = {};
     const memoryPartsByCharacter = new Map<string, PromptMemoryPart[]>();
-    const memberDataPromises = participantIds.map(async (charId): Promise<GroupMemberData | null> => {
+    const prepareMemberData = async (charId: string): Promise<GroupMemberData | null> => {
         const character = charMap.get(charId);
         if (!character) return null;
         const memberTimeContext = buildCharacterTimeContext(character.timeZone, now);
@@ -354,6 +358,7 @@ export async function buildGroupChatPromptMessages(
             ? []
             : (charSlot.worldBookIds || []).map(id => allWorldBooks.find(w => w.id === id)).filter(Boolean) as typeof allWorldBooks;
         const { wbActivationContext } = prepareShortTermContext(charId, "group_chat", {
+            activationOnly: true,
             historicalAt: options?.historicalAt,
             userName,
             excludeGroupSessionId: isOfflineMode ? undefined : session.id,
@@ -382,7 +387,18 @@ export async function buildGroupChatPromptMessages(
             longTermMemories,
             currentStateValues: getLatestCharacterStateValues(charId, options?.historicalAt === undefined ? undefined : { before: { createdAt: now.toISOString(), id: "" } }),
         };
-    });
+    };
+    const memberDataPromises: Promise<GroupMemberData | null>[] = [];
+    for (const charId of participantIds) {
+        // Yield between members, not inside Promise.all (which would resume every
+        // member in the same frame). Retrieval requests still run concurrently.
+        await checkpoint();
+        const memberTask = prepareMemberData(charId);
+        // Attach a handler while other members yield; Promise.all below still
+        // propagates the original failure instead of dropping that member.
+        void memberTask.catch(() => {});
+        memberDataPromises.push(memberTask);
+    }
 
     const memberResults = await Promise.all(memberDataPromises);
     const members = memberResults.filter(Boolean) as GroupMemberData[];
@@ -404,7 +420,7 @@ export async function buildGroupChatPromptMessages(
         truncatedHistory: truncatedAnnotatedHistory,
         wbActivationContext,
         unifiedRecentItems,
-    } = prepareGroupShortTermContext(participantIds, annotatedHistory, {
+    } = await prepareGroupShortTermContextAsync(participantIds, annotatedHistory, {
         historicalAt: options?.historicalAt,
         userName,
         excludeGroupSessionId: isOfflineMode ? undefined : session.id,
@@ -412,7 +428,7 @@ export async function buildGroupChatPromptMessages(
         includeNativeToolHistory: usesNativeActions,
         narrativeHistory: isOfflineMode,
         promptTimestampOptions: groupPromptTimestampOptions,
-    });
+    }, checkpoint);
     const promptHistory = applyVisionImagePromptLimit(
         truncatedAnnotatedHistory.map(msg => ({ ...msg })),
         resolveVisionImagePromptLimit(session),
@@ -822,6 +838,7 @@ export async function generateGroupChatCompletion(
     options?: GroupChatPromptBuildOptions & { signal?: AbortSignal; skipMemorySummarization?: boolean },
 ): Promise<{ characterId: string; characterName: string; responseText: string }[]> {
     const { llmMessages, config, preset, regexes, nameToId, memberNames, enabledTools, userName, appTags } = await buildGroupChatPromptMessages(session, history, {
+        signal: options?.signal,
         automatic: options?.automatic,
         appTags: options?.appTags,
         disableTools: options?.disableTools,
@@ -1166,6 +1183,7 @@ export async function generateGroupOfflineChatCompletion(
         history,
         {
             appTags: ["group_chat", "offline"],
+            signal: options?.signal,
             excludeOfflineSessionId: session.id,
             disableTools: true,
         },

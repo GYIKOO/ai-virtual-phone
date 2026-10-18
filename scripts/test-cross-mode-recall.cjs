@@ -65,8 +65,9 @@ function load(name) {
 }
 const text = messages => messages.map(m=>m.content).join('\n');
 const count = (haystack,needle)=>haystack.split(needle).length-1;
-function loadChatBuilders(short, assembler) {
-  const globals={exports:{},console,Date,
+function loadChatBuilders(short, assembler, yieldGroupPreparation = async()=>{}) {
+  const globals={exports:{},console,Date:ClockDate,
+    createPromptPreparationCheckpoint:signal=>()=>yieldGroupPreparation(signal),
     ...mocks['./calendar-sync'],
     ...mocks['./chat-storage'],...mocks['./character-storage'],...mocks['./settings-storage'],...mocks['./memory-storage'],
     ...mocks['./memory-service'],...mocks['./memory-injector'],...mocks['./calendar-storage'],...short,...assembler,
