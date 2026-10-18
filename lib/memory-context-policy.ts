@@ -18,6 +18,19 @@ export function compareMemoryTime(a: string, b: string): number {
   return Number.isFinite(left) && Number.isFinite(right) ? left - right : a.localeCompare(b);
 }
 
+/** Request-local parsing reuse; never cache timezone-dependent dates across sends. */
+export function createMemoryTimeComparator(): typeof compareMemoryTime {
+  const parsed = new Map<string, number>();
+  const time = (value: string) => {
+    if (!parsed.has(value)) parsed.set(value, Date.parse(value));
+    return parsed.get(value)!;
+  };
+  return (a, b) => {
+    const left = time(a), right = time(b);
+    return Number.isFinite(left) && Number.isFinite(right) ? left - right : a.localeCompare(b);
+  };
+}
+
 /** Read-time preferences only: no persisted summary, age expiry or per-page allowances. */
 export function recentContextPolicy(detail: ContextDetail = "standard") {
   return detail === "compact" ? { fullUnits: 5, narrativeUnits: 3 }
@@ -30,16 +43,19 @@ export function selectRecentContext<T extends RecentCandidate>(
   candidates: T[], budget: number, detail: ContextDetail = "standard",
   cost: (text: string, candidate: T) => number = text => estimateTokens(text) + 16,
 ): RecentSelection<T>[] {
+  const compareTime = createMemoryTimeComparator();
   // Same identity with conflicting text is not safely interchangeable.
   const unique = new Map<string, T>();
   for (const item of candidates) unique.set(JSON.stringify([item.id, item.text, item.summary || ""]), item);
-  const ordered = [...unique.values()].sort((a, b) => compareMemoryTime(a.timestamp, b.timestamp) || a.id.localeCompare(b.id));
+  const ordered = [...unique.values()].sort((a, b) => compareTime(a.timestamp, b.timestamp) || a.id.localeCompare(b.id));
   const groups = new Map<string, T[]>();
   for (const item of ordered) {
     const key = item.unitId || item.id;
-    groups.set(key, [...(groups.get(key) || []), item]);
+    const group = groups.get(key);
+    if (group) group.push(item);
+    else groups.set(key, [item]);
   }
-  const units = [...groups.values()].sort((a, b) => compareMemoryTime(b.at(-1)!.timestamp, a.at(-1)!.timestamp));
+  const units = [...groups.values()].sort((a, b) => compareTime(b.at(-1)!.timestamp, a.at(-1)!.timestamp));
   const policy = recentContextPolicy(detail);
   const narratives = units.filter(unit => unit.some(item => item.narrative)).slice(0, policy.narrativeUnits);
   const full = new Set([...units.slice(0, policy.fullUnits), ...narratives]);
@@ -67,5 +83,5 @@ export function selectRecentContext<T extends RecentCandidate>(
   const beforeRecent = used;
   for (const unit of units) { if (used - beforeRecent >= discretionary * .4) break; take(unit, discretionary * .4 - (used - beforeRecent), true); }
   for (const unit of units) take(unit, limit - used);
-  return [...selected.values()].flat().sort((a, b) => compareMemoryTime(a.candidate.timestamp, b.candidate.timestamp) || a.candidate.id.localeCompare(b.candidate.id));
+  return [...selected.values()].flat().sort((a, b) => compareTime(a.candidate.timestamp, b.candidate.timestamp) || a.candidate.id.localeCompare(b.candidate.id));
 }

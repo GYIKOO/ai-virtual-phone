@@ -2,12 +2,18 @@
 // Lightweight token estimation — zero external dependencies.
 // CJK characters ~ 1.5 char/token, Latin ~ 4 char/token, +4 overhead per message.
 
-const CJK_RANGE = /[\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F\u3000-\u303F\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]/g;
-
 export function estimateTokens(text: string): number {
     if (!text) return 0;
-    const cjkMatches = text.match(CJK_RANGE);
-    const cjkCount = cjkMatches ? cjkMatches.length : 0;
+    // Same UTF-16 ranges as the previous regexp, without allocating one match
+    // per character whenever a long narrative is costed during memory packing.
+    let cjkCount = 0;
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if ((code >= 0x2E80 && code <= 0x9FFF)
+            || (code >= 0xAC00 && code <= 0xD7AF)
+            || (code >= 0xF900 && code <= 0xFAFF)
+            || (code >= 0xFE30 && code <= 0xFE4F)) cjkCount++;
+    }
     const latinCount = text.length - cjkCount;
     return Math.ceil(cjkCount / 1.5 + latinCount / 4);
 }

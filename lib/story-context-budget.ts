@@ -1,7 +1,7 @@
 import type { LLMMessage } from "./llm-prompt-assembler";
 import type { PresetConfig } from "./settings-types";
 import { estimateTokens } from "./token-counter";
-import { selectRecentContext, compareMemoryTime, type ContextDetail } from "./memory-context-policy";
+import { selectRecentContext, compareMemoryTime, createMemoryTimeComparator, type ContextDetail } from "./memory-context-policy";
 
 export type StoryBudgetKind = "recent" | "long" | "core";
 export type StoryContextCandidate = {
@@ -51,6 +51,7 @@ export function deduplicateStoryCandidates(candidates: StoryContextCandidate[]):
 }
 
 function fairMemoryOrder(candidates: StoryContextCandidate[]): StoryContextCandidate[] {
+  const compareStoryTimes = createMemoryTimeComparator();
   const queues = new Map<string, StoryContextCandidate[]>();
   for (const candidate of [...candidates].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)
     || compareStoryTimes(b.timestamp, a.timestamp) || a.id.localeCompare(b.id))) {
@@ -77,6 +78,7 @@ type StoryPackingOptions = {
 type PackedStoryContext = { messages: LLMMessage[]; selected: SelectedStoryContext[]; estimatedTokens: number };
 
 function* storyPackingSteps(options: StoryPackingOptions): Generator<void, PackedStoryContext> {
+  const compareStoryTimes = createMemoryTimeComparator();
   const base = options.render([]);
   const baseTokens = estimateStoryMessages(base);
   if (baseTokens > options.inputBudget) {

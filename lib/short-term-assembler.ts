@@ -1065,6 +1065,8 @@ export function prepareShortTermContext(
         /** Callers with a shared budget collect candidates before trimming. Zero means untrimmed. */
         tokenBudget?: number;
         narrativeHistory?: boolean;
+        /** Retrieval needs the identical activation text, not a second packed prompt. */
+        activationOnly?: boolean;
     },
 ): {
     recentBlocks: RecentBlock[];
@@ -1104,6 +1106,7 @@ export function prepareShortTermContext(
             .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
         : timeline;
     const wbActivationContext = activationTimeline.slice(-10).map(e => e.content).join("\n");
+    if (options?.activationOnly) return { wbActivationContext, recentBlocks: [], truncatedHistory: [], unifiedRecentItems: [] };
     const characterName = loadCharacters().find(c => c.id === characterId)?.name ?? "角色";
     const wrapsCurrentHistory = appId === "chat" || appId === "group_chat" || appId === "story" || appId === "vn" || appId === "adventure";
     const skipDirectChatEntries = appId === "chat" && !options?.includeDirectChatEntries;
@@ -1328,7 +1331,7 @@ function buildNativeTimelineKey(entry: NativeTimelineEntry): string {
     return getNativeTimelineEntryKey(entry);
 }
 
-export function prepareGroupShortTermContext(
+function* prepareGroupShortTermContextSteps(
     characterIds: string[],
     history: ChatMessage[],
     options?: {
@@ -1341,11 +1344,11 @@ export function prepareGroupShortTermContext(
         promptTimestampOptions?: PromptTimestampOptions;
         narrativeHistory?: boolean;
     },
-): {
+): Generator<void, {
     truncatedHistory: ChatMessage[];
     wbActivationContext: string;
     unifiedRecentItems: UnifiedRecentItem[];
-} {
+}, void> {
     history = history.filter(m => options?.historicalAt === undefined || Date.parse(m.createdAt) <= options.historicalAt);
     const uniqueCharacterIds = [...new Set(characterIds)];
     const timelineByKey = new Map<string, NativeTimelineEntry>();
@@ -1354,6 +1357,7 @@ export function prepareGroupShortTermContext(
     const allowed = memConfig.shortTermAllowedSources ?? {};
 
     for (const characterId of uniqueCharacterIds) {
+        yield;
         let timeline = loadNativeTimeline(characterId, {
             userName: options?.userName,
             appId: "group_chat",
@@ -1373,6 +1377,7 @@ export function prepareGroupShortTermContext(
     }
 
     const timeline = [...timelineByKey.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    yield;
     const activationPool = [
         ...timeline.map(entry => ({ timestamp: entry.timestamp, content: entry.content })),
         ...history.filter(msg => msg.mediaType !== "tool_notice").map(msg => ({ timestamp: msg.createdAt, content: msg.content })),
@@ -1567,6 +1572,28 @@ export function prepareGroupShortTermContext(
     }
 
     return { truncatedHistory, wbActivationContext, unifiedRecentItems };
+}
+
+/** Sync previews and asynchronous generation share exactly the same selection. */
+export function prepareGroupShortTermContext(...args: Parameters<typeof prepareGroupShortTermContextSteps>) {
+    const steps = prepareGroupShortTermContextSteps(...args);
+    let next = steps.next();
+    while (!next.done) next = steps.next();
+    return next.value;
+}
+
+export async function prepareGroupShortTermContextAsync(
+    characterIds: string[], history: ChatMessage[],
+    options: Parameters<typeof prepareGroupShortTermContextSteps>[2],
+    checkpoint: () => Promise<void>,
+) {
+    const steps = prepareGroupShortTermContextSteps(characterIds, history, options);
+    let next = steps.next();
+    while (!next.done) {
+        await checkpoint();
+        next = steps.next();
+    }
+    return next.value;
 }
 
 /**
