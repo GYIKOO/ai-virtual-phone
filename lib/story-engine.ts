@@ -28,11 +28,13 @@ import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase }
 import { stripNarrativeTags } from "./narrative-context";
 import { contextCapacity } from "./prompt-memory-budget";
 import { createCalendarSync, calendarSyncPrompt, extractCalendarChanges } from "./calendar-sync";
+import { STORY_DISCUSSION_PROMPT, STORY_DISCUSSION_BRIEF_PROMPT, isStoryDiscussion } from "./story-discussion";
 import type { PendingCalendarChanges } from "./calendar-changes";
 
 import { DEFAULT_STORY_FOLD_TAGS, DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS, storyFoldSignature } from "./story-tag-settings";
 
 export type StoryGenerationOptions = {
+  discussion?: { id: string; brief?: boolean };
   sessionId?: string;
   retryInstruction?: string;
   sessionFoldTags?: string;
@@ -221,7 +223,7 @@ export async function generateStoryCompletion(
   }
 
   const { apiConfig, preset: resolvedPreset, regexes, worldBooks, regexSignature, summaryTag } = resolveStoryConfigs(characterId);
-  const preset = selectStoryPresetPrompts(resolvedPreset, options?.settings?.enabledPresetPromptIds);
+  const preset = selectDiscussionPreset(selectStoryPresetPrompts(resolvedPreset, options?.settings?.enabledPresetPromptIds), Boolean(options?.discussion));
   const effectiveFoldTags = options?.sessionFoldTags?.trim() ?? DEFAULT_STORY_FOLD_TAGS;
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
   const llmMessages = await buildStoryPromptMessages(
@@ -253,16 +255,21 @@ export async function generateStoryCompletion(
   if (usePresetStreaming(preset, options?.globalSettings?.streamingEnabled === true)) {
     const streamed = await sendLLMStreamRequest(apiConfig, preset, llmMessages, regexes, {
       characterName: character.name,
-    }, { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal }, {
+    }, { skipOutputRegex: true, includeReasoning: !options?.discussion, appId: "story", appTags: ["story"], signal: options?.signal }, {
       onDelta: (text) => options?.onDelta?.(text),
     });
     rawOutput = streamed.content;
   } else {
     rawOutput = await sendLLMRequestPreferStream(apiConfig, preset, llmMessages, regexes, {
       characterName: character.name,
-    }, { skipOutputRegex: true, includeReasoning: true, appId: "story", appTags: ["story"], signal: options?.signal });
+    }, { skipOutputRegex: true, includeReasoning: !options?.discussion, appId: "story", appTags: ["story"], signal: options?.signal });
   }
 
+  if (options?.discussion) {
+    if (!rawOutput.trim()) throw new ChatEngineError("讨论回复为空，请重试。");
+    return { rawText: rawOutput, renderedText: rawOutput, storySummary: "", regexSignature: "discussion", parserVersion: STORY_PARSER_VERSION,
+      promptMessages: llmMessages, model: apiConfig.defaultModel, presetName: preset?.name || "默认预设" };
+  }
   const calendarResult=extractCalendarChanges(rawOutput,calendarSnapshot);
   const parsed = parseStoryResponse(calendarResult.text, regexes, {
     summaryTag,
@@ -283,6 +290,12 @@ export async function generateStoryCompletion(
   };
 }
 
+function selectDiscussionPreset(preset: PresetConfig | null, discussing: boolean): PresetConfig | null {
+  if (!preset || !discussing) return preset;
+  return { ...preset, prompts: preset.prompts.map(prompt => prompt.marker ? prompt : { ...prompt, role: "system",
+    content: `以下为正在审阅的写作预设，供核对规则与讨论剧情使用：\n<writing_reference>\n${prompt.content}\n</writing_reference>` }) };
+}
+
 async function buildStoryPromptMessages(
   characterId: string,
   history: StoryMessage[],
@@ -297,7 +310,7 @@ async function buildStoryPromptMessages(
   storyMemory?: StoryGenerationOptions["storyMemory"],
   sessionId?: string,
   retryInstruction?: string,
-  preparation?: Pick<StoryGenerationOptions, "signal" | "onPhase">,
+  preparation?: Pick<StoryGenerationOptions, "signal" | "onPhase" | "discussion">,
 ): Promise<LLMMessage[]> {
   const character = loadCharacters().find((item) => item.id === characterId);
   if (!character) {
@@ -320,6 +333,16 @@ async function buildStoryPromptMessages(
   const timeAware = globalSettings?.timeAware !== false;
   const now = new Date();
   const finish = (messages: LLMMessage[]) => {
+    if (preparation?.discussion) {
+      messages.push({ role: "system", content: STORY_DISCUSSION_PROMPT });
+      if (instructionHistory.directorInstruction.trim()) messages.push({ role: "system", content: `近期导演要求（供讨论核对）：\n${instructionHistory.directorInstruction}` });
+      for (const row of history.filter(row => row.discussionId === preparation.discussion!.id && row.kind !== "discussion-end")) {
+        messages.push({ role: row.role === "assistant" ? "assistant" : "user", content: row.kind === "discussion-brief" ? `先前确认的要求：\n${row.rawContent}` : row.rawContent });
+      }
+      if (preparation.discussion.brief) messages.push({ role: "user", content: STORY_DISCUSSION_BRIEF_PROMPT });
+      if (retryInstruction?.trim()) messages.push({ role: "user", content: `对这次讨论回复的修改要求：\n${retryInstruction.trim()}` });
+      return messages;
+    }
     const calendarPrompt=calendarSyncPrompt(createCalendarSync(participantCharacters.map(c=>c.id),"story",historySessionId,independent));
     if(calendarPrompt) messages.push({role:"system",content:calendarPrompt});
     const settingsPrompt = buildStorySettingsPrompt(settings, userIdentity?.name ?? "用户", globalSettings, now);
@@ -344,10 +367,12 @@ async function buildStoryPromptMessages(
     characters: participantCharacters, config: memConfig, independent,
     excludedMessageIds: [...new Set([...storedMessages.map(message => message.id), ...historyIds])],
     afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
-    tail: finish([]), queryInstruction: [instructionHistory.directorInstruction, retryInstruction].filter(Boolean).join("\n"),
+    tail: finish([]), queryInstruction: [instructionHistory.directorInstruction, retryInstruction,
+      preparation?.discussion ? [...history].reverse().find(row=>row.discussionId === preparation.discussion!.id && row.role === "user")?.rawContent : ""].filter(Boolean).join("\n"),
     formatStoryMessage: message => toHistoryMessage(message, contextExcludedTags),
     cleanText: text => stripContextExcludedTags(text, contextExcludedTags),
     historySummaries: new Map(instructionHistory.history.filter(message => message.storySummary).map(message => [message.id, message.storySummary!])),
+    discussionHistory: history, activeDiscussionId: preparation?.discussion?.id,
   });
 }
 
@@ -361,9 +386,9 @@ export async function previewStoryPromptPayload(
     throw new ChatEngineError(`Character not found: ${characterId}`);
   }
   const { apiConfig, preset: resolvedPreset, regexes, worldBooks } = resolveStoryConfigs(characterId);
-  const preset = selectStoryPresetPrompts(resolvedPreset, options?.settings?.enabledPresetPromptIds);
+  const preset = selectDiscussionPreset(selectStoryPresetPrompts(resolvedPreset, options?.settings?.enabledPresetPromptIds), Boolean(options?.discussion));
   const effectiveContextExcludedTags = options?.sessionContextExcludedTags?.trim() ?? DEFAULT_STORY_CONTEXT_EXCLUDED_TAGS;
-  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, options?.settings, options?.globalSettings, options?.floatingChatContext, options?.participantIds, options?.storyMemory, options?.sessionId, options?.retryInstruction);
+  const llmMessages = await buildStoryPromptMessages(characterId, history, preset, regexes, worldBooks, effectiveContextExcludedTags, options?.settings, options?.globalSettings, options?.floatingChatContext, options?.participantIds, options?.storyMemory, options?.sessionId, options?.retryInstruction, options);
   checkEnsembleRequestBudget(characterId, options?.participantIds, apiConfig, preset, llmMessages);
   return {
     messages: previewMessagesForApi(apiConfig, preset, llmMessages),
@@ -383,7 +408,7 @@ export function rebuildStorySessionRenderCache(characterId: string, sessionId: s
   const macroEngine = new MacroEngine(character?.name ?? "", userIdentity?.name ?? "用户");
 
   const rebuilt = loadStoryMessages(sessionId).map((message) => {
-    if (message.role !== "assistant") {
+    if (message.role !== "assistant" || isStoryDiscussion(message)) {
       return {
         ...message,
         renderedContent: message.renderedContent || message.rawContent,

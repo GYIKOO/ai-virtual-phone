@@ -55,7 +55,7 @@ import { StoryHtmlRenderer, type StoryVoiceSegment } from "@/components/ui/story
 import { StorySettingsPage, STORY_DEFAULT_STATUS_RENDER, STORY_DEFAULT_THEATER_RENDER } from "@/components/story/story-settings-page";
 import { loadCharacters } from "@/lib/character-storage";
 import { maybeRunSummarization } from "@/lib/memory-summarizer";
-import { incrementEventCounter } from "@/lib/memory-storage";
+import { incrementEventCounter, loadMemoryConfig } from "@/lib/memory-storage";
 import { loadBindingConfig, loadPresets, resolveBinding, resolveUserIdentity } from "@/lib/settings-storage";
 import {
   generateStoryCompletion,
@@ -112,6 +112,8 @@ import { applyEditOutputRegex } from "@/lib/llm-prompt-assembler";
 import { MacroEngine } from "@/lib/macro-engine";
 import { getStoryRetryContext } from "@/lib/story-instructions";
 import { StoryActions, StoryDirectorNote, type StoryActionRequest } from "./story-actions";
+import { StoryDiscussionBlock, StoryDiscussionDialog } from "./story-discussion-ui";
+import { storyDiscussions, isStoryDiscussion, discussionExitMayOmitText, discussionSourceSignature } from "@/lib/story-discussion";
 import { replaceStoryMessages } from "@/lib/story-storage";
 import { kvGet, kvSet, registerKvMigration } from "@/lib/kv-db";
 import { downloadFile } from "@/lib/download-utils";
@@ -287,6 +289,7 @@ const StoryComposer = memo(function StoryComposer({
   onCurrentReadControl,
   onStop,
   tools,
+  discussionTools,
   onPlayNext,
   quickInputEnabled,
   quickInputOptions,
@@ -307,6 +310,7 @@ const StoryComposer = memo(function StoryComposer({
   onCurrentReadControl: () => void;
   onStop: () => void;
   tools?: React.ReactNode;
+  discussionTools?: React.ReactNode;
   onPlayNext: () => void;
   quickInputEnabled: boolean;
   quickInputOptions: string[];
@@ -315,6 +319,18 @@ const StoryComposer = memo(function StoryComposer({
   const [draft, setDraft] = useState("");
   const [quickPanelOpen, setQuickPanelOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!discussionTools) return;
+    const node = composerRef.current;
+    const shell = node?.closest<HTMLElement>(".story-shell-inner");
+    if (!node || !shell) return;
+    const measure = () => shell.style.setProperty("--story-discussion-bottom-space", `${Math.max(150, node.getBoundingClientRect().height + 36)}px`);
+    measure();
+    const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : undefined;
+    observer?.observe(node);
+    return () => { observer?.disconnect(); shell.style.removeProperty("--story-discussion-bottom-space"); };
+  }, [Boolean(discussionTools)]);
   const lastAppendIdRef = useRef<number | null>(null);
   // 记录输入框最近一次选区/光标：点快捷选项时按钮会抢走焦点，
   // 这时 selectionStart 已经不可靠，用这个 ref 兜底
@@ -375,7 +391,8 @@ const StoryComposer = memo(function StoryComposer({
   };
 
   return (
-    <div className="story-composer" data-quick-input={quickInputEnabled ? "true" : undefined}>
+    <div ref={composerRef} className="story-composer" data-discussing={discussionTools ? "true" : undefined} data-quick-input={quickInputEnabled ? "true" : undefined}>
+      {discussionTools}
       {tools}
       {quickInputEnabled && quickPanelOpen && quickInputOptions.length > 0 ? (
         <div className="story-quick-panel" role="toolbar" aria-label="快捷输入面板">
@@ -412,7 +429,7 @@ const StoryComposer = memo(function StoryComposer({
         onClick={onContinue}
         disabled={isGenerating}
       >
-        续写
+        {discussionTools ? "继续讨论" : "续写"}
       </button>
       {quickInputEnabled ? (
         <button
@@ -470,7 +487,7 @@ const StoryComposer = memo(function StoryComposer({
             submit();
           }
         }}
-        placeholder="你该怎么回应"
+        placeholder={discussionTools ? "和 AI 讨论写法、纠错或后续剧情……" : "你该怎么回应"}
       />
       <button
         className={`story-send-btn${isGenerating ? " is-generating" : ""}`}
@@ -526,6 +543,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
   const dragDeltaXRef = useRef(0);
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
   const [actionRequest, setActionRequest] = useState<StoryActionRequest | null>(null);
+  const [discussionDialog, setDiscussionDialog] = useState<{ sessionId: string; groupId: string; mode: "brief" | "overflow";
+    text: string; loading: boolean; signature: string; error?: string } | null>(null);
   useEffect(() => { setActionRequest(null); }, [activeSessionId]);
   const [contextMenuPoint, setContextMenuPoint] = useState<{ x: number; y: number } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
@@ -652,8 +671,10 @@ export function StoryApp({ onClose }: StoryAppProps) {
   ).filter(Boolean).slice().sort().join("|");
   const isGenerating = Boolean(activeSessionId) && generatingSessionIds.has(activeSessionId);
   const isReadOnly = Boolean(currentSession?.mergedIntoSessionId || currentSession?.mergedIntoMainAt);
+  const activeDiscussionId = currentSession?.activeDiscussionId;
+  const discussions = useMemo(() => storyDiscussions(messages), [messages]);
   const latestAssistantMessageId = useMemo(
-    () => [...messages].reverse().find((message) => message.role === "assistant")?.id || "",
+    () => [...messages].reverse().find((message) => message.role === "assistant" && !message.kind)?.id || "",
     [messages],
   );
   const isolatedPhoneTraces = useMemo(
@@ -1172,7 +1193,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
   useEffect(() => {
     if (!ready || !activeCharacterId || !currentSession || isGenerating || isReadOnly || mergingPage) return;
 
-    const activeAssistantMessages = messages.filter((message) => message.role === "assistant");
+    const activeAssistantMessages = messages.filter((message) => message.role === "assistant" && !message.kind);
     if (activeAssistantMessages.length === 0) return;
 
     // 配置解析可能抛错（如绑定的 API 配置已被删除）；这里在渲染 effect 里，
@@ -1625,11 +1646,13 @@ export function StoryApp({ onClose }: StoryAppProps) {
     if (!activeSessionId || !userText || isGenerating || isReadOnly || mergingPageRef.current) return;
     const sessionId = activeSessionId;
     const characterId = activeCharacterId;
+    const discussionId = kind ? undefined : currentSession?.activeDiscussionId;
 
     const userMessage = pushStoryMessage({
       sessionId,
       role: "user",
-      kind,
+      kind: discussionId ? "discussion" : kind,
+      discussionId,
       rawContent: userText,
       renderedContent: userText,
     });
@@ -1643,6 +1666,8 @@ export function StoryApp({ onClose }: StoryAppProps) {
     try {
       const historyForGeneration = loadStoryMessages(sessionId);
       const result = await generateStoryCompletion(characterId, historyForGeneration, {
+        sessionId,
+        discussion: discussionId ? { id: discussionId } : undefined,
         onPhase: phase => setStoryGenerationPhase(sessionId, generationRunId, phase),
         sessionFoldTags: currentSession?.foldTags,
         sessionContextExcludedTags: currentSession?.contextExcludedTags,
@@ -1662,14 +1687,18 @@ export function StoryApp({ onClose }: StoryAppProps) {
       const assistantMessage = pushStoryMessage({
         sessionId,
         role: "assistant",
+        kind: discussionId ? "discussion" : undefined,
+        discussionId,
         rawContent: result.rawText,
         renderedContent: result.renderedText,
         storySummary: result.storySummary,
         regexSignature: result.regexSignature,
         parserVersion: result.parserVersion,
       });
-      void applyAcceptedCalendarChanges(result.pendingCalendarChanges, assistantMessage.id).then(error => { if (error) showVoiceNotice(error); });
+      if (!discussionId) void applyAcceptedCalendarChanges(result.pendingCalendarChanges, assistantMessage.id).then(error => { if (error) showVoiceNotice(error); });
       refreshGenerationView(sessionId);
+
+      if (discussionId) return;
 
       const memoryCharacterIds = currentSession?.participantIds?.length ? currentSession.participantIds : [characterId];
       const storyCharacters = memoryCharacterIds
@@ -1691,6 +1720,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     } catch (error) {
       if (!isCurrentGeneration() || isAbortLikeError(error)) return;
       const errText = error instanceof Error ? error.message : "剧情生成失败，请稍后再试。";
+      if (discussionId) { showVoiceNotice(errText); return; }
       const systemMessage = pushStoryMessage({
         sessionId,
         role: "system",
@@ -1704,6 +1734,76 @@ export function StoryApp({ onClose }: StoryAppProps) {
         markGenerating(sessionId, false);
       }
     }
+  }
+
+  function startDiscussion(groupId?: string) {
+    if (!currentSession || isGenerating || isReadOnly) return;
+    if (activeDiscussionId && groupId && activeDiscussionId !== groupId) {
+      showVoiceNotice("请先结束当前讨论，再整理另一段记录。"); return;
+    }
+    updateStorySession(activeSessionId, { activeDiscussionId: groupId || activeDiscussionId || `discussion_${crypto.randomUUID()}` });
+    setAutoReading(false);
+    refreshGenerationView(activeSessionId);
+  }
+
+  function closeDiscussion(groupId: string) {
+    if (isGenerating || isReadOnly) return;
+    const rows = loadStoryMessages(activeSessionId);
+    const group = storyDiscussions(rows).find(item=>item.id === groupId);
+    if (group && !group.closed) pushStoryMessage({ sessionId: activeSessionId, role: "system", kind: "discussion-end", discussionId: groupId, rawContent: "讨论已结束" });
+    updateStorySession(activeSessionId, { activeDiscussionId: undefined });
+    setDiscussionDialog(null); refreshGenerationView(activeSessionId);
+  }
+
+  function requestDiscussionExit() {
+    if (!activeDiscussionId || isGenerating) return;
+    const group = discussions.find(item=>item.id === activeDiscussionId);
+    if (group && !group.brief && discussionExitMayOmitText(messages, loadMemoryConfig().recentContextDetail)) {
+      setDiscussionDialog({ sessionId: activeSessionId, groupId: group.id, mode: "overflow", text: "", loading: false, signature: "" });
+    } else closeDiscussion(activeDiscussionId);
+  }
+
+  async function prepareDiscussionBrief(groupId: string) {
+    if (!currentSession || isGenerating || isReadOnly || mergingPageRef.current) return;
+    if (activeDiscussionId && activeDiscussionId !== groupId) { showVoiceNotice("请先结束当前讨论。"); return; }
+    const session = currentSession, sessionId = session.id;
+    startDiscussion(groupId);
+    const history = loadStoryMessages(sessionId);
+    const signature = discussionSourceSignature(history);
+    const previous = discussionDialog?.groupId === groupId ? discussionDialog.text : "";
+    setDiscussionDialog({ sessionId, groupId, mode: "brief", text: previous, loading: true, signature });
+    markGenerating(sessionId, true);
+    const run = createStoryGenerationRun(sessionId);
+    try {
+      const result = await generateStoryCompletion(activeCharacterId, history, {
+        sessionId, discussion: { id: groupId, brief: true }, settings: session.settings, globalSettings: storyGlobalSettings,
+        sessionFoldTags: session.foldTags, sessionContextExcludedTags: session.contextExcludedTags,
+        participantIds: session.participantIds || [activeCharacterId],
+        storyMemory: { independent: session.independentStory, inheritRecentMemory: session.inheritRecentMemory ?? true, startedAt: session.createdAt },
+        signal: run.controller.signal, onPhase: phase=>setStoryGenerationPhase(sessionId, run.runId, phase),
+      });
+      if (!isStoryGenerationRunActive(sessionId, run.runId)) return;
+      setDiscussionDialog({ sessionId, groupId, mode: "brief", text: result.rawText, loading: false, signature });
+    } catch (error) {
+      if (!isStoryGenerationRunActive(sessionId, run.runId) || isAbortLikeError(error)) return;
+      setDiscussionDialog({ sessionId, groupId, mode: "brief", text: previous, loading: false, signature,
+        error: error instanceof Error ? error.message : "整理失败，可以重试或返回讨论。" });
+    } finally {
+      if (finishStoryGenerationRun(sessionId, run.runId)) markGenerating(sessionId, false);
+      setDiscussionDialog(value=>value?.sessionId === sessionId && value.groupId === groupId ? { ...value, loading: false } : value);
+    }
+  }
+
+  function confirmDiscussionBrief() {
+    const draft = discussionDialog;
+    if (!draft || draft.loading || isGenerating || isReadOnly || draft.sessionId !== activeSessionId || !draft.text.trim()) return;
+    if (draft.signature !== discussionSourceSignature(loadStoryMessages(activeSessionId))) {
+      setDiscussionDialog({ ...draft, error: "讨论或剧情记录已变化，请重新整理后确认。" }); return;
+    }
+    pushStoryMessage({ sessionId: activeSessionId, role: "assistant", kind: "discussion-brief", discussionId: draft.groupId,
+      rawContent: draft.text.trim(), renderedContent: draft.text.trim() });
+    updateStorySession(activeSessionId, { activeDiscussionId: undefined });
+    setDiscussionDialog(null); refreshGenerationView(activeSessionId);
   }
 
   // 私聊邀请/快捷新分线进入后，由角色直接开场；提示只参与本次生成，不渲染成用户气泡。
@@ -2093,7 +2193,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     // Apply runOnEdit regex rules (placement=2, isEdit=true) to the edited content.
     try {
       const { regexes } = getStoryRenderSignature(activeCharacterId);
-      if (regexes.length > 0 && messages.find(message => message.id === editingMessageId)?.kind !== "director") {
+      if (regexes.length > 0 && !messages.find(message => message.id === editingMessageId)?.kind) {
         const macroEngine = new MacroEngine(currentCharacter?.name ?? "", userIdentity?.name ?? "用户");
         newRawContent = applyEditOutputRegex(newRawContent, regexes, { macroEngine, activeTags: ["story"] });
       }
@@ -2127,6 +2227,7 @@ export function StoryApp({ onClose }: StoryAppProps) {
     const msgIndex = messages.findIndex(m => m.id === msgId);
     if (msgIndex === -1) return;
     const retryMessage = messages[msgIndex];
+    if (isStoryDiscussion(retryMessage)) { await retryDiscussionReply(retryMessage); return; }
     if (retryMessage.role !== "assistant" && retryMessage.role !== "user") return;
     const sessionId = activeSessionId;
     const characterId = activeCharacterId;
@@ -2180,6 +2281,28 @@ export function StoryApp({ onClose }: StoryAppProps) {
         markGenerating(sessionId, false);
       }
     }
+  }
+
+  async function retryDiscussionReply(message: StoryMessage) {
+    if (!message.discussionId || message.kind !== "discussion" || message.role !== "assistant" || isGenerating || isReadOnly) return;
+    const sessionId = activeSessionId;
+    const history = loadStoryMessages(sessionId);
+    const index = history.findIndex(row=>row.id === message.id);
+    if (index < 0) return;
+    markGenerating(sessionId, true);
+    const run = createStoryGenerationRun(sessionId);
+    try {
+      const result = await generateStoryCompletion(activeCharacterId, history.slice(0,index), {
+        sessionId, discussion: { id: message.discussionId }, settings: currentSession?.settings, globalSettings: storyGlobalSettings,
+        participantIds: currentSession?.participantIds, sessionContextExcludedTags: currentSession?.contextExcludedTags,
+        storyMemory: { independent: currentSession?.independentStory, inheritRecentMemory: currentSession?.inheritRecentMemory ?? true, startedAt: currentSession?.createdAt },
+        signal: run.controller.signal, onPhase: phase=>setStoryGenerationPhase(sessionId,run.runId,phase),
+      });
+      if (!isStoryGenerationRunActive(sessionId,run.runId)) return;
+      editStoryMessage(message.id,result.rawText); refreshGenerationView(sessionId);
+    } catch (error) {
+      if (isStoryGenerationRunActive(sessionId,run.runId) && !isAbortLikeError(error)) showVoiceNotice(error instanceof Error ? error.message : "讨论重试失败");
+    } finally { if (finishStoryGenerationRun(sessionId,run.runId)) markGenerating(sessionId,false); }
   }
 
   // 快捷输入面板：选项与光标位置来自公用仓库中当前角色选中的方案；选项全空时回落默认符号
@@ -2419,6 +2542,15 @@ export function StoryApp({ onClose }: StoryAppProps) {
                   </button>
                 ) : null}
                 {visibleMessages.map((message) => {
+                  if (isStoryDiscussion(message)) {
+                    const group = discussions.find(item=>item.id === message.discussionId);
+                    if (!group || group.anchor.id !== message.id) return null;
+                    return <StoryDiscussionBlock key={group.id} group={group} active={activeDiscussionId === group.id}
+                      busy={isGenerating} readOnly={isReadOnly}
+                      onPrepare={()=>{void prepareDiscussionBrief(group.id);}}
+                      onEdit={(row,text)=>{ if (!isGenerating && !isReadOnly) { editStoryMessage(row.id,text); refreshGenerationView(activeSessionId); } }}
+                      onRetry={id=>{void handleStoryRetry(id);}} />;
+                  }
                   const speakerName = message.kind === "director" ? "导演指令" : message.role === "user"
                     ? (userIdentity?.name?.trim() || "我")
                     : message.role === "assistant"
@@ -2531,14 +2663,14 @@ export function StoryApp({ onClose }: StoryAppProps) {
               <article className="story-row story-streaming-row" data-role="assistant" aria-live="polite">
                 <div className="story-msg-head">
                   <div className="story-avatar-wrap"><Avatar src={storyAvatar || undefined} name={storyDisplayName} size="md" /></div>
-                  <div className="story-msg-meta"><span className="story-msg-name">{storyDisplayName}</span><span className="story-msg-time">正在输出</span></div>
+                  <div className="story-msg-meta"><span className="story-msg-name">{activeDiscussionId ? "AI · 写作助手" : storyDisplayName}</span><span className="story-msg-time">正在输出</span></div>
                 </div>
                 <div className="story-bubble-wrap"><div className="story-bubble"><div className="story-streaming-text">{activeStreamingText}<span className="story-streaming-cursor" aria-hidden="true" /></div></div></div>
               </article>
             ) : null}
             {isGenerating && !activeStreamingText ? (
               <StoryGeneratingIndicator
-                characterName={storyDisplayName}
+                characterName={activeDiscussionId ? "AI · 写作助手" : storyDisplayName}
                 phase={getStoryGenerationPhase(activeSessionId)}
                 avatar={storyAvatar || undefined}
               />
@@ -2560,12 +2692,12 @@ export function StoryApp({ onClose }: StoryAppProps) {
         key={activeSessionId}
         isGenerating={isGenerating}
         appendRequest={composerAppendRequest}
-        voiceEnabled={Boolean(uiPrefs.voiceEnabled)}
+        voiceEnabled={!activeDiscussionId && Boolean(uiPrefs.voiceEnabled)}
         voicePlaying={Boolean(playingVoiceSegmentId)}
         voiceProgress={voiceSequenceProgress}
         onSend={(text) => { void handleSend(text); }}
         onContinue={() => { void handleSend("继续"); }}
-        autoReadingEnabled={Boolean(uiPrefs.autoReadingEnabled)}
+        autoReadingEnabled={!activeDiscussionId && Boolean(uiPrefs.autoReadingEnabled)}
         autoReading={autoReading}
         currentReadExpanded={currentReadExpanded}
         canAutoRead={messages.length > 0}
@@ -2578,8 +2710,13 @@ export function StoryApp({ onClose }: StoryAppProps) {
           else startAutoReading("current");
         }}
         onStop={handleStopGeneration}
+        discussionTools={activeDiscussionId ? <div className="story-discussion-banner" role="status"><span>剧情讨论 <small>与 AI 交流，不推进故事</small></span>
+          <button disabled={isGenerating || !discussions.some(group=>group.id === activeDiscussionId)} onClick={()=>{void prepareDiscussionBrief(activeDiscussionId);}}>整理后续要求</button>
+          <button disabled={isGenerating} onClick={requestDiscussionExit}>结束讨论</button></div> : undefined}
         tools={<StoryActions busy={isGenerating}
-          retryTarget={[...messages].reverse().find(message => message.role === "user" || message.role === "assistant")?.id}
+          discussing={Boolean(activeDiscussionId)} onDiscuss={()=>startDiscussion()}
+          retryTarget={activeDiscussionId ? [...messages].reverse().find(message=>message.discussionId === activeDiscussionId && message.kind === "discussion" && message.role === "assistant")?.id
+            : [...messages].reverse().find(message => !isStoryDiscussion(message) && (message.role === "user" || message.role === "assistant"))?.id}
           request={actionRequest} onRequest={setActionRequest}
           onSubmit={(request, instruction) => {
             setActionRequest(null);
@@ -2591,6 +2728,14 @@ export function StoryApp({ onClose }: StoryAppProps) {
         quickInputOptions={quickInputOptions}
         quickInputCursor={quickInputCursor}
       />}
+
+      {discussionDialog?.sessionId === activeSessionId && !isReadOnly && <StoryDiscussionDialog
+        mode={discussionDialog.mode} text={discussionDialog.text} loading={discussionDialog.loading} error={discussionDialog.error}
+        onChange={text=>setDiscussionDialog(value=>value ? { ...value, text } : value)}
+        onPrepare={()=>{void prepareDiscussionBrief(discussionDialog.groupId);}}
+        onConfirm={confirmDiscussionBrief}
+        onCancel={()=>{ if (discussionDialog.loading) handleStopGeneration(); setDiscussionDialog(null); }}
+        onExit={()=>closeDiscussion(discussionDialog.groupId)} />}
 
       {!isReadOnly && storySettings.floatingPhoneEnabled ? (
         <button className="story-floating-phone-ball" type="button" onClick={() => { setFloatingChatVersion((value) => value + 1); setFloatingPhoneTab("chat"); setFloatingPlusOpen(false); setFloatingPhoneOpen(true); }} aria-label="打开悬浮小手机"><MiniPhoneIcon size={18} /></button>

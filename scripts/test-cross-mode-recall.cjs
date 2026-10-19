@@ -50,7 +50,7 @@ const mocks = {
   './chat-engine': {ChatEngineError:Error,previewMessagesForApi:(_a,_p,m)=>m},
 };
 const real = new Set(['prompt-memory-budget','narrative-context','memory-context-policy','story-storage','story-tag-settings','chat-offline-storage','short-term-assembler','story-engine',
-  'story-instructions','story-constraints','story-context-budget','story-ensemble-context','story-preset-selection','story-preparation',
+  'story-instructions','story-discussion','story-constraints','story-context-budget','story-ensemble-context','story-preset-selection','story-preparation',
   'llm-prompt-assembler','story-default-prompt','macro-engine','character-time','prompt-time','recent-time-context',
   'prompt-sanitizer','state-value-parser','token-counter','character-relation-context','memory-rounds']);
 function load(name) {
@@ -143,6 +143,7 @@ function loadChatBuilders(short, assembler, yieldGroupPreparation = async()=>{})
       assert.equal(sourceCount(output,source),1,`${source} -> ${target}: one prose OR summary in final request`); edges++;
     }
     for(const secret of [eventToken('online-foreign'),eventToken('foreign'),'PROSE_foreign',eventToken('if'),'PROSE_if',eventToken('archive'),'PROSE_archive','SECRET_DIRECTOR','SECRET_THINK']) {
+      if (target === 'multi' && secret === 'SECRET_DIRECTOR') { assert.ok(output.includes(secret),'own director note remains active for three narrative replies'); continue; }
       assert.ok(!output.includes(secret),`${target}: isolation of ${secret}`);
     }
   }
@@ -279,6 +280,9 @@ function loadChatBuilders(short, assembler, yieldGroupPreparation = async()=>{})
     assert.ok(text(await consumers['online-'+id]()).includes('OUT_OF_STORY_'+id),'recent instruction stays active');
   }
   story.pushStoryMessage({sessionId:'multi',role:'user',kind:'director',rawContent:'SECRET_DIRECTOR',createdAt:newTime});
+  for (const [kind,role] of [['discussion','user'],['discussion','assistant'],['discussion-brief','assistant'],['discussion-end','system']]) {
+    story.pushStoryMessage({sessionId:'multi',role,kind,discussionId:'d',rawContent:`DISCUSSION_SECRET_${kind}_${role}`,storySummary:'DISCUSSION_SUMMARY_MUST_NOT_LEAK'});
+  }
   const native=short.loadNativeTimeline('a');
   const summarize=load('./memory-rounds').selectMemorySummarySources(native);
   for(const id of ['direct','group']) {
@@ -287,6 +291,8 @@ function loadChatBuilders(short, assembler, yieldGroupPreparation = async()=>{})
     assert.ok(JSON.stringify(summarize).includes('AVATAR_EVENT_'+id),'real system event retained');
   }
   assert.ok(!JSON.stringify(summarize).includes('SECRET_DIRECTOR'));
+  assert.ok(!JSON.stringify(native).includes('DISCUSSION_SECRET_') && !JSON.stringify(native).includes('DISCUSSION_SUMMARY_MUST_NOT_LEAK'));
+  assert.ok(!JSON.stringify(story.loadStoryRecallTurns('a')).includes('DISCUSSION_SECRET_'));
   assert.ok(!JSON.stringify(summarize).includes('DIRECTOR_ONLY'));
   assert.ok(summarize.some(row=>row.sourceDetail==='chat_offline'),'offline accepted events retained');
   assert.ok(summarize.some(row=>row.sourceDetail==='story'),'story accepted events retained');

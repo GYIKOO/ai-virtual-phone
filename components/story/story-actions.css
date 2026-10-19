@@ -27,3 +27,24 @@
 .story-director-note summary span { font-size: 11px; opacity: .65; margin-left: auto; }
 .story-director-note p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; margin: 12px 0 8px; }
 .story-director-note small { font-size: 11px; opacity: .7; }
+
+.story-composer[data-discussing="true"] { flex-wrap: wrap; }
+.story-shell-inner:has(.story-composer[data-discussing="true"]) .story-stage-inner { padding-bottom: var(--story-discussion-bottom-space, 180px); }
+.story-composer[data-discussing="true"] .story-sequence-play { display: none; }
+.story-discussion-banner { flex: 0 0 100%; display: flex; gap: 8px; align-items: center; padding: 8px 2px; color: var(--c-story-text, #475569); font: inherit; font-size: 13px; }
+.story-discussion-banner > span { flex: 1; }
+.story-discussion-banner small { display: block; font-size: 11px; opacity: .7; margin-top: 3px; }
+.story-discussion-banner button, .story-discussion-block button { border: 1px solid #94a3b840; border-radius: 8px; padding: 6px 9px; color: inherit; background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
+.story-discussion-banner button:disabled, .story-discussion-block button:disabled { opacity: .45; cursor: default; }
+.story-discussion-block { position: relative; margin: 20px 0; padding: 16px; border: 1px solid #94a3b838; border-left: 3px solid #8495ad; border-radius: 14px; color: var(--c-story-sub, #64748b); background: var(--c-story-input-inner, #f8fafc); font-family: sans-serif; font-size: 13px; line-height: 1.8; }
+.story-discussion-block > details > summary { padding-right: 25px; cursor: pointer; }
+.story-discussion-block > details > summary span { margin-left: 12px; font-size: 11px; opacity: .65; }
+.story-discussion-message { padding: 12px 0; }
+.story-discussion-message + .story-discussion-message { border-top: 1px solid #94a3b825; }
+.story-discussion-message-heading { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.story-discussion-message-heading span { flex: 1; }
+.story-discussion-message p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; }
+.story-discussion-more { position: absolute; right: 10px; top: 12px; }
+.story-discussion-menu { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.story-discussion-edit textarea { box-sizing: border-box; width: 100%; color: inherit; background: transparent; border: 1px solid #94a3b850; border-radius: 8px; padding: 10px; font: inherit; }
+.story-discussion-dialog .story-instruction-footer { flex-wrap: wrap; }
