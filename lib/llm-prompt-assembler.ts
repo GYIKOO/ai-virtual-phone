@@ -1837,29 +1837,40 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     const activationContext = input.worldBookActivationContext
         ?? history.slice(-10).map(m => m.content).join("\n");
 
-    let orderIdx = 0;
+    const processingOrder = preset ? buildProcessingOrder(preset) : [];
+    const dividerIndex = processingOrder.findIndex(p => p.marker
+        && (p.identifier === "shortTermMemory" || p.identifier === "chatHistory"));
+    const placement = (p: Prompt, index: number, offset = 0) => ({
+        role: normalizeRole(p.role),
+        depth: (p.injection_position ?? 0) !== 0
+            ? p.injection_depth ?? 0
+            : dividerIndex >= 0 && index > dividerIndex ? 0 : beforeHistoryDepth,
+        order: (dividerIndex >= 0 && index > dividerIndex && (p.injection_position ?? 0) === 0 ? 10 : 0) + index + offset,
+    });
+    const activeMarker = (identifier: string) => {
+        const index = processingOrder.findIndex(p => p.marker && p.identifier === identifier);
+        const p = processingOrder[index];
+        if (!p || !isPromptEnabled(p, preset?.prompt_order)) return null;
+        const tags = getPromptTags(p);
+        return tags && !tags.every(tag => activeTags.includes(tag)) ? null : { p, index };
+    };
 
     // Markers to skip inside <member> blocks (injected at group level instead)
     const SKIP_IN_MEMBER = new Set(["personaDescription", "characterRelations"]);
 
-    // 1. User persona block before members and chat history.
+    // Group-level and per-member blocks share the preset's ordering coordinates.
     const userPersonaText = buildUserPersonaText(userIdentity, resolvedUserName);
-    blocks.push({
+    const personaMarker = activeMarker("personaDescription");
+    if (!preset || personaMarker) blocks.push({
         text: wrapXml("personaDescription", userPersonaText),
-        role: "system",
-        depth: beforeHistoryDepth,
-        order: orderIdx++,
+        ...(personaMarker ? placement(personaMarker.p, personaMarker.index)
+            : { role: "system" as const, depth: beforeHistoryDepth, order: 0 }),
         marker: "personaDescription",
     });
 
-    // 1.5 跨成员世界书去重(多人资料包全局规则):
-    //  - 独享书(仅 1 个成员绑定):维持现状——前/后条目进该成员的 <member> 块,
-    //    at-depth 条目按深度插入聊天历史({{char}}=该成员)。
-    //  - 共享书(≥2 个成员绑定):只注入一份——"角色设定前"在全部成员块之前、
-    //    "角色设定后"在全部成员块之后、at-depth 按深度插入;
-    //    {{char}}=绑定了这本书的成员名单(不是全员名单)。
-    //  - at-depth 条目此前在群组装里被静默丢弃(只在单聊生效),本次一并修复:
-    //    插入位置与成员无关,独享/共享的区别只是去重。
+    // 跨成员世界书去重：独享书带成员归属，共享书每本注入一次。
+    // 普通条目遵循 worldInfoBefore/worldInfoAfter 标记的位置和开关；
+    // at-depth 条目独立按深度插入。共享书的 {{char}} 仅包含其绑定成员。
     // 绑定计数按角色 id(同名角色不合并,同一成员重复绑定只算一次);名字仅用于 {{char}} 展示
     const bookBinderIds = new Map<string, Set<string>>();
     const bookBinderNames = new Map<string, string[]>();
@@ -1898,12 +1909,12 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 )).trim();
             };
             const beforeText = renderJoined(activated.filter(e => isWBBeforePosition(e)));
-            if (beforeText) {
+            const beforeMarker = activeMarker("worldInfoBefore");
+            if (beforeText && (!preset || beforeMarker)) {
                 blocks.push({
                     text: beforeText,
-                    role: "system",
-                    depth: beforeHistoryDepth,
-                    order: orderIdx++,
+                    ...(beforeMarker ? placement(beforeMarker.p, beforeMarker.index)
+                        : { role: "system" as const, depth: beforeHistoryDepth, order: 1 }),
                     marker: `sharedWorldInfo(before): ${wb.name || wb.id}`,
                 });
             }
@@ -1915,9 +1926,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     }
 
     // 2. Per-member <member> blocks — preset-driven marker iteration
-    const processingOrder = preset ? buildProcessingOrder(preset) : [];
-
-    for (const m of members) {
+    for (const [memberIndex, m] of members.entries()) {
         const char = m.character;
         const engine = new MacroEngine(char.name, resolvedUserName);
         applyTimeContextToMacroEngine(
@@ -1970,20 +1979,28 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
         const wbBeforeEntries = activatedEntries.filter(e => isWBBeforePosition(e));
         const wbAfterEntries = activatedEntries.filter(e => !isWBBeforePosition(e) && !isWBAtDepthPosition(e));
 
-        // Build member content by iterating preset markers in order
-        const sections: string[] = [];
+        // Keep each member's ownership label while allowing shared preset entries
+        // to remain between markers rather than moving behind one large member block.
+        const stateSection = [
+            "<current_state>",
+            `当前该角色状态值：${formatStateValuesForPrompt(m.currentStateValues)}`,
+            "</current_state>",
+        ].join("\n");
+        let statePlaced = false;
+        const memberOffset = (memberIndex + 1) / (members.length + 2);
 
         if (preset) {
-            for (const p of processingOrder) {
+            for (const [index, p] of processingOrder.entries()) {
                 if (!isPromptEnabled(p, preset!.prompt_order)) continue;
                 if (!p.marker) continue; // only process markers inside member blocks
+                const tags = getPromptTags(p);
+                if (tags && !tags.every(tag => activeTags.includes(tag))) continue;
 
                 // Skip markers handled at group level
                 if (SKIP_IN_MEMBER.has(p.identifier)) continue;
 
-                // shortTermMemory marker: append per-member short-term blocks, then stop
                 if (p.identifier === "shortTermMemory" || p.identifier === "chatHistory") {
-                    break; // markers after divider are feature prompts, not member data
+                    continue;
                 }
 
                 // Get content for this marker using per-member data
@@ -2000,36 +2017,37 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                     markerContent = engine.expand(markerContent);
                     markerContent = postProcessTrim(markerContent).trim();
                     if (markerContent) {
-                        sections.push(markerContent);
+                        const content = [statePlaced ? "" : stateSection, markerContent].filter(Boolean).join("\n\n");
+                        statePlaced = true;
+                        blocks.push({
+                            text: `<member name="${char.name}">\n${content}\n</member>`,
+                            ...placement(p, index, memberOffset),
+                            marker: `member:${char.name}:${p.identifier}`,
+                        });
                     }
                 }
             }
         }
 
-        const stateSection = [
-            "<current_state>",
-            `当前该角色状态值：${formatStateValuesForPrompt(m.currentStateValues)}`,
-            "</current_state>",
-        ].join("\n");
-        const memberContent = postProcessTrim([stateSection, ...sections].filter(Boolean).join("\n\n")).trim();
-        if (memberContent) {
+        if (!statePlaced) {
             blocks.push({
-                text: `<member name="${char.name}">\n${memberContent}\n</member>`,
+                text: `<member name="${char.name}">\n${stateSection}\n</member>`,
                 role: "system",
                 depth: beforeHistoryDepth,
-                order: orderIdx++,
+                order: (dividerIndex >= 0 ? dividerIndex : processingOrder.length) + memberOffset,
                 marker: `member:${char.name}`,
             });
         }
     }
 
-    // 2.5 共享书"角色设定后"条目:全部成员块之后,每本书一份
+    // Shared after-character lore occupies its own preset marker, once per book.
+    const afterMarker = activeMarker("worldInfoAfter");
     for (const b of sharedAfterBlocks) {
+        if (preset && !afterMarker) continue;
         blocks.push({
             text: b.text,
-            role: "system",
-            depth: beforeHistoryDepth,
-            order: orderIdx++,
+            ...(afterMarker ? placement(afterMarker.p, afterMarker.index, (members.length + 1) / (members.length + 2))
+                : { role: "system" as const, depth: beforeHistoryDepth, order: 2 }),
             marker: b.marker,
         });
     }
@@ -2084,15 +2102,11 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
         groupEngine.offlineBilingualInstruction = input.offlineBilingualInstruction ?? "";
         groupEngine.offlineSummaryTag = input.offlineSummaryTag ?? "summary";
 
-        let afterChatHistory = false;
-        let afterOrderIdx = 0;
-
         for (let promptIndex = 0; promptIndex < processingOrder.length; promptIndex += 1) {
             const p = processingOrder[promptIndex];
 
             // 分界作用不受开关影响；开关只控制历史/短期记忆是否注入，见下方 Short-term memory 段
             if (p.marker && (p.identifier === "shortTermMemory" || p.identifier === "chatHistory")) {
-                afterChatHistory = true;
                 continue;
             }
 
@@ -2115,8 +2129,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                         }) : "";
                     const content = [...new Set([sharedRelations, ...members.map(member => member.characterRelations || "")])].filter(Boolean).join("\n\n");
                     if (content) blocks.push({ text: wrapXml("characterRelations", postProcessTrim(groupEngine.expand(content)).trim()),
-                        role: "system", depth: afterChatHistory ? 0 : beforeHistoryDepth,
-                        order: afterChatHistory ? 10 + afterOrderIdx++ : orderIdx++, marker: "characterRelations" });
+                        ...placement(p, promptIndex), marker: "characterRelations" });
                 }
                 // Skip markers (handled in <member> blocks or at group level)
                 continue;
@@ -2126,36 +2139,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
             content = postProcessTrim(content).trim();
             if (!content) continue;
 
-            const role = normalizeRole(p.role);
-
-            if ((p.injection_position ?? 0) === 0) {
-                if (afterChatHistory) {
-                    blocks.push({
-                        text: content,
-                        role,
-                        depth: 0,
-                        order: 10 + afterOrderIdx++,
-                        marker: p.name || p.identifier,
-                    });
-                } else {
-                    blocks.push({
-                        text: content,
-                        role,
-                        depth: beforeHistoryDepth,
-                        order: orderIdx++,
-                        marker: p.name || p.identifier,
-                    });
-                }
-            } else {
-                // ABSOLUTE: inject at specific chat depth
-                blocks.push({
-                    text: content,
-                    role,
-                    depth: p.injection_depth ?? 0,
-                    order: promptIndex,
-                    marker: p.name || p.identifier,
-                });
-            }
+            blocks.push({ text: content, ...placement(p, promptIndex), marker: p.name || p.identifier });
         }
     }
 

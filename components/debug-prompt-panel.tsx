@@ -145,6 +145,7 @@ export function DebugPromptPanel() {
     } | null>(null);
     const [storyOwnerKey, setStoryOwnerKey] = useState<string>("");
     const [storySessionId, setStorySessionId] = useState<string>("");
+    const storyPreviewRevisionRef = useRef(0);
 
     // VN state
     const [vnResult, setVnResult] = useState<{
@@ -186,6 +187,21 @@ export function DebugPromptPanel() {
     // 聊天存储是异步水合的：面板可能在水合完成前就算出空的会话列表，
     // 之后不点进聊天室依赖不变化，列表永远是空的。这里等水合完成后主动刷新一次。
     const [sessionsVersion, setSessionsVersion] = useState(0);
+    useEffect(() => {
+        const refreshStoryPreview = () => {
+            storyPreviewRevisionRef.current++;
+            setSessionsVersion(value => value + 1);
+            setStoryResult(null);
+        };
+        const events = ["story-owner-settings-updated", "story-session-settings-updated",
+            "settings-presets-updated", "settings-bindings-updated"];
+        events.forEach(event => window.addEventListener(event, refreshStoryPreview));
+        return () => events.forEach(event => window.removeEventListener(event, refreshStoryPreview));
+    }, []);
+    useEffect(() => {
+        storyPreviewRevisionRef.current++;
+        setStoryResult(null);
+    }, [storySessionId, mode]);
     useEffect(() => {
         let cancelled = false;
         void Promise.all([hydrateChatStorage(), hydrateStoryStorage()]).then(() => {
@@ -436,8 +452,14 @@ export function DebugPromptPanel() {
     }
 
     async function handleStoryPreview() {
-        const session = storySessionOptions.find(item => item.id === storySessionId);
-        if (!session) return;
+        // Dropdown options are display snapshots; generation must use current
+        // owner preferences (including the locally enabled preset entry IDs).
+        const revision = ++storyPreviewRevisionRef.current;
+        const session = loadStorySessions().find(item => item.id === storySessionId);
+        if (!session) {
+            setStoryResult(null);
+            return;
+        }
         setError(null);
         setLoading(true);
         try {
@@ -471,11 +493,13 @@ export function DebugPromptPanel() {
                     startedAt: session.createdAt,
                 },
             });
+            if (revision !== storyPreviewRevisionRef.current) return;
             const ownerLabel = storyOwnerOptions.find(item => item.key === storyOwnerKey)?.label.replace(/^.+? · /, "") || result.characterName;
             setStoryResult({ ...result, characterName: `${ownerLabel} · ${session.branchName || "主线剧情"}` });
             setExpandedIdx(new Set()); setBadgesShownIdx(new Set());
             requestAnimationFrame(() => { scrollRef.current?.scrollTo(0, 0); });
         } catch (e) {
+            if (revision !== storyPreviewRevisionRef.current) return;
             setError(e instanceof Error ? e.message : String(e));
             setStoryResult(null);
         } finally {
@@ -807,13 +831,13 @@ export function DebugPromptPanel() {
         const chars = loadCharacters().map(character => ({ key: `single:${character.id}`, label: `单人 · ${character.name}` }));
         const groups = loadStoryGroups().map(group => ({ key: `group:${group.id}`, label: `多人组 · ${group.name}` }));
         return [...chars, ...groups];
-    }, [sessionsVersion, enabled]);
+    }, [sessionsVersion, enabled, collapsed]);
     const storySessionOptions = useMemo(() => {
         if (!storyOwnerKey) return [];
         return loadStorySessions()
             .filter(session => getStorySessionOwnerKey(session) === storyOwnerKey)
             .sort((a, b) => (a.branchOrder ?? 0) - (b.branchOrder ?? 0));
-    }, [storyOwnerKey, sessionsVersion]);
+    }, [storyOwnerKey, sessionsVersion, collapsed]);
 
     useEffect(() => {
         if (storyOwnerKey && storyOwnerOptions.some(item => item.key === storyOwnerKey)) return;
