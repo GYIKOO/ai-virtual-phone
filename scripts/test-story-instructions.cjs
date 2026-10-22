@@ -19,8 +19,11 @@ const user = row('u', 'user', '普通扮演');
 const director = row('d', 'user', '镜头转向窗外', 'director');
 const reply = row('a', 'assistant', '正文');
 assert.equal(instructions.prepareStoryInstructionHistory([user, director]).directorInstruction, director.rawContent);
-assert.equal(instructions.prepareStoryInstructionHistory([user, director, reply]).directorInstruction, '');
-assert.equal(instructions.prepareStoryInstructionHistory([director, user]).directorInstruction, '');
+assert.equal(instructions.prepareStoryInstructionHistory([user, director, reply]).directorInstruction, director.rawContent);
+assert.equal(instructions.prepareStoryInstructionHistory([director, user]).directorInstruction, director.rawContent);
+assert.equal(instructions.prepareStoryInstructionHistory([director, reply, row('a2','assistant','第二轮')]).directorInstruction, director.rawContent);
+assert.equal(instructions.prepareStoryInstructionHistory([director, reply, row('a2','assistant','第二轮'), row('a3','assistant','第三轮')]).directorInstruction, '');
+assert.equal(instructions.prepareStoryInstructionHistory([director, row('d1','assistant','讨论','discussion'), row('d2','assistant','整理','discussion-brief')]).directorInstruction, director.rawContent);
 assert.equal(instructions.prepareStoryInstructionHistory([]).history.length, 0);
 assert.equal(instructions.prepareStoryInstructionHistory([director, row('e', 'system', '失败')]).directorInstruction, director.rawContent);
 assert.equal(instructions.prepareStoryInstructionHistory([user, director, reply]).history.length, 2);
@@ -71,6 +74,7 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   deps['./token-counter'] = load('lib/token-counter.ts');
   deps['./narrative-context'] = load('lib/narrative-context.ts');
   deps['./memory-context-policy'] = load('lib/memory-context-policy.ts', deps);
+  deps['./story-discussion'] = load('lib/story-discussion.ts', deps);
   deps['./story-preset-selection'] = load('lib/story-preset-selection.ts');
   deps['./story-preparation'] = load('lib/story-preparation.ts');
   deps['./story-context-budget'] = load('lib/story-context-budget.ts', deps);
@@ -101,7 +105,8 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   await engine.generateStoryCompletion('char', [user], { retryInstruction: '   ' });
   assert.ok(captured.every(m => !m.content.includes('编辑反馈')), 'blank retries add no editorial instruction');
   const result = await engine.generateStoryCompletion('char', saved);
-  assert.ok(captured.every(m => !m.content.includes('Request')), 'consumed and temporary instructions do not persist');
+  assert.ok(captured.some(m => m.content.includes('Request')), 'director remains active after its first narrative reply');
+  assert.ok(captured.every(m => !m.content.includes('不要下雨')), 'temporary retry requirement does not persist');
   assert.ok(!result.rawText.includes('不要下雨'));
   assert.equal(saved.length, 3, 'building a retry must not delete saved history');
   await engine.generateStoryCompletion('char', [], { sessionId: 's' });
@@ -211,6 +216,36 @@ assert.match(instructions.wrapStoryRetryInstruction('改一下'), /剧情方向�
   assert.equal(captured.at(-3).content, endingPrompt, 'shared ending rule follows voice formatting and precedes director/retry instructions');
   assert.match(captured.at(-2).content, /镜头转向窗外/);
   assert.match(captured.at(-1).content, /临时重试优先/);
+  // Discussion uses the same context builder but never the narrative parser/calendar result path.
+  const discussionRows = [user, reply, { ...row('du','user','DISCUSS_USER','discussion'), discussionId:'d' }, { ...row('da','assistant','DISCUSS_AI','discussion'), discussionId:'d' }];
+  deps['./settings-storage'].loadPresets = () => [{id:'p', prompts:[]}];
+  await engine.generateStoryCompletion('char', discussionRows, {discussion:{id:'d'}, settings:{userControlMode:'strong', enforceVoiceFormat:true}});
+  assert.match(combined(),/DISCUSS_USER/);
+  assert.match(combined(),/DISCUSS_AI/);
+  assert.match(combined(),/当前进入剧情讨论/);
+  assert.ok(!combined().includes(prompts.strong) && !combined().includes('剧情正文格式'));
+  const discussionResult = await engine.generateStoryCompletion('char',discussionRows,{discussion:{id:'d',brief:true}});
+  assert.equal(discussionResult.storySummary,'');
+  assert.equal(discussionResult.pendingCalendarChanges,undefined);
+  assert.match(captured.at(-1).content,/供用户审阅/);
+  assert.ok(!contextOptions.history.some(row=>row.content.includes('DISCUSS_')), 'discussion is outside narrative history');
+  const timed=(message,n)=>({...message,createdAt:new Date(Date.UTC(2026,9,19,0,n)).toISOString()});
+  const closedDiscussion=[timed(user,0),timed(reply,1),timed(discussionRows[2],2),timed(discussionRows[3],3),
+    timed({...row('end','system','结束','discussion-end'),discussionId:'d'},4)];
+  await engine.generateStoryCompletion('char',closedDiscussion);
+  assert.match(combined(),/DISCUSS_USER/);assert.match(combined(),/DISCUSS_AI/);
+  const withBrief=[...closedDiscussion,timed({...row('brief','assistant','CONFIRMED_GUIDANCE','discussion-brief'),discussionId:'d'},5)];
+  await engine.generateStoryCompletion('char',withBrief);
+  assert.match(combined(),/CONFIRMED_GUIDANCE/);
+  assert.ok(!combined().includes('DISCUSS_USER') && !combined().includes('DISCUSS_AI'),'confirmed brief replaces original transcript');
+  const later=Array.from({length:24},(_,i)=>timed(row(`later${i}`,i%2?'assistant':'user',`NARRATIVE_${i}`),i+10));
+  for(const history of [closedDiscussion,withBrief]) {
+    await engine.generateStoryCompletion('char',[...history,...later]);
+    assert.ok(!/DISCUSS_USER|DISCUSS_AI|CONFIRMED_GUIDANCE/.test(combined()),'both discussion and brief expire with prose window; no quota backfill');
+    assert.match(combined(),/NARRATIVE_23/);
+  }
+  console.log('PASS: final story requests retain recent discussion, replace it with approved brief, expire both without resurrection');
+  console.log('PASS: discussion request context, narrative settings bypass, plain output and no summary/calendar side effects');
   console.log('PASS: multiplayer roster, default-off/editable constraints, preset narration and independent-branch director/retry');
   console.log('PASS: user-control modes, legacy compatibility, independent editable drafts and explicit empty prompts');
   console.log('PASS: shared takeover ending rule, custom prompts, preview parity and instruction ordering');

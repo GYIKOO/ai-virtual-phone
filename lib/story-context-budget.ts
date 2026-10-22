@@ -15,6 +15,7 @@ export type StoryContextCandidate = {
   score?: number;
   narrative?: boolean;
   unitId?: string;
+  fullOnly?: boolean;
 };
 export type SelectedStoryContext = { candidate: StoryContextCandidate; text: string };
 

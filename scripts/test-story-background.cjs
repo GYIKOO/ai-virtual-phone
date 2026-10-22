@@ -11,6 +11,10 @@ function visit(node) {
   ts.forEachChild(node, visit);
 }
 visit(ast);
+const discussionAst = ts.createSourceFile('discussion.ts', fs.readFileSync('lib/story-discussion.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+const discussionPredicate = discussionAst.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'isStoryDiscussion');
+const discussionExports = {};
+evaluate(discussionPredicate.getText(discussionAst), { exports: discussionExports });
 assert.ok(auto);
 assert.ok(!source.includes('mountedRef.current && isStoryGenerationRunActive'));
 const unmount = source.slice(source.indexOf('mountedRef.current = false;'), source.indexOf('mountedRef.current = false;') + 380);
@@ -23,7 +27,7 @@ async function run(mode, invalidate) {
   const registry = {};
   const storage = { loadStoryMessages: id => rows.filter(r => r.sessionId === id), loadStorySessions: () => sessions };
   evaluate(fs.readFileSync('lib/story-generation-runs.ts', 'utf8'), { exports: registry, require: () => storage, AbortController });
-  const context = { ...registry, ...storage, exports: {}, console, Date,
+  const context = { ...registry, ...storage, ...discussionExports, activeDiscussionId: undefined, exports: {}, console, Date,
     applyAcceptedCalendarChanges:async(batch,id)=>{ assert.ok(rows.some(row=>row.id===id),'calendar only after accepted message'); calendarApplications++; return null; },
     activeSessionId: 's', activeCharacterId: 'c', isGenerating: false, isReadOnly: false, ready: true,
     currentSession: session, mergingPageRef: { current: false }, mountedRef: { current: true },

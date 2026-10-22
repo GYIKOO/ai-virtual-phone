@@ -13,7 +13,8 @@ import { formatCharactersRelationsForPrompt } from "./character-world-storage";
 import { buildRelationMentionContext } from "./character-relation-context";
 import { formatPromptTimestamp } from "./prompt-time";
 import { packStoryContext, packStoryContextAsync, storyInputBudget, estimateStoryMessages, type StoryContextCandidate, type SelectedStoryContext } from "./story-context-budget";
-import { createMemoryTimeComparator } from "./memory-context-policy";
+import { createMemoryTimeComparator, fullContextUnitIds } from "./memory-context-policy";
+import { storyDiscussions, limitDiscussionTranscripts, discussionReference, type StoryDiscussion } from "./story-discussion";
 import { yieldStoryPreparation, throwIfStoryAborted, type StoryGenerationPhase } from "./story-preparation";
 import { contextCapacity } from "./prompt-memory-budget";
 
@@ -25,6 +26,7 @@ type Candidate = StoryContextCandidate & {
   sourceTag?: string;
   macroRole?: "user" | "assistant";
   background?: "current" | "week";
+  discussion?: StoryDiscussion;
 };
 
 /** The storage is still per character; only the scene's read/selection layer is shared. */
@@ -40,6 +42,8 @@ export async function buildEnsembleStoryPrompt(options: {
   formatStoryMessage: (message: StoryMessage) => ChatMessage;
   cleanText: (text: string) => string;
   historySummaries?: Map<string, string>;
+  discussionHistory?: StoryMessage[];
+  activeDiscussionId?: string;
   signal?: AbortSignal;
   onPhase?: (phase: StoryGenerationPhase) => void;
 }): Promise<LLMMessage[]> {
@@ -116,6 +120,26 @@ export async function buildEnsembleStoryPrompt(options: {
       }
     }
   }
+  if (recentEnabled && options.discussionHistory?.length) {
+    const groups = storyDiscussions(options.discussionHistory).filter(group => group.closed && group.id !== options.activeDiscussionId);
+    const blocks: Candidate[] = groups.map(group => ({ id: `discussion:${group.id}`, unitId: `discussion:${group.id}`,
+      kind: "recent", owners: characters.map(c => c.id), timestamp: group.anchor.createdAt, text: "",
+      narrative: true, fullOnly: true, discussion: group }));
+    const full = fullContextUnitIds([...candidates.filter(c=>c.kind === "recent"), ...blocks,
+      ...mandatoryHistory.map(message => ({ id: `history:${message.id}`, unitId: `history-turn:${message.role === "user"
+        ? currentHistory[currentHistory.indexOf(message)+1]?.role === "assistant" ? currentHistory[currentHistory.indexOf(message)+1].id : message.id
+        : message.id}`, timestamp: message.createdAt, text: message.content, narrative: true }))], config.recentContextDetail);
+    const eligible = blocks.filter(block => full.has(block.unitId!));
+    const transcripts = limitDiscussionTranscripts(eligible.map(block => block.discussion!));
+    for (const block of eligible) {
+      const group = block.discussion!;
+      const text = group.brief?.rawContent || transcripts.get(group.id);
+      if (!text) continue;
+      const content = discussionReference(text, Boolean(group.brief));
+      candidates.push({ ...block, text: content, history: [{ id: block.id, sessionId: group.anchor.sessionId,
+        role: "system", content, status: "sent", createdAt: block.timestamp }] });
+    }
+  }
   // Resolve each card's {{char}} before the scene's lead-character macro pass.
   const cardText = (character: Character, text: string) => text.replace(/\{\{\s*char\s*\}\}/gi, () => character.name);
   const roster = characters.map(character => `角色资料：${character.name}\n${cardText(character, character.persona || "")}`).join("\n\n");
@@ -188,7 +212,7 @@ export async function buildEnsembleStoryPrompt(options: {
   // narrative anchors as well as recent chat so a burst of online bubbles cannot
   // erase the scene from the query. This only bounds retrieval text, not history.
   const queryRows = [...new Map<string, { id: string; timestamp: string; text: string; narrative?: boolean }>([
-    ...candidates.filter(c => c.kind === "recent").map(c => [c.id, c] as const),
+    ...candidates.filter(c => c.kind === "recent" && !c.discussion).map(c => [c.id, c] as const),
     ...currentHistory.map(message => [`history:${message.id}`, {
       id: `history:${message.id}`, timestamp: message.createdAt, text: message.content, narrative: true,
     }] as const),

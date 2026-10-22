@@ -98,7 +98,7 @@ async function main() {
   const engineText = fs.readFileSync('lib/story-engine.ts', 'utf8');
   const engineAst = ts.createSourceFile('engine.ts', engineText, ts.ScriptTarget.Latest, true);
   const entryNames = ['previewStoryPromptPayload', 'generateStoryCompletion'];
-  const entryText = entryNames.map(name => findFunction(engineAst, name).getText(engineAst)).join('\n');
+  const entryText = [...entryNames, 'selectDiscussionPreset'].map(name => findFunction(engineAst, name).getText(engineAst)).join('\n');
   const stop = new Error('ASSEMBLY_BOUNDARY');
   let selected;
   const engineContext = {

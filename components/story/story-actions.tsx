@@ -11,17 +11,19 @@ export function StoryDirectorNote({ text }: { text: string }) {
   return <details className="story-director-note">
     <summary><FilmIcon width={14} height={14} />导演指令<span>点击查看</span></summary>
     <p>{text}</p>
-    <small>只指导对应的一次生成，不作为剧情事件。</small>
+    <small>指导接下来的三轮正式剧情，不作为剧情事件。</small>
   </details>;
 }
 
 /** Shared by the real composer and the development-only, API-free preview. */
-export function StoryActions({ busy, retryTarget, request, onRequest, onSubmit }: {
+export function StoryActions({ busy, retryTarget, request, onRequest, onSubmit, onDiscuss, discussing }: {
   busy: boolean;
   retryTarget?: string;
   request: StoryActionRequest | null;
   onRequest: (request: StoryActionRequest | null) => void;
   onSubmit: (request: StoryActionRequest, instruction: string) => void;
+  onDiscuss?: () => void;
+  discussing?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState("");
@@ -73,10 +75,13 @@ export function StoryActions({ busy, retryTarget, request, onRequest, onSubmit }
         <PlusIcon width={20} height={20} style={{ transform: expanded ? "rotate(45deg)" : undefined }} />
       </button>
       {expanded && <div id={`${id}-menu`} className="story-actions-popover" aria-label="剧情工具选项">
-        <button type="button" onClick={() => onRequest({ mode: "director" })}>
-          <FilmIcon width={18} height={18} /><span>导演指令<small>指导接下来的一段剧情</small></span>
+        {onDiscuss && <button type="button" onClick={() => { setExpanded(false); onDiscuss(); }}>
+          <FilmIcon width={18} height={18} /><span>{discussing ? "正在讨论剧情" : "剧情讨论"}<small>与 AI 讨论写法、纠错与后续情节</small></span>
+        </button>}
+        <button type="button" disabled={discussing} onClick={() => onRequest({ mode: "director" })}>
+          <FilmIcon width={18} height={18} /><span>导演指令<small>指导接下来的三轮正式剧情</small></span>
         </button>
-        <button type="button" disabled={!retryTarget} onClick={() => retryTarget && onRequest({ mode: "retry", messageId: retryTarget })}>
+        <button type="button" disabled={discussing || !retryTarget} onClick={() => retryTarget && onRequest({ mode: "retry", messageId: retryTarget })}>
           <ArrowPathIcon width={18} height={18} /><span>重试上一段<small>可附加要求，也可直接重试</small></span>
         </button>
       </div>}
@@ -88,7 +93,7 @@ export function StoryActions({ busy, retryTarget, request, onRequest, onSubmit }
           <div><span className="story-instruction-eyebrow">剧情工具</span><h2 id={`${id}-title`}>{retry ? "重试这一段" : "导演指令"}</h2></div>
           <button type="button" aria-label="关闭剧情指令" onClick={close}><XMarkIcon width={21} height={21} /></button>
         </div>
-        <p id={`${id}-hint`}>{retry ? "可以指出原稿问题，也可以提出新的剧情方向。仅用于这次重试，不会保存到剧情记录。留空可直接重试。" : "用创作指令指导下一段，不会被当作你的角色对白。记录中默认折叠显示。"}</p>
+        <p id={`${id}-hint`}>{retry ? "可以指出原稿问题，也可以提出新的剧情方向。仅用于这次重试，不会保存到剧情记录。留空可直接重试。" : "指导接下来的三轮正式剧情，不会被当作角色对白。失败、重试和讨论不额外消耗轮数，记录中默认折叠。"}</p>
         <label htmlFor={`${id}-input`}>{retry ? "希望这一段如何调整？（可选）" : "希望接下来的剧情如何发展？"}</label>
         <textarea id={`${id}-input`} ref={inputRef} rows={5} value={draft} onChange={event => setDraft(event.target.value)}
           placeholder={retry ? "原稿哪里有问题，或希望怎样调整？留空直接重试……" : "例如：放慢节奏，着重描写环境与人物反应……"}

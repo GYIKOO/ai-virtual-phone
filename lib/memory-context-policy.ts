@@ -10,6 +10,7 @@ export type RecentCandidate = {
   /** Only explicit same-response identities may join assistant bubbles. */
   unitId?: string;
   required?: boolean;
+  fullOnly?: boolean;
 };
 export type RecentSelection<T extends RecentCandidate> = { candidate: T; text: string };
 
@@ -38,6 +39,23 @@ export function recentContextPolicy(detail: ContextDetail = "standard") {
       : { fullUnits: 10, narrativeUnits: 5 };
 }
 
+function fullWindowUnits<T>(units: T[], detail: ContextDetail, narrative: (unit: T) => boolean): T[] {
+  const policy = recentContextPolicy(detail);
+  return [...units.slice(0, policy.fullUnits), ...units.filter(narrative).slice(0, policy.narrativeUnits)];
+}
+
+/** Shared full-text age gate, independent of available tokens. */
+export function fullContextUnitIds(candidates: RecentCandidate[], detail: ContextDetail = "standard"): Set<string> {
+  const units = new Map<string, { timestamp: string; narrative: boolean }>();
+  for (const row of candidates) {
+    const key = row.unitId || row.id, prior = units.get(key);
+    units.set(key, { timestamp: prior && compareMemoryTime(prior.timestamp, row.timestamp) > 0 ? prior.timestamp : row.timestamp,
+      narrative: Boolean(prior?.narrative || row.narrative) });
+  }
+  const ordered = [...units].sort((a,b) => compareMemoryTime(b[1].timestamp, a[1].timestamp));
+  return new Set(fullWindowUnits(ordered, detail, ([,row])=>row.narrative).map(([id])=>id));
+}
+
 /** Shared by history adapters and the scene packer. Input is already visibility-filtered. */
 export function selectRecentContext<T extends RecentCandidate>(
   candidates: T[], budget: number, detail: ContextDetail = "standard",
@@ -58,13 +76,13 @@ export function selectRecentContext<T extends RecentCandidate>(
   const units = [...groups.values()].sort((a, b) => compareTime(b.at(-1)!.timestamp, a.at(-1)!.timestamp));
   const policy = recentContextPolicy(detail);
   const narratives = units.filter(unit => unit.some(item => item.narrative)).slice(0, policy.narrativeUnits);
-  const full = new Set([...units.slice(0, policy.fullUnits), ...narratives]);
+  const full = new Set(fullWindowUnits(units, detail, unit=>unit.some(item=>item.narrative)));
   const limit = budget > 0 ? budget : Infinity;
   const selected = new Map<T[], RecentSelection<T>[]>();
   let used = 0;
   const take = (unit: T[], allowance: number, fullOnly = false) => {
     if (selected.has(unit)) return;
-    const variants = fullOnly ? [false] : full.has(unit) ? [false, true] : [true];
+    const variants = fullOnly || unit.some(item => item.fullOnly) ? [false] : full.has(unit) ? [false, true] : [true];
     for (const compact of variants) {
       const rows = unit.map(candidate => ({ candidate, text: compact ? candidate.summary?.trim() || candidate.text : candidate.text }));
       const size = rows.reduce((sum, row) => sum + cost(row.text, row.candidate), 0);

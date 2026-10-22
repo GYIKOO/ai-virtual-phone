@@ -9,6 +9,12 @@ Dexie.dependencies.indexedDB = indexedDB;
 Dexie.dependencies.IDBKeyRange = IDBKeyRange;
 const kv = new Map(), modules = new Map();
 const events = [];
+// Synthetic writes occur synchronously; model distinct UI actions with distinct times.
+let testClock = Date.parse('2026-10-22T12:00:00Z');
+class TestDate extends Date {
+  constructor(...args) { super(...(args.length ? args : [testClock++])); }
+  static now() { return testClock++; }
+}
 const mocks = {
   dexie: Dexie,
   './kv-db': { hydrateKvDb: async () => {}, registerKvMigration() {}, kvGet: key => kv.get(key), kvSet: (key, value) => kv.set(key, value) },
@@ -23,7 +29,7 @@ function load(name) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { exports, require: load, window: { dispatchEvent: event => events.push(event) },
       CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
-      indexedDB, IDBKeyRange, console, Date, structuredClone, setTimeout, clearTimeout }, { filename });
+      indexedDB, IDBKeyRange, console, Date: TestDate, structuredClone, setTimeout, clearTimeout }, { filename });
   return exports;
 }
 (async () => {
@@ -142,6 +148,22 @@ function load(name) {
   assert.equal(parsed.summaryText, '事件摘要', 'folding preserves memory summary extraction');
   assert.match(parsed.renderedText, /RHR-FOLD:summary/);
   assert.equal(parser.parseStoryResponse('<content>正文</content><summary>兼容摘要</summary>', [], { summaryTag: 'custom_summary', foldTags: tags.DEFAULT_STORY_FOLD_TAGS }).summaryText, '兼容摘要', 'default folding preserves summary fallback when a custom summary tag is configured');
+  const discussionId = 'persisted-discussion';
+  store.updateStorySession(main.id, { activeDiscussionId: discussionId });
+  for (const [role, kind, rawContent] of [
+    ['user', 'discussion', 'DISCUSSION_USER'], ['assistant', 'discussion', 'DISCUSSION_AI'],
+    ['assistant', 'discussion-brief', 'REVIEWED_BRIEF'], ['system', 'discussion-end', 'END'],
+  ]) store.pushStoryMessage({ sessionId: main.id, role, kind, discussionId, rawContent });
+  await db.messages.toArray(); await db.sessions.toArray();
+  modules.delete('./story-storage'); store = load('./story-storage'); await store.hydrateStoryStorage();
+  assert.equal(get(main.id).activeDiscussionId, discussionId, 'active discussion survives full storage rehydration');
+  assert.notEqual(get(first.id).activeDiscussionId, discussionId, 'discussion mode stays page-local, not owner-shared');
+  assert.deepEqual(json(store.loadStoryMessages(main.id).filter(row => row.discussionId === discussionId).map(row => [row.kind, row.rawContent])),
+    [['discussion', 'DISCUSSION_USER'], ['discussion', 'DISCUSSION_AI'], ['discussion-brief', 'REVIEWED_BRIEF'], ['discussion-end', 'END']]);
+  store.updateStorySession(main.id, { activeDiscussionId: undefined }); await db.sessions.toArray();
+  modules.delete('./story-storage'); store = load('./story-storage'); await store.hydrateStoryStorage();
+  assert.equal(get(main.id).activeDiscussionId, undefined, 'ended discussion remains ended after reload');
+  console.log('PASS: discussion message types/content and active/ended mode survive storage rehydration without leaking to sibling pages');
   console.log('PASS: owner-wide preferences, legacy migration, word count/agency/presets/appearance/tags, existing and new pages, group isolation, archive protection, restart and page metadata isolation');
   console.log('PASS: summary default migration, custom/empty preservation, render folding and summary extraction');
 })().catch(error => { console.error(error); process.exitCode = 1; });

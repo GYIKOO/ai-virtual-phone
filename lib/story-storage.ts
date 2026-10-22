@@ -480,6 +480,7 @@ export type StorySession = {
   lastMessageId?: string;
   lastMessagePreview?: string;
   lastMessageAt?: string;
+  activeDiscussionId?: string;
 };
 
 export type StoryMessageRole = "user" | "assistant" | "system";
@@ -489,7 +490,8 @@ export type StoryMessage = {
   sessionId: string;
   role: StoryMessageRole;
   /** Absent on existing records. Director notes are UI history, not story events. */
-  kind?: "director";
+  kind?: "director" | "discussion" | "discussion-brief" | "discussion-end";
+  discussionId?: string;
   /** 仅控制送入剧情模型时的身份；可让系统样式卡片以用户行为进入上下文。 */
   contextRole?: StoryMessageRole;
   rawContent: string;
@@ -1252,7 +1254,7 @@ export function loadStoryProjectionEntries(
 
   for (let i = 0; i < messages.length; i++) {
     const current = messages[i];
-    if (current.role !== "assistant" || current.kind === "director") continue;
+    if (current.role !== "assistant" || current.kind) continue;
     if (options?.afterTimestamp && current.createdAt <= options.afterTimestamp) continue;
 
     const session = sessionsById.get(current.sessionId)!;
@@ -1284,7 +1286,7 @@ export function loadStoryRecallTurns(characterId: string, afterTimestamp?: strin
       || (session.independentStory && !session.includedInMemoryAt)) continue;
     let pending: StoryMessage[] = [];
     for (const message of loadStoryMessages(session.id)) {
-      if (message.kind === "director" || message.role === "system") continue;
+      if (message.kind || message.role === "system") continue;
       if (message.role === "user") { pending.push(message); continue; }
       const messages = [...pending, message].filter(item => !afterTimestamp || item.createdAt > afterTimestamp);
       pending = [];
