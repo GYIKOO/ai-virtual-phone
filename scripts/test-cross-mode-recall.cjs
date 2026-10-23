@@ -52,7 +52,8 @@ const mocks = {
 const real = new Set(['prompt-memory-budget','narrative-context','memory-context-policy','story-storage','story-tag-settings','chat-offline-storage','short-term-assembler','story-engine',
   'story-instructions','story-discussion','story-constraints','story-context-budget','story-ensemble-context','story-preset-selection','story-preparation',
   'llm-prompt-assembler','story-default-prompt','macro-engine','character-time','prompt-time','recent-time-context',
-  'prompt-sanitizer','state-value-parser','token-counter','character-relation-context','memory-rounds']);
+  'prompt-sanitizer','state-value-parser','token-counter','character-relation-context','memory-rounds',
+  'llm-provider-adapter','api-helpers','generation-parameters']);
 function load(name) {
   if (mocks[name]) return mocks[name];
   if (modules.has(name)) return modules.get(name);
@@ -297,6 +298,91 @@ function loadChatBuilders(short, assembler, yieldGroupPreparation = async()=>{})
   assert.ok(summarize.some(row=>row.sourceDetail==='chat_offline'),'offline accepted events retained');
   assert.ok(summarize.some(row=>row.sourceDetail==='story'),'story accepted events retained');
   assert.ok(story.loadStoryMessages('multi').some(row=>row.kind==='director'),'director notes remain stored');
+  // A -> accepted AI continuation -> director: the input anchor must not replay A.
+  const actionA={id:'action-a',sessionId:'single',role:'user',rawContent:'ACTION_A_ALREADY_ANSWERED',createdAt:at(60)};
+  const answerB={id:'answer-b',sessionId:'single',role:'assistant',rawContent:'ACCEPTED_PROGRESS_B',createdAt:at(61)};
+  const directionC={id:'direction-c',sessionId:'single',role:'user',kind:'director',rawContent:'DIRECTOR_ADVANCE_TIME_C',createdAt:at(62)};
+  preset.prompts.push({identifier:'ako-input-anchor',enabled:true,role:'user',content:'<user_input>\n{{lastUserMessage}}\n</user_input>\n我会在此基础上续写小说。'});
+  const directorPayload=(await engine.previewStoryPromptPayload('a',[actionA,answerB,directionC],storyOptions('single',['a']))).messages;
+  const directorText=text(directorPayload);
+  const inputAnchor=directorText.match(/<user_input>([^]*?)<\/user_input>/)[1];
+  assert.ok(inputAnchor.includes('DIRECTOR_ADVANCE_TIME_C'),'current input macro must carry the new director request');
+  assert.ok(!inputAnchor.includes('ACTION_A_ALREADY_ANSWERED'),'accepted action must not become a fresh input again');
+  assert.ok(directorText.includes('ACTION_A_ALREADY_ANSWERED') && directorText.includes('ACCEPTED_PROGRESS_B'),'both actual history turns stay intact');
+  assert.match(inputAnchor,/场外导演指令/);
+  const anchor=messages=>{
+    const body=text(messages), end=body.indexOf('</user_input>\n我会在此基础上续写小说。');
+    const start=body.lastIndexOf('<user_input>',end);
+    assert.ok(start>=0 && end>start,'actual input anchor, not prose references to the tag');
+    return body.slice(start+'<user_input>'.length,end);
+  };
+  const provider=load('./llm-provider-adapter');
+  for (const ids of [['a'],['a','b','c']]) {
+    const opts=storyOptions('single',ids);
+    const discussionRows=[
+      {id:'du',role:'user',kind:'discussion',rawContent:'DISCUSS_ADVANCE_TO_NEXT_DAY',createdAt:at(65)},
+      {id:'da',role:'assistant',kind:'discussion',rawContent:'AI_PROPOSED_NEW_OPENING',createdAt:at(66)},
+      {id:'de',role:'system',kind:'discussion-end',rawContent:'',createdAt:at(67)},
+    ].map(row=>({...row,sessionId:'single',discussionId:'retry-discussion'}));
+    for (const confirmed of [false,true]) for (const deleted of [false,true]) {
+      const edits=confirmed ? [...discussionRows,{...discussionRows[1],id:'db',kind:'discussion-brief',rawContent:'CONFIRMED_NEXT_DAY_BRIEF',createdAt:at(68)}] : discussionRows;
+      const input=[actionA,...(deleted ? [] : [answerB]),...edits];
+      const retryHistory=load('./story-instructions').getStoryRetryContext(input,deleted ? actionA.id : answerB.id);
+      const assembled=(await engine.previewStoryPromptPayload('a',retryHistory,opts)).messages;
+      const expected=confirmed ? 'CONFIRMED_NEXT_DAY_BRIEF' : 'AI_PROPOSED_NEW_OPENING';
+      assert.ok(anchor(assembled).includes(expected),'latest discussion/AI-authored brief owns the current-input anchor');
+      assert.ok(!anchor(assembled).includes(actionA.rawContent),'old action is history, not the latest editorial input');
+      assert.ok(text(assembled).includes(actionA.rawContent) && !text(assembled).includes(answerB.rawContent),'retry retains the user input, not the rejected reply');
+      assert.ok(anchor(assembled).includes('作者层面'),'discussion remains author-layer, not fictional events');
+      if (confirmed) assert.ok(!text(assembled).includes('AI_PROPOSED_NEW_OPENING'),'brief replaces raw discussion');
+      for (const api of ['OpenAI','Anthropic','Google']) {
+        const request=provider.buildProviderRequest({provider:api,apiKey:'synthetic-no-network',defaultModel:'fixture'},preset,provider.toLlmRequestMessages(assembled));
+        assert.ok(JSON.stringify(request.body).includes(expected),api+' retains newer editorial input');
+      }
+      const fresh={...actionA,id:'new-after-discussion',rawContent:'FRESH_ROLEPLAY_AFTER_DISCUSSION',createdAt:at(69)};
+      const next=(await engine.previewStoryPromptPayload('a',[...retryHistory,fresh],opts)).messages;
+      assert.ok(anchor(next).includes(fresh.rawContent) && !anchor(next).includes(expected),'normal input takes over after discussion');
+      const newerDirector={...directionC,createdAt:at(70)};
+      const directed=(await engine.previewStoryPromptPayload('a',[...retryHistory,newerDirector],opts)).messages;
+      assert.ok(anchor(directed).includes(directionC.rawContent),'newer director takes precedence over discussion');
+    }
+    const result=(await engine.previewStoryPromptPayload('a',[actionA,answerB,directionC],opts)).messages;
+    assert.ok(anchor(result).includes(directionC.rawContent));
+    assert.ok(text(result).match(/<last_char>([^]*?)<\/last_char>/)[1].includes(answerB.rawContent),'director input does not overwrite accepted-story references');
+    for (const api of ['OpenAI','Anthropic','Google']) {
+      const request=provider.buildProviderRequest({provider:api,apiKey:'synthetic-no-network',defaultModel:'fixture'},preset,provider.toLlmRequestMessages(result));
+      const encoded=JSON.stringify(request.body);
+      const converted=encoded.match(/<user_input>([^]*?)<\/user_input>/)[1];
+      assert.ok(converted.includes(directionC.rawContent) && !converted.includes(actionA.rawContent),api+' final request anchor');
+      assert.ok(encoded.indexOf(actionA.rawContent)<encoded.indexOf(answerB.rawContent),api+' history chronology');
+    }
+    const corrected=load('./story-instructions').getStoryRetryContext([actionA,answerB,directionC,{...answerB,id:'after-director',createdAt:at(63)}],'after-director');
+    const retry=(await engine.previewStoryPromptPayload('a',corrected,{...opts,retryInstruction:'EDITORIAL_FIX'})).messages;
+    assert.ok(anchor(retry).includes(directionC.rawContent),'retry keeps original director input and accepted preceding prose');
+    assert.ok(text(retry).includes(answerB.rawContent) && retry.at(-1).content.includes('EDITORIAL_FIX'));
+    const freshAction={...actionA,id:'fresh-d',rawContent:'NEW_ACTION_D',createdAt:at(64)};
+    const ordinary=(await engine.previewStoryPromptPayload('a',[actionA,answerB,directionC,{...answerB,id:'after-director',createdAt:at(63)},freshAction],opts)).messages;
+    assert.ok(anchor(ordinary).includes(freshAction.rawContent) && !anchor(ordinary).includes(directionC.rawContent),'fresh action owns input; retained director remains guidance only');
+    const originalEnabled=preset.prompts.find(p=>p.identifier==='shortTermMemory').enabled;
+    preset.prompts.find(p=>p.identifier==='shortTermMemory').enabled=false;
+    const disabled=(await engine.previewStoryPromptPayload('a',[actionA,answerB,directionC],opts)).messages;
+    assert.ok(anchor(disabled).includes(directionC.rawContent),'turn input does not depend on history marker');
+    assert.ok(!text(disabled).includes(actionA.rawContent),'does not secretly re-enable disabled history');
+    preset.prompts.find(p=>p.identifier==='shortTermMemory').enabled=originalEnabled;
+  }
+  // Optional read-only local preset check; the preset is neither edited nor bundled.
+  if (process.env.FLOAT_STORY_PRESET) {
+    const supplied=JSON.parse(fs.readFileSync(process.env.FLOAT_STORY_PRESET,'utf8'));
+    const original=JSON.parse(JSON.stringify(preset));
+    Object.assign(preset,supplied,{id:'preset'});
+    const actual=(await engine.previewStoryPromptPayload('a',[actionA,answerB,directionC],storyOptions('single',['a','b','c']))).messages;
+    assert.ok(anchor(actual).includes(directionC.rawContent) && !anchor(actual).includes(actionA.rawContent),'local preset gets current author input');
+    assert.ok(text(actual).includes(answerB.rawContent),'local preset retains accepted reply');
+    for (const key of Object.keys(preset)) delete preset[key];
+    Object.assign(preset,original);
+    console.log('PASS: supplied local story preset uses current director input without modifying preset data');
+  }
+  console.log('PASS: A -> accepted B -> director C keeps history and corrects input anchor; single/multi, retry/new action, disabled history, OpenAI/Anthropic/Gemini conversion');
   console.log('PASS: stored/recent online directions preserved, single/group summary exclusion, factual system events and accepted offline/story experiences retained');
   console.log('PASS: Oct 15 00:03 -> Oct 16 20:00 single-page return; real stores/engine/assembler retain old prose, retrieve new multi/online/offline events, activate new lore and resolve timestamped macros; director/no-clock/IF boundaries');
 })().catch(error=>{console.error(error);process.exitCode=1;});

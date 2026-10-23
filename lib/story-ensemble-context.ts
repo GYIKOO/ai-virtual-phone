@@ -149,6 +149,8 @@ export async function buildEnsembleStoryPrompt(options: {
   const relationCache = new Map<string, string>();
   const enabledLimit = (value: number | undefined) => Number.isFinite(value) && value! >= 0 ? value! : 100000;
   const limits = { recent: Math.max(0, (enabledLimit(config.shortTermTokenBudget) || 100000) - estimateStoryMessages(mandatoryHistory)), long: enabledLimit(config.longTermTokenBudget), core: enabledLimit(config.coreMemoryTokenBudget) };
+  const latestInput = !options.activeDiscussionId ? [...(options.discussionHistory || [])].reverse().find(row =>
+    row.kind !== "discussion-end" && (row.role === "user" || row.role === "assistant")) : undefined;
   const render = (selected: SelectedStoryContext[]) => {
     const chosen = selected as { candidate: Candidate; text: string }[];
     const history = [...mandatoryHistory, ...chosen.flatMap(item => item.text === item.candidate.text ? item.candidate.history || [] : [])]
@@ -180,6 +182,11 @@ export async function buildEnsembleStoryPrompt(options: {
       lastCharMessage: references.filter(row => row.role === "assistant").at(-1)?.text || "",
       lastMessage: references.at(-1)?.text || "",
     } : undefined;
+    // A completed discussion can be the newest author input even when its last
+    // substantive row was written by the AI. Reuse only the selected, bounded
+    // discussion block so this anchor cannot revive expired/excluded transcripts.
+    const currentDiscussion = latestInput?.discussionId && (latestInput.kind === "discussion" || latestInput.kind === "discussion-brief")
+      ? chosen.find(item => item.candidate.discussion?.id === latestInput.discussionId) : undefined;
     const schedules = chosen.filter(item => item.candidate.background);
     const scheduleText = (items: typeof chosen) => items.map(item => `角色：${ownersLabel(item.candidate.owners)}\n${item.text}`).join("\n\n");
     let relations = "";
@@ -197,7 +204,11 @@ export async function buildEnsembleStoryPrompt(options: {
     }
     return [...assemblePromptPayload({ ...base, history,
       worldBookActivationContext: query,
-      historyMacroContext,
+      // A current author-level input is not a narrative event, but still owns the
+      // preset's user-input anchor. Keep timeline/last-character references intact.
+      historyMacroContext: currentDiscussion
+        ? { ...historyMacroContext, ...base.historyMacroContext, lastUserMessage: currentDiscussion.text }
+        : base.historyMacroContext ? { ...historyMacroContext, ...base.historyMacroContext } : historyMacroContext,
       recentBlocks: events.length ? [{ tag: "recent_events", content: events.map(item => item.kind === "event" ? item.text : "").join("\n\n") }] : [],
       unifiedRecentItems: unified,
       coreMemories: memoryText("core"), longTermMemories: memoryText("long"),

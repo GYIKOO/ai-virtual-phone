@@ -324,6 +324,8 @@ async function buildStoryPromptMessages(
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
   const effectiveWorldBooks = mergeParticipantWorldBooks(worldBooks, participantCharacters.map((item) => item.id));
   const instructionHistory = prepareStoryInstructionHistory(history);
+  const currentDirectorInput = !preparation?.discussion && instructionHistory.currentDirectorInstruction.trim()
+    ? wrapStoryInstruction(instructionHistory.currentDirectorInstruction) : undefined;
   const historyMessages = instructionHistory.history.map((message) => toHistoryMessage(message, contextExcludedTags));
   const historyIds = new Set(history.map(message => message.id));
   const historySessionId = sessionId || history[0]?.sessionId;
@@ -363,7 +365,8 @@ async function buildStoryPromptMessages(
   };
   return buildEnsembleStoryPrompt({
     signal: preparation?.signal, onPhase: preparation?.onPhase,
-    base: { character, history: historyMessages, preset, worldBooks: effectiveWorldBooks, regexes, userIdentity, appId: "story", timeAware },
+    base: { character, history: historyMessages, preset, worldBooks: effectiveWorldBooks, regexes, userIdentity, appId: "story", timeAware,
+      historyMacroContext: currentDirectorInput ? { lastUserMessage: currentDirectorInput } : undefined },
     characters: participantCharacters, config: memConfig, independent,
     excludedMessageIds: [...new Set([...storedMessages.map(message => message.id), ...historyIds])],
     afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,

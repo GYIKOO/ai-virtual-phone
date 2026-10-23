@@ -15,13 +15,21 @@ const discussionAst = ts.createSourceFile('discussion.ts', fs.readFileSync('lib/
 const discussionPredicate = discussionAst.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'isStoryDiscussion');
 const discussionExports = {};
 evaluate(discussionPredicate.getText(discussionAst), { exports: discussionExports });
+const instructionExports = {};
+evaluate(fs.readFileSync('lib/story-instructions.ts', 'utf8'), {exports: instructionExports});
 assert.ok(auto);
 assert.ok(!source.includes('mountedRef.current && isStoryGenerationRunActive'));
 const unmount = source.slice(source.indexOf('mountedRef.current = false;'), source.indexOf('mountedRef.current = false;') + 380);
 assert.ok(!unmount.includes('cancelStoryGenerationRun'), 'view unmount must not cancel the request');
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
-async function run(mode, invalidate) {
+async function run(mode, invalidate, editorial = false, deletedReply = false) {
   let rows = mode === 'retry' ? [{ id: 'u', sessionId: 's', role: 'user', rawContent: 'original user' }, { id: 'a', sessionId: 's', role: 'assistant', rawContent: 'old answer' }] : [];
+  if (deletedReply) rows.pop();
+  const editorialRows = [{id:'du',role:'user',kind:'discussion',rawContent:'Discuss the next day'},
+    {id:'da',role:'assistant',kind:'discussion',rawContent:'Suggested correction'},
+    {id:'db',role:'assistant',kind:'discussion-brief',rawContent:'Confirmed next-day direction'}]
+    .map(row=>({...row,sessionId:'s',discussionId:'dg'}));
+  if (editorial) rows.push(...editorialRows);
   const session = { id: 's', characterId: 'c', participantIds: ['c'], autoStartPrompt: mode === 'auto' ? 'begin' : undefined };
   let sessions = [session], complete, signal, counters = 0, savedWhileUnmounted = 0, viewed = 0, mounted = true, calendarApplications = 0;
   const registry = {};
@@ -39,13 +47,18 @@ async function run(mode, invalidate) {
     updateStorySession: (_, patch) => Object.assign(session, patch),
     setMessages() {}, setStorageVersion() {}, setActiveMessageId() {}, markGenerating() {},
     refreshGenerationView: () => { if (mounted) viewed++; },
-    getStoryRetryContext: list => list.slice(0, 1),
+    getStoryRetryContext: instructionExports.getStoryRetryContext,
     incrementEventCounter: () => counters++, maybeRunSummarization: async () => {},
     isAbortLikeError: () => false,
-    generateStoryCompletion: (_, history, options) => { signal = options.signal; return new Promise(resolve => { complete = resolve; }); },
+    generateStoryCompletion: (_, history, options) => {
+      if (editorial) {
+        assert.deepEqual(Array.from(history,row=>row.id), ['u','du','da','db'], 'actual retry handler sends later editorial records');
+      }
+      signal = options.signal; return new Promise(resolve => { complete = resolve; });
+    },
   };
   evaluate(functions.get('handleSend') + '\n' + functions.get('handleStoryRetry') + `\nexports.send=handleSend;exports.retry=handleStoryRetry;exports.auto=${auto};`, context);
-  const promise = mode === 'retry' ? context.exports.retry('a', 'edit') : mode === 'auto' ? context.exports.auto() : context.exports.send('new user', mode === 'director' ? 'director' : undefined);
+  const promise = mode === 'retry' ? context.exports.retry(deletedReply ? 'u' : 'a', 'edit') : mode === 'auto' ? context.exports.auto() : context.exports.send('new user', mode === 'director' ? 'director' : undefined);
   await flush(); assert.ok(registry.getGeneratingStorySessionIds().has('s'));
   mounted = false; context.mountedRef.current = false;
   assert.equal(signal.aborted, false, 'leaving the view does not abort');
@@ -55,7 +68,7 @@ async function run(mode, invalidate) {
   if (invalidate === 'delete') sessions = [];
   if (invalidate === 'merge') session.mergedIntoSessionId = 'main';
   if (invalidate === 'edit') rows[0].rawContent = 'edited after request';
-  if (mode === 'retry') assert.ok(rows.some(r => r.rawContent === 'old answer'), 'old reply retained until successful replacement');
+  if (mode === 'retry' && !deletedReply) assert.ok(rows.some(r => r.rawContent === 'old answer'), 'old reply retained until successful replacement');
   complete({ rawText: 'new answer', renderedText: 'new answer', storySummary: 'new facts' });
   await promise; await flush();
   assert.equal(calendarApplications,invalidate ? 0 : 1,'send/director/retry/auto applies calendar only for accepted output, including unmounted views');
@@ -68,6 +81,7 @@ async function run(mode, invalidate) {
     if (mode === 'retry') assert.ok(!rows.some(r => r.rawContent === 'old answer'));
   }
   assert.equal(viewed, 0, 'old view is not updated');
+  if (editorial) assert.deepEqual(rows.filter(row=>row.discussionId === 'dg'), editorialRows, 'discussion survives successful replacement and stale/cancelled runs');
   assert.equal(registry.getGeneratingStorySessionIds().size, 0);
   assert.ok(remountNotifications > 0, 'new view can subscribe to completion and re-read persisted messages');
   unsubscribe();
@@ -77,6 +91,10 @@ async function run(mode, invalidate) {
     await run(mode);
     for (const invalidation of ['cancel', 'delete', 'merge']) await run(mode, invalidation);
     if (mode !== 'auto') await run(mode, 'edit');
+  }
+  for (const deleted of [false,true]) {
+    await run('retry', undefined, true, deleted);
+    for (const invalidation of ['cancel','delete','merge','edit']) await run('retry', invalidation, true, deleted);
   }
   console.log('PASS: real send/director/retry/auto-start handlers persist after unmount, retain summary/memory flow, notify remount, and reject cancelled/deleted/archived/edited-history results. API/storage/UI are controlled fixtures.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
