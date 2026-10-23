@@ -197,7 +197,9 @@ export async function buildEnsembleStoryPrompt(options: {
     }
     return [...assemblePromptPayload({ ...base, history,
       worldBookActivationContext: query,
-      historyMacroContext,
+      // A current author-level input is not a narrative event, but still owns the
+      // preset's user-input anchor. Keep timeline/last-character references intact.
+      historyMacroContext: base.historyMacroContext ? { ...historyMacroContext, ...base.historyMacroContext } : historyMacroContext,
       recentBlocks: events.length ? [{ tag: "recent_events", content: events.map(item => item.kind === "event" ? item.text : "").join("\n\n") }] : [],
       unifiedRecentItems: unified,
       coreMemories: memoryText("core"), longTermMemories: memoryText("long"),

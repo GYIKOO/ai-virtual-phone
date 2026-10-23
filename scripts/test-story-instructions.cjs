@@ -27,6 +27,12 @@ assert.equal(instructions.prepareStoryInstructionHistory([director, row('d1','as
 assert.equal(instructions.prepareStoryInstructionHistory([]).history.length, 0);
 assert.equal(instructions.prepareStoryInstructionHistory([director, row('e', 'system', '失败')]).directorInstruction, director.rawContent);
 assert.equal(instructions.prepareStoryInstructionHistory([user, director, reply]).history.length, 2);
+assert.equal(instructions.prepareStoryInstructionHistory([user, reply, director]).currentDirectorInstruction, director.rawContent);
+assert.equal(instructions.prepareStoryInstructionHistory([director, reply]).currentDirectorInstruction, '', 'retained guidance is not a new user input');
+assert.equal(instructions.prepareStoryInstructionHistory([director, user]).currentDirectorInstruction, '', 'fresh roleplay replaces the director input anchor');
+assert.equal(instructions.prepareStoryInstructionHistory([user, director, row('fail','system','失败')]).currentDirectorInstruction, director.rawContent);
+assert.equal(instructions.prepareStoryInstructionHistory([director, row('dai','assistant','讨论','discussion')]).currentDirectorInstruction, director.rawContent, 'discussion is not a successful narrative reply');
+assert.equal(instructions.prepareStoryInstructionHistory([director, row('d2','user','新导演指令','director')]).currentDirectorInstruction, '新导演指令');
 assert.equal(instructions.getStoryRetryContext([user, director, reply], 'a').length, 2);
 assert.equal(instructions.getStoryRetryContext([user, director, reply], 'd').length, 2);
 assert.equal(instructions.getStoryRetryContext([user], 'missing'), null);

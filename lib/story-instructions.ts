@@ -2,6 +2,14 @@ import type { StoryMessage } from "./story-storage";
 
 /** Director notes last for three successful narrative replies, including the first. */
 export function prepareStoryInstructionHistory(messages: StoryMessage[]) {
+  let latestTurnInput: StoryMessage | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.kind === "director" || (!message.kind && (message.role === "user" || message.role === "assistant"))) {
+      latestTurnInput = message;
+      break;
+    }
+  }
   const active: StoryMessage[] = [];
   let replies = 0;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -12,6 +20,7 @@ export function prepareStoryInstructionHistory(messages: StoryMessage[]) {
   return {
     history: messages.filter(message => !message.kind),
     directorInstruction: active.map(message => message.rawContent).join("\n\n"),
+    currentDirectorInstruction: latestTurnInput?.kind === "director" ? latestTurnInput.rawContent : "",
   };
 }
 
@@ -21,7 +30,7 @@ function escapeStoryInstruction(text: string): string {
 
 export function wrapStoryInstruction(text: string): string {
   const escaped = escapeStoryInstruction(text);
-  return `以下是近期仍有效的导演指令，按时间先后排列。持续的写作要求用于当前生成，一次性情节安排结合已有进展执行；后续修订以较新的要求为准。这些是创作要求，不是人物对白或已经发生的事件；事件摘要只记录正文实际发生的事情。\n<Request>\n${escaped}\n</Request>`;
+  return `以下是场外导演指令，按时间先后排列。以已有剧情的最新进展为起点，安排本轮新增的叙事内容。持续的写作要求用于当前生成，一次性情节安排结合已有进展执行；后续修订以较新的要求为准。这些是创作要求，不是人物对白或已经发生的事件；事件摘要只记录正文实际发生的事情。\n<Request>\n${escaped}\n</Request>`;
 }
 
 /** Retry notes describe an editorial revision, not necessarily new story material. */
