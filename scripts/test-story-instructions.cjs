@@ -36,6 +36,15 @@ assert.equal(instructions.prepareStoryInstructionHistory([director, row('d2','us
 assert.equal(instructions.getStoryRetryContext([user, director, reply], 'a').length, 2);
 assert.equal(instructions.getStoryRetryContext([user, director, reply], 'd').length, 2);
 assert.equal(instructions.getStoryRetryContext([user], 'missing'), null);
+const discussionRows = [row('du','user','改为次日','discussion'), row('da','assistant','次日从门外开始','discussion'),
+  row('de','system','','discussion-end')].map(item=>({...item,discussionId:'discussion-1'}));
+const ids = rows => Array.from(rows, item=>item.id);
+assert.deepEqual(ids(instructions.getStoryRetryContext([user,...discussionRows], 'u')), ['u','du','da','de'], 'deleted prose reply: retry keeps the full later discussion');
+assert.deepEqual(ids(instructions.getStoryRetryContext([user,reply,...discussionRows], 'a')), ['u','du','da','de'], 'only the rejected prose is removed');
+const brief = {...row('brief','assistant','已确认要求','discussion-brief'),discussionId:'discussion-1'};
+assert.deepEqual(ids(instructions.getStoryRetryContext([user,reply,...discussionRows,brief,director], 'a')), ['u','du','da','de','brief','d']);
+assert.deepEqual(ids(instructions.getStoryRetryContext([user,reply,...discussionRows,row('next','user','新剧情')], 'a')), ['u'], 'older-turn retries keep their rewind boundary');
+assert.deepEqual(ids(instructions.getStoryRetryContext([user,reply,director], 'a')), ['u','d']);
 assert.match(instructions.wrapStoryInstruction('</Request>'), /&lt;\/Request&gt;/);
 assert.match(instructions.wrapStoryRetryInstruction(' A & </Request> '), /A &amp; &lt;\/Request&gt;/);
 assert.ok(!instructions.wrapStoryInstruction('镜头转向窗外').includes('编辑反馈'), 'director mode retains its own semantics');

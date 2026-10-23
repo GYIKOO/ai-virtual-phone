@@ -48,5 +48,14 @@ ${escaped}
 export function getStoryRetryContext(messages: StoryMessage[], messageId: string): StoryMessage[] | null {
   const index = messages.findIndex(message => message.id === messageId);
   if (index < 0 || !["user", "assistant"].includes(messages[index].role)) return null;
-  return messages.slice(0, messages[index].role === "user" ? index + 1 : index);
+  const context = messages.slice(0, messages[index].role === "user" ? index + 1 : index);
+  const trailing = messages.slice(index + 1);
+  // Retrying the latest prose must keep subsequent editorial work, including an
+  // AI-authored confirmed brief. Older-turn retries still rewind the narrative.
+  const hasLaterNarrative = trailing.some(message => !message.kind && (message.role === "user" || message.role === "assistant"));
+  if (!hasLaterNarrative) {
+    context.push(...trailing.filter(message => message.kind === "director" || message.kind === "discussion"
+      || message.kind === "discussion-brief" || message.kind === "discussion-end"));
+  }
+  return context;
 }

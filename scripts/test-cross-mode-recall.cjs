@@ -319,6 +319,33 @@ function loadChatBuilders(short, assembler, yieldGroupPreparation = async()=>{})
   const provider=load('./llm-provider-adapter');
   for (const ids of [['a'],['a','b','c']]) {
     const opts=storyOptions('single',ids);
+    const discussionRows=[
+      {id:'du',role:'user',kind:'discussion',rawContent:'DISCUSS_ADVANCE_TO_NEXT_DAY',createdAt:at(65)},
+      {id:'da',role:'assistant',kind:'discussion',rawContent:'AI_PROPOSED_NEW_OPENING',createdAt:at(66)},
+      {id:'de',role:'system',kind:'discussion-end',rawContent:'',createdAt:at(67)},
+    ].map(row=>({...row,sessionId:'single',discussionId:'retry-discussion'}));
+    for (const confirmed of [false,true]) for (const deleted of [false,true]) {
+      const edits=confirmed ? [...discussionRows,{...discussionRows[1],id:'db',kind:'discussion-brief',rawContent:'CONFIRMED_NEXT_DAY_BRIEF',createdAt:at(68)}] : discussionRows;
+      const input=[actionA,...(deleted ? [] : [answerB]),...edits];
+      const retryHistory=load('./story-instructions').getStoryRetryContext(input,deleted ? actionA.id : answerB.id);
+      const assembled=(await engine.previewStoryPromptPayload('a',retryHistory,opts)).messages;
+      const expected=confirmed ? 'CONFIRMED_NEXT_DAY_BRIEF' : 'AI_PROPOSED_NEW_OPENING';
+      assert.ok(anchor(assembled).includes(expected),'latest discussion/AI-authored brief owns the current-input anchor');
+      assert.ok(!anchor(assembled).includes(actionA.rawContent),'old action is history, not the latest editorial input');
+      assert.ok(text(assembled).includes(actionA.rawContent) && !text(assembled).includes(answerB.rawContent),'retry retains the user input, not the rejected reply');
+      assert.ok(anchor(assembled).includes('作者层面'),'discussion remains author-layer, not fictional events');
+      if (confirmed) assert.ok(!text(assembled).includes('AI_PROPOSED_NEW_OPENING'),'brief replaces raw discussion');
+      for (const api of ['OpenAI','Anthropic','Google']) {
+        const request=provider.buildProviderRequest({provider:api,apiKey:'synthetic-no-network',defaultModel:'fixture'},preset,provider.toLlmRequestMessages(assembled));
+        assert.ok(JSON.stringify(request.body).includes(expected),api+' retains newer editorial input');
+      }
+      const fresh={...actionA,id:'new-after-discussion',rawContent:'FRESH_ROLEPLAY_AFTER_DISCUSSION',createdAt:at(69)};
+      const next=(await engine.previewStoryPromptPayload('a',[...retryHistory,fresh],opts)).messages;
+      assert.ok(anchor(next).includes(fresh.rawContent) && !anchor(next).includes(expected),'normal input takes over after discussion');
+      const newerDirector={...directionC,createdAt:at(70)};
+      const directed=(await engine.previewStoryPromptPayload('a',[...retryHistory,newerDirector],opts)).messages;
+      assert.ok(anchor(directed).includes(directionC.rawContent),'newer director takes precedence over discussion');
+    }
     const result=(await engine.previewStoryPromptPayload('a',[actionA,answerB,directionC],opts)).messages;
     assert.ok(anchor(result).includes(directionC.rawContent));
     assert.ok(text(result).match(/<last_char>([^]*?)<\/last_char>/)[1].includes(answerB.rawContent),'director input does not overwrite accepted-story references');
