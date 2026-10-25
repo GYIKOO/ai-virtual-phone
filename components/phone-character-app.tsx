@@ -38,6 +38,7 @@ import {
   type CharacterWorldGroup,
 } from "@/lib/character-world-storage";
 import { WorldTabStrip, WorldCaseSheet, NewWorldSheet } from "@/components/character/world-tabs";
+import { WorldTransferSheet } from "@/components/character/world-transfer-sheet";
 import { RelationLinkDialog, RelationPairSheet } from "@/components/character/relation-dialogs";
 import { loadMomentsConfig, saveMomentsConfig } from "@/lib/moments-storage";
 import type { CanvasBgItem } from "@/lib/character-types";
@@ -532,6 +533,7 @@ function CharListView({
   const fileRef = useRef<HTMLInputElement>(null);
   const [showNpcGen, setShowNpcGen] = useState(false);
   const [activeMoveChar, setActiveMoveChar] = useState<Character | null>(null);
+  const [transferSourceId, setTransferSourceId] = useState<string | null>(null);
   const [userIdentities, setUserIdentities] = useState<UserIdentity[]>(() => loadUserIdentities());
   const [showIdentityActions, setShowIdentityActions] = useState(false);
   const [showIdentityImport, setShowIdentityImport] = useState(false);
@@ -1642,6 +1644,7 @@ function CharListView({
       {/* 世界卷宗编辑 */}
       {showWorldEditor && currentGroup && (
         <WorldCaseSheet
+          onTransfer={() => setTransferSourceId(currentGroup.id)}
           group={currentGroup}
           onRename={name => renameCharacterWorldGroup(currentGroup.id, name)}
           onUpdateDescription={description => updateCharacterWorldDescription(currentGroup.id, description)}
@@ -1989,6 +1992,8 @@ function CharListView({
           onCancel={() => setBindingConflictNames([])}
         />
       )}
+
+      {transferSourceId && <WorldTransferSheet characters={characters} groups={worldGroups} sourceId={transferSourceId} onClose={() => setTransferSourceId(null)} onNotice={onNotice} />}
 
       {/* 转移世界 Modal */}
       {activeMoveChar && (
