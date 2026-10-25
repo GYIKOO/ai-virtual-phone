@@ -415,6 +415,7 @@ const CUSTOM_APP_CREATOR_GUIDE_LINES = [
   "`list`/`get`/`open`/`listWorlds` 需 `characters.read`；`create`/`update`/`assignWorld` 需 `characters.write`；`readState`/`writeState` 需 `characters.state.read`/`characters.state.write`；`readRelations` 需 `characters.relations.read`。`open` 打开内置角色库，不保证定位到某张卡；`assignWorld({ characterId, worldId })` 复用原生移动操作，将角色移出其它世界，并清理旧世界中涉及该角色的关系。",
   "",
   "创建或更新角色：",
+  "批量移动使用 `characters.assignWorld({ characterIds: [idA, idB], worldId })`，与单人 `characterId` 参数二选一。一次提交的同行角色之间的关系会随行，目标世界已有关系保留；与留在原世界的角色及用户身份之间的关系会清理。重复角色 ID 自动去重，任一角色或目标世界不存在则整批失败。逐次调用单人移动不会保留同行关系。",
   "",
   "```js",
   "const created = await AiPhone.characters.create({",

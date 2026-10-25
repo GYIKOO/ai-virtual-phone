@@ -35,7 +35,7 @@ function reset() {
     regexes: [{ id: 'r1', name: 'Existing', description: 'Keep', rules: [{ id: 'old', findRegex: 'x', replaceString: 'y' }] }],
     books: [{ id: 'w1' }, { id: 'w2' }],
     identities: [{ id: 'u1', name: 'User 1' }, { id: 'u2', name: 'User 2', bio: 'Second identity' }],
-    worlds: [{ id: 'world1', name: 'One', memberIds: ['a', 'b'], relations: [{ fromCharacterId: 'a', toCharacterId: 'b' }] },
+    worlds: [{ id: 'world1', name: 'One', memberIds: ['a', 'b'], relations: [{ id: 'ab', fromCharacterId: 'a', toCharacterId: 'b', label: '朋友' }] },
       { id: 'world2', name: 'Two', memberIds: [], relations: [] }],
     bindings: { globalDefaults: { apiConfigId: 'api-keep', presetId: 'preset-keep', worldBookIds: ['w1'], regexIds: ['r1'], userIdentityId: 'u1' },
       appDefaults: {}, characterBindings: [
@@ -75,10 +75,13 @@ const ctx = vm.createContext({ ...stores, app, launchContext: {}, exports: {}, c
 });
 for (const [file, name] of [
   ['lib/settings-storage.ts', 'resolveBinding'],
+  ['lib/character-world-storage.ts', 'generateId'],
+  ['lib/character-world-storage.ts', 'moveCharactersToWorld'],
   ['lib/character-world-storage.ts', 'moveCharacterToWorld'],
 ]) vm.runInContext(transpile(declaration(file, name)), ctx);
 stores.resolveBinding = ctx.resolveBinding;
 stores.moveCharacterToWorld = ctx.moveCharacterToWorld;
+stores.moveCharactersToWorld = ctx.moveCharactersToWorld;
 // Host module itself is loaded, not a rewritten implementation. Only external stores/services are substituted.
 ctx.require = () => stores;
 vm.runInContext(transpile(read('lib/custom-app-host-api.ts')), ctx);
@@ -133,6 +136,14 @@ async function main() {
   await sdk.characters.assignWorld({ characterId: 'a', worldId: 'world2' });
   equal(state.worlds.map(w => w.memberIds), [['b'], ['a']]);
   equal(state.worlds[0].relations, []); // Native world transfer semantics, not a new relation policy.
+  reset();
+  await rejected(() => sdk.characters.assignWorld({ characterIds: ['a', 'missing'], worldId: 'world2' }), /不存在/);
+  await rejected(() => sdk.characters.assignWorld({ characterIds: [], worldId: 'world2' }), /非空/);
+  await rejected(() => sdk.characters.assignWorld({ characterId: 'a', characterIds: ['a', 'b'], worldId: 'world2' }), /一种/);
+  await sdk.characters.assignWorld({ characterIds: ['a', 'b', 'a'], worldId: 'world2' });
+  equal(state.worlds.map(w => w.memberIds), [[], ['a', 'b']]);
+  equal(state.worlds[1].relations, [{ id: 'ab', fromCharacterId: 'a', toCharacterId: 'b', label: '朋友' }]);
+  equal((await sdk.characters.listWorlds({ characterId: 'b' })).currentWorldId, 'world2');
 
   await rejected(() => sdk.regex.create({ id: 'r1' }), /ID/);
   await rejected(() => sdk.regex.update({ id: 'Existing', name: 'Do not match by name' }), /准确 ID/);
@@ -173,6 +184,7 @@ async function main() {
   await rejected(() => sdk.story.updateBindings({ characterId: 'missing' }), /有效/);
   app.permissions = ['characters.read', 'regex.read', 'story.read'];
   await rejected(() => sdk.characters.update({ id: 'a' }), /characters.write/);
+  await rejected(() => sdk.characters.assignWorld({ characterIds: ['a', 'b'], worldId: 'world1' }), /characters.write/);
   await rejected(() => sdk.regex.delete('r1'), /regex.write/);
   await rejected(() => sdk.story.updateBindings({ characterId: 'a' }), /story.write/);
   equal(Object.keys(sdk.story).sort(), ['getBindings', 'updateBindings']);

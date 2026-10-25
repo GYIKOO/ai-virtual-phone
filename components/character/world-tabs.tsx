@@ -63,12 +63,14 @@ export function WorldCaseSheet({
   onUpdateDescription,
   onDelete,
   onClose,
+  onTransfer,
 }: {
   group: CharacterWorldGroup;
   onRename: (name: string) => void;
   onUpdateDescription: (description: string) => void;
   onDelete: () => void;
   onClose: () => void;
+  onTransfer?: () => void;
 }) {
   const [name, setName] = useState(group.name);
   const [description, setDescription] = useState(group.description);
@@ -102,6 +104,7 @@ export function WorldCaseSheet({
           onChange={e => setDescription(e.target.value)}
           placeholder="写下这个世界的背景、时代、阵营边界、共同常识或角色互动前提…"
         />
+        {onTransfer && <button type="button" className="wt-btn" onClick={() => { save(); onTransfer(); }}>批量转移角色</button>}
         <div className="wt-paper-actions">
           {!isDefault && (
             confirmDelete ? (

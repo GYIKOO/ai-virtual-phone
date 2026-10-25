@@ -69,6 +69,7 @@ import {
   getCharacterWorldGroupId,
   loadCharacterWorldGroups,
   moveCharacterToWorld,
+  moveCharactersToWorld,
 } from "./character-world-storage";
 import type { ApiConfig, BindingSlot, RegexConfig, RegexRule, VoiceApiConfig, WorldBookConfig, WorldBookEntry } from "./settings-types";
 import { createSTTSession } from "./stt-service";
@@ -1323,8 +1324,16 @@ export function readCustomAppCharacterWorlds(record: Record<string, unknown>): R
 }
 
 export function writeCustomAppCharacterWorld(record: Record<string, unknown>): Record<string, unknown> {
-  const characterId = cleanText(record.characterId, 160);
   const worldId = cleanText(record.worldId, 160);
+  if (Object.prototype.hasOwnProperty.call(record, "characterIds")) {
+    if (Object.prototype.hasOwnProperty.call(record, "characterId")) throw new Error("请使用 characterId 或 characterIds 中的一种。");
+    if (!Array.isArray(record.characterIds) || !record.characterIds.length
+      || record.characterIds.some(id => typeof id !== "string" || !id)) throw new Error("characterIds 需要非空角色 ID 数组。");
+    const characterIds = Array.from(new Set(record.characterIds as string[]));
+    moveCharactersToWorld(characterIds, worldId);
+    return { ok: true, characterIds, worldId };
+  }
+  const characterId = cleanText(record.characterId, 160);
   if (!loadCharacters().some(character => character.id === characterId)) {
     throw new Error("characters.assignWorld 需要有效的 characterId。");
   }

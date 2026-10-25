@@ -278,22 +278,53 @@ export function deleteCharacterWorldGroup(groupId: string): void {
 }
 
 export function moveCharacterToWorld(characterId: string, groupId: string): void {
+    moveCharactersToWorld([characterId], groupId);
+}
+
+/** Move a cohort in one write, carrying only relations between its members. */
+export function moveCharactersToWorld(characterIds: string[], groupId: string): void {
+    if (!Array.isArray(characterIds) || !characterIds.length
+        || characterIds.some(id => typeof id !== "string" || !id)) {
+        throw new Error("请选择要转移的角色。");
+    }
+    const selected = new Set(characterIds);
+    const knownIds = new Set(loadCharacters().map(character => character.id));
+    if ([...selected].some(id => !knownIds.has(id))) throw new Error("部分角色已不存在，请重新选择。");
+    const groups = loadCharacterWorldGroups();
+    const target = groups.find(group => group.id === groupId);
+    if (!target) throw new Error("目标世界已不存在，请重新选择。");
+    const moving = new Set([...selected].filter(id => !target.memberIds.includes(id)));
+    if (!moving.size) return;
+    const carried = groups.filter(group => group.id !== groupId).flatMap(group =>
+        group.relations.filter(relation => moving.has(relation.fromCharacterId) && moving.has(relation.toCharacterId))
+    );
+    const relations = [...target.relations];
+    const relationKey = (relation: CharacterWorldRelation) =>
+        JSON.stringify([relation.fromCharacterId, relation.toCharacterId, relation.label.trim()]);
+    const keys = new Set(relations.map(relationKey));
+    const ids = new Set(relations.map(relation => relation.id));
+    for (const relation of carried) {
+        const key = relationKey(relation);
+        if (keys.has(key)) continue;
+        let id = relation.id;
+        while (ids.has(id)) id = generateId("relation");
+        relations.push({ ...relation, id });
+        keys.add(key);
+        ids.add(id);
+    }
     const now = new Date().toISOString();
-    saveCharacterWorldGroups(loadCharacterWorldGroups().map(group => {
-        const nextMemberIds = group.memberIds.filter(id => id !== characterId);
-        const receivesMember = group.id === groupId;
-        const memberIds = receivesMember ? [...nextMemberIds, characterId] : nextMemberIds;
-        const memberSet = new Set([
-            ...memberIds,
-            ...loadUserIdentities().map(identity => getCharacterWorldUserNodeId(identity.id)),
-        ]);
+    saveCharacterWorldGroups(groups.map(group => {
+        if (group.id === groupId) return {
+            ...group, memberIds: [...target.memberIds, ...moving], relations, updatedAt: now,
+        };
+        if (!group.memberIds.some(id => moving.has(id))) return group;
         return {
             ...group,
-            memberIds,
+            memberIds: group.memberIds.filter(id => !moving.has(id)),
             relations: group.relations.filter(relation =>
-                memberSet.has(relation.fromCharacterId) && memberSet.has(relation.toCharacterId)
+                !moving.has(relation.fromCharacterId) && !moving.has(relation.toCharacterId)
             ),
-            updatedAt: receivesMember || nextMemberIds.length !== group.memberIds.length ? now : group.updatedAt,
+            updatedAt: now,
         };
     }));
 }
